@@ -32,8 +32,8 @@ def run_backtest(
         raise ValueError("Need at least 2 dates for backtest")
 
     conn.execute(
-        "INSERT INTO backtest_runs(run_id,created_at,top_n,start_date,end_date) VALUES(?,?,?,?,?)",
-        (run_id, created_at, top_n, start_date, end_date),
+        "INSERT INTO backtest_runs(run_id,created_at,top_n,start_date,end_date,initial_equity) VALUES(?,?,?,?,?,?)",
+        (run_id, created_at, top_n, start_date, end_date, float(initial_equity)),
     )
 
     equity = initial_equity
