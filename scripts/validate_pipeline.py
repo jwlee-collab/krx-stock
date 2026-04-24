@@ -18,11 +18,12 @@ def main() -> None:
     p = argparse.ArgumentParser(description="Validate full SQLite pipeline")
     p.add_argument("--db", default="data/market_pipeline.db")
     p.add_argument("--top-n", type=int, default=3)
+    p.add_argument("--skip-universe-filter-validation", action="store_true")
     args = p.parse_args()
 
     conn = get_connection(args.db)
     init_db(conn)
-    result = validate_pipeline(conn, top_n=args.top_n)
+    result = validate_pipeline(conn, top_n=args.top_n, validate_universe_filter=not args.skip_universe_filter_validation)
     print(json.dumps(result, indent=2))
 
 

@@ -31,31 +31,44 @@ def generate_daily_scores(
     conn: sqlite3.Connection,
     as_of_date: str | None = None,
     include_history: bool = False,
+    allowed_symbols: list[str] | None = None,
 ) -> int:
     """Generate scores for one date (latest or provided) or all dates (historical mode)."""
+    score_date: str | None = as_of_date
+    symbol_filter_sql = ""
+    symbol_filter_params: list[str] = []
+    if allowed_symbols is not None:
+        if not allowed_symbols:
+            return 0
+        symbol_filter_sql = f" AND symbol IN ({','.join('?' for _ in allowed_symbols)})"
+        symbol_filter_params = allowed_symbols
+
     if include_history:
         rows = conn.execute(
-            """
+            f"""
             SELECT symbol,date,ret_1d,ret_5d,momentum_20d,range_pct,volume_z20
             FROM daily_features
+            WHERE 1=1 {symbol_filter_sql}
             ORDER BY date, symbol
-            """
+            """,
+            symbol_filter_params,
         ).fetchall()
     else:
         target = as_of_date
         if target is None:
             v = conn.execute("SELECT MAX(date) AS d FROM daily_features").fetchone()
             target = v["d"] if v else None
+        score_date = target
         if not target:
             return 0
         rows = conn.execute(
-            """
+            f"""
             SELECT symbol,date,ret_1d,ret_5d,momentum_20d,range_pct,volume_z20
             FROM daily_features
-            WHERE date = ?
+            WHERE date = ? {symbol_filter_sql}
             ORDER BY symbol
             """,
-            (target,),
+            [target, *symbol_filter_params],
         ).fetchall()
 
     by_date: dict[str, list[tuple[str, float]]] = defaultdict(list)
@@ -79,5 +92,18 @@ def generate_daily_scores(
         """,
         out_rows,
     )
+
+    if allowed_symbols is not None:
+        if include_history:
+            conn.execute(
+                f"DELETE FROM daily_scores WHERE symbol NOT IN ({','.join('?' for _ in allowed_symbols)})",
+                allowed_symbols,
+            )
+        else:
+            if score_date:
+                conn.execute(
+                    f"DELETE FROM daily_scores WHERE date=? AND symbol NOT IN ({','.join('?' for _ in allowed_symbols)})",
+                    [score_date, *allowed_symbols],
+                )
     conn.commit()
     return conn.total_changes - before
