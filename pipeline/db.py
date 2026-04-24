@@ -130,6 +130,55 @@ def init_db(conn: sqlite3.Connection) -> None:
             FOREIGN KEY (report_id) REFERENCES performance_report_runs(report_id)
         );
 
+
+        CREATE TABLE IF NOT EXISTS robustness_experiment_batches (
+            batch_id TEXT PRIMARY KEY,
+            created_at TEXT NOT NULL,
+            db_path TEXT NOT NULL,
+            end_date TEXT NOT NULL,
+            rebalance_frequency TEXT NOT NULL,
+            notes TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS robustness_experiment_results (
+            experiment_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            batch_id TEXT NOT NULL,
+            run_id TEXT NOT NULL,
+            start_date TEXT NOT NULL,
+            end_date TEXT NOT NULL,
+            period_months INTEGER NOT NULL,
+            top_n INTEGER NOT NULL,
+            min_holding_days INTEGER NOT NULL,
+            keep_rank_threshold INTEGER NOT NULL,
+            keep_rank_offset INTEGER NOT NULL,
+            scoring_version TEXT NOT NULL,
+            rebalance_frequency TEXT NOT NULL,
+            total_return REAL NOT NULL,
+            max_drawdown REAL NOT NULL,
+            sharpe REAL NOT NULL,
+            trade_count INTEGER NOT NULL,
+            candidate_avg_return REAL NOT NULL,
+            excess_return_vs_universe REAL NOT NULL,
+            robustness_score REAL NOT NULL,
+            FOREIGN KEY (batch_id) REFERENCES robustness_experiment_batches(batch_id),
+            FOREIGN KEY (run_id) REFERENCES backtest_runs(run_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS robustness_experiment_stability (
+            stability_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            batch_id TEXT NOT NULL,
+            stability_group_key TEXT NOT NULL,
+            num_periods INTEGER NOT NULL,
+            mean_total_return REAL NOT NULL,
+            std_total_return REAL NOT NULL,
+            mean_sharpe REAL NOT NULL,
+            worst_mdd REAL NOT NULL,
+            mean_excess_return_vs_universe REAL NOT NULL,
+            mean_trade_count REAL NOT NULL,
+            stability_score REAL NOT NULL,
+            FOREIGN KEY (batch_id) REFERENCES robustness_experiment_batches(batch_id)
+        );
+
         CREATE TABLE IF NOT EXISTS paper_positions (
             symbol TEXT PRIMARY KEY,
             qty REAL NOT NULL,
@@ -157,6 +206,8 @@ def init_db(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_prices_date ON daily_prices(date);
         CREATE INDEX IF NOT EXISTS idx_features_date ON daily_features(date);
         CREATE INDEX IF NOT EXISTS idx_scores_date_rank ON daily_scores(date, rank);
+        CREATE INDEX IF NOT EXISTS idx_robustness_results_batch_score ON robustness_experiment_results(batch_id, robustness_score DESC);
+        CREATE INDEX IF NOT EXISTS idx_robustness_stability_batch_score ON robustness_experiment_stability(batch_id, stability_score DESC);
         """
     )
 
