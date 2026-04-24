@@ -69,8 +69,20 @@ def main() -> None:
         symbols = _parse_symbols(args.symbols)
         if not symbols:
             symbols = resolve_krx_symbols(markets=markets, as_of_date=args.end_date)
+            if not symbols:
+                raise RuntimeError(
+                    "시장 유니버스 자동 수집 결과가 0개입니다. "
+                    "--market 값을 확인하거나 네트워크/pykrx 설치 상태를 점검하세요."
+                )
+            print(f"[universe] auto-resolved symbols={len(symbols)} markets={markets}")
         end_date = args.end_date or date.today().isoformat()
         ing = ingest_krx_prices(conn, symbols=symbols, start_date=args.start_date, end_date=end_date)
+        if ing == 0:
+            raise RuntimeError(
+                "가격 데이터 적재 건수가 0입니다. "
+                "시장 휴장일 범위이거나 네트워크 응답 문제일 수 있습니다. "
+                "입력 값(--start-date, --end-date, --market/--symbols)을 확인하세요."
+            )
 
     feat = generate_daily_features(conn)
 
@@ -93,6 +105,21 @@ def main() -> None:
             f"[universe_filter] before={universe_summary['before_count']} after={universe_summary['after_count']} removed={universe_summary['removed_count']}"
         )
         print(f"[universe_filter] removed_by_reason={json.dumps(universe_summary['removed_by_reason'], ensure_ascii=False)}")
+        if universe_summary["after_count"] == 0:
+            summary = {
+                "db": args.db,
+                "source": args.source,
+                "ingest_changes": ing,
+                "feature_changes": feat,
+                "universe_filter": universe_summary,
+                "status": "skipped",
+                "skip_reason": (
+                    "유니버스 필터 결과 후보군이 0개여서 scoring/backtest/paper trading을 실행하지 않았습니다. "
+                    "필터 임계값 또는 데이터 기간을 완화해 재실행하세요."
+                ),
+            }
+            print(json.dumps(summary, indent=2, ensure_ascii=False))
+            return
 
     score = generate_daily_scores(conn, include_history=True, allowed_symbols=selected_symbols)
     run_id = run_backtest(conn, top_n=args.top_n)
@@ -112,4 +139,8 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        print(f"[error] {e}", file=sys.stderr)
+        raise SystemExit(1)

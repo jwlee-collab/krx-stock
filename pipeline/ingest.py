@@ -4,6 +4,7 @@ import csv
 import sqlite3
 from datetime import date, datetime
 from pathlib import Path
+from urllib.request import Request, urlopen
 
 
 def normalize_krx_symbol(symbol: str) -> str:
@@ -27,6 +28,40 @@ def _to_iso_date(value: str) -> str:
     if "-" in value:
         return datetime.strptime(value, "%Y-%m-%d").date().isoformat()
     return datetime.strptime(value, "%Y%m%d").date().isoformat()
+
+
+def _validate_markets(markets: list[str] | None) -> list[str]:
+    selected = [m.upper() for m in (markets or ["KOSPI", "KOSDAQ"])]
+    supported = {"KOSPI", "KOSDAQ"}
+    invalid = [m for m in selected if m not in supported]
+    if invalid:
+        raise ValueError(f"Unsupported market values: {invalid}. Use KOSPI, KOSDAQ, or ALL.")
+    return selected
+
+
+def _kind_market_type(market: str) -> str:
+    mapping = {
+        "KOSPI": "stockMkt",
+        "KOSDAQ": "kosdaqMkt",
+    }
+    return mapping[market]
+
+
+def _fetch_kind_symbols(market: str) -> set[str]:
+    market_type = _kind_market_type(market)
+    url = f"https://kind.krx.co.kr/corpgeneral/corpList.do?method=download&marketType={market_type}"
+    req = Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urlopen(req, timeout=15) as resp:
+        body = resp.read()
+
+    decoded = body.decode("euc-kr", errors="replace")
+    reader = csv.DictReader(decoded.splitlines())
+    symbols: set[str] = set()
+    for row in reader:
+        code = (row.get("종목코드") or "").strip()
+        if code.isdigit():
+            symbols.add(normalize_krx_symbol(code))
+    return symbols
 
 
 def _upsert_price_rows(conn: sqlite3.Connection, rows: list[tuple]) -> int:
@@ -77,19 +112,50 @@ def ingest_daily_prices_csv(conn: sqlite3.Connection, csv_path: str | Path) -> i
 
 
 def resolve_krx_symbols(markets: list[str] | None = None, as_of_date: str | None = None) -> list[str]:
-    """Resolve KRX tickers for requested markets using pykrx."""
-    try:
-        from pykrx import stock
-    except ImportError as e:
-        raise ImportError("pykrx is required for KRX data ingestion. Install with: pip install pykrx") from e
+    """Resolve KRX tickers for requested markets.
 
+    Primary: pykrx market ticker API.
+    Fallback: public KRX KIND corporation list download (no login).
+    """
     target_date = _to_yyyymmdd(as_of_date) if as_of_date else date.today().strftime("%Y%m%d")
-    selected = markets or ["KOSPI", "KOSDAQ"]
+    selected = _validate_markets(markets)
+
+    pykrx_stock = None
+    pykrx_error = None
+    try:
+        from pykrx import stock as pykrx_stock
+    except ImportError:
+        pykrx_error = "pykrx is not installed"
+    except Exception as e:  # pragma: no cover - defensive guard for pykrx runtime failures
+        pykrx_error = str(e)
 
     symbols: set[str] = set()
+    fallback_errors: list[str] = []
     for market in selected:
-        symbols.update(stock.get_market_ticker_list(date=target_date, market=market))
-    return sorted(normalize_krx_symbol(s) for s in symbols)
+        market_symbols: set[str] = set()
+        if pykrx_stock is not None:
+            try:
+                tickers = pykrx_stock.get_market_ticker_list(date=target_date, market=market)
+                market_symbols.update(normalize_krx_symbol(s) for s in tickers if s)
+            except Exception as e:  # pragma: no cover - network/runtime dependent
+                pykrx_error = str(e)
+
+        if not market_symbols:
+            try:
+                market_symbols = _fetch_kind_symbols(market)
+            except Exception as e:  # pragma: no cover - network/runtime dependent
+                fallback_errors.append(f"{market}:{e}")
+        symbols.update(market_symbols)
+
+    if not symbols:
+        pykrx_hint = f" pykrx_error={pykrx_error}" if pykrx_error else ""
+        fallback_hint = f" fallback_error={'; '.join(fallback_errors)}" if fallback_errors else ""
+        raise RuntimeError(
+            f"Failed to resolve market symbols for markets={selected}. "
+            "Both pykrx and public KIND fallback returned 0 symbols."
+            f"{pykrx_hint}{fallback_hint}"
+        )
+    return sorted(symbols)
 
 
 def ingest_krx_prices(

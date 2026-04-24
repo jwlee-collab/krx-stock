@@ -93,6 +93,16 @@ python scripts/run_pipeline.py \
 
 `--symbols`를 생략하면 `--market` 기준으로 티커를 자동 수집합니다.
 
+시장 자동 수집은 아래 순서로 동작합니다.
+
+1. `pykrx.stock.get_market_ticker_list(...)` 시도
+2. 실패하거나 0건이면 공개 KIND 다운로드(`https://kind.krx.co.kr/...corpList.do?method=download`)로 fallback
+
+즉, `--market` 경로는 로그인 환경변수(`KRX_ID`, `KRX_PW`)에 의존하지 않도록 구성되어 있습니다.
+
+수집 실패 시에는 뒤 단계(backtest)까지 진행하지 않고, 앞단에서 명확한 오류 메시지로 종료합니다.
+또한 유니버스 필터 결과가 0개이면 scoring/backtest/paper trading을 건너뛰고, 원인 요약을 출력합니다.
+
 ### 3-1) 전체 시장 스캔 시 유니버스 필터
 
 기본적으로 `run_pipeline.py`는 **스코어링 전에** 다음 필터를 적용합니다.
@@ -189,3 +199,34 @@ score = 0.20*ret_1d + 0.35*ret_5d + 0.35*momentum_20d + 0.10*volume_z20 - 0.05*r
 !python scripts/run_pipeline.py --source krx --market KOSPI --start-date 2025-01-01 --end-date 2025-12-31 --top-n 5
 !python scripts/validate_pipeline.py --db data/market_pipeline.db --top-n 5
 ```
+
+### Colab 점검 명령 (시장 유니버스 경로)
+
+아래 명령으로 `--market` 자동 수집 경로를 안전하게 점검할 수 있습니다.
+
+```bash
+!python scripts/run_pipeline.py \
+  --source krx \
+  --db data/market_pipeline_kospi.db \
+  --market KOSPI \
+  --start-date 2025-01-01 \
+  --end-date 2025-12-31 \
+  --top-n 5
+
+!python scripts/run_pipeline.py \
+  --source krx \
+  --db data/market_pipeline_all.db \
+  --market ALL \
+  --start-date 2025-01-01 \
+  --end-date 2025-12-31 \
+  --top-n 5 \
+  --min-close-price 1000 \
+  --min-avg-dollar-volume-20d 100000000 \
+  --min-avg-volume-20d 10000
+```
+
+실패 시 점검 포인트:
+- `pip install -U pykrx` 재설치
+- Colab 런타임 네트워크 상태 확인
+- 날짜 범위(`--start-date`, `--end-date`)가 모두 휴장일/미래일이 아닌지 확인
+- 필터가 너무 강하면(`after=0`) 임계값을 완화해서 재실행
