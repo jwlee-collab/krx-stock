@@ -192,14 +192,16 @@ python scripts/validate_pipeline.py --db data/market_pipeline.db --top-n 3
 python scripts/generate_performance_report.py \
   --db data/market_pipeline.db \
   --baseline-run-id <daily_run_id> \
-  --improved-run-id <improved_run_id> \
+  --improved-run-id <improved_old_run_id> \
+  --improved-new-run-id <improved_new_run_id> \
   --benchmark KOSPI \
   --output-dir data/reports
 ```
 
 옵션:
 - `--baseline-run-id`: baseline 전략 run_id (일간 리밸런싱 권장)
-- `--improved-run-id`: 개선 전략 run_id (weekly/min-holding/keep-threshold 적용)
+- `--improved-run-id`: 개선 전략(run_id, 기존 scoring)
+- `--improved-new-run-id`: 개선 전략(run_id, 새 scoring)
 - `--run-id`: (하위호환) improved run_id alias
 - `--benchmark`: `KOSPI` 또는 `KOSPI200` 선호값
 
@@ -215,9 +217,10 @@ python scripts/generate_performance_report.py \
 
 비교 기준(동일 후보군/동일 교집합 기간):
 1. `baseline_strategy`: 기존 일간 리밸런싱 전략
-2. `improved_strategy`: 개선 전략(주간 리밸런싱 + 최소 보유기간 + 유지 규칙)
-3. `equal_weight_universe`: 같은 날짜의 `daily_scores` 후보군 전체를 동일비중으로 보유
-4. `benchmark_kospi`: pykrx 인덱스(`KOSPI=1001`, `KOSPI200=1028`) 조회를 우선 사용
+2. `improved_strategy_old`: 개선 전략(기존 scoring)
+3. `improved_strategy_new`: 개선 전략(새 scoring, 선택 입력)
+4. `equal_weight_universe`: 같은 날짜의 `daily_scores` 후보군 전체를 동일비중으로 보유
+5. `benchmark_kospi`: pykrx 인덱스(`KOSPI=1001`, `KOSPI200=1028`) 조회를 우선 사용
    - 인덱스 데이터를 가져오지 못하면 `daily_prices` 전체 동일비중 프록시를 자동 사용
    - 실제 사용된 소스는 `performance_report_runs.benchmark_source`와 리포트 JSON 출력에서 확인 가능
 
@@ -230,16 +233,16 @@ python scripts/generate_performance_report.py \
 - 평균 보유 종목 수
 
 리포트 해석 팁:
-- `improved_strategy`가 `baseline_strategy`보다 거래 횟수는 크게 낮고, 수익률 저하가 제한적이면 개선 성공으로 해석할 수 있습니다.
-- `improved_strategy`가 `equal_weight_universe`/`benchmark_kospi` 대비 우수하더라도 `MDD/변동성`까지 함께 확인해야 합니다.
+- `improved_strategy_old/new`가 `baseline_strategy`보다 거래 횟수는 크게 낮고, 수익률 저하가 제한적이면 매매 구조 개선이 유효했다고 볼 수 있습니다.
+- `improved_strategy_new`가 `improved_strategy_old`를 이기고, 동시에 `equal_weight_universe`/`benchmark_kospi` 격차를 줄이면 점수식 개선 효과로 해석할 수 있습니다.
 - `실제 초기 자본`과 `첫 기록 시점 자산`이 다른 이유는, 본 백테스트가 `d0→d1` 수익률을 첫 행에 기록하기 때문입니다.
 
 ## Data model (핵심 테이블)
 
 - `daily_prices(symbol, date, open, high, low, close, volume)`
-- `daily_features(symbol, date, ret_1d, ret_5d, momentum_20d, range_pct, volume_z20)`
+- `daily_features(symbol, date, ret_1d, ret_5d, momentum_20d, momentum_60d, sma_20_gap, sma_60_gap, range_pct, volatility_20d, volume_z20)`
 - `daily_scores(symbol, date, score, rank)`
-- `backtest_runs(run_id, created_at, top_n, start_date, end_date, initial_equity, rebalance_frequency, min_holding_days, keep_rank_threshold)`
+- `backtest_runs(run_id, created_at, top_n, start_date, end_date, initial_equity, rebalance_frequency, min_holding_days, keep_rank_threshold, scoring_profile)`
 - `backtest_results(run_id, date, equity, daily_return, position_count)`
 - `performance_report_runs(report_id, base_run_id, benchmark_name, benchmark_source, start_date, end_date, ...)`
 - `performance_report_summary(report_id, strategy_key, actual_initial_capital, first_recorded_equity, ending_equity, ... )`
@@ -249,16 +252,63 @@ python scripts/generate_performance_report.py \
 - `paper_rebalance_log(as_of_date, executed_at, rebalance_frequency)`
 - `paper_orders(order_id, created_at, symbol, side, qty, price, reason)`
 
-## Unified scoring behavior
+## Scoring 철학과 해석 (노이즈 완화 중심)
 
-동일 스코어 공식을 최신/히스토리컬 모두에 사용합니다.
+`run_pipeline.py --scoring-profile`로 점수식을 선택할 수 있습니다.
+- `improved_v1`: 기존 식(단기 신호 반응이 상대적으로 큼)
+- `improved_v2`: 중기 추세 중심 신호(권장)
 
+### 기존 점수식 (`improved_v1`)
 ```text
-score = 0.20*ret_1d + 0.35*ret_5d + 0.35*momentum_20d + 0.10*volume_z20 - 0.05*range_pct
+score_v1 = 0.20*ret_1d + 0.35*ret_5d + 0.35*momentum_20d + 0.10*volume_z20 - 0.05*range_pct
 ```
+- `ret_1d`는 하루 노이즈(뉴스/수급 급변)에 민감합니다.
+- `range_pct`는 단기 변동폭이라 추세 신호보다 이벤트성 흔들림을 반영하기 쉽습니다.
+
+### 새 점수식 (`improved_v2`)
+```text
+score_v2 =
+  0.15*ret_5d
++ 0.35*momentum_20d
++ 0.30*momentum_60d
++ 0.12*sma_20_gap
++ 0.10*sma_60_gap
++ 0.05*volume_z20
+- 0.03*range_pct
+- 0.04*volatility_20d
+```
+
+해석:
+- `ret_1d`는 제거해 단기 노이즈 반응을 줄였습니다.
+- `momentum_20d`, `momentum_60d` 비중을 높여 중기 추세 지속 가능성에 가중치를 둡니다.
+- `sma_20_gap`, `sma_60_gap`으로 “현재 가격이 이동평균 위에 있는가”를 단순/설명 가능하게 반영합니다.
+- `range_pct`, `volatility_20d`는 penalty 성격으로 유지해 과열/과도 변동 종목을 점수에서 자연스럽게 감점합니다.
 
 - Latest scoring: `generate_daily_scores(..., include_history=False)`
 - Historical scoring: `generate_daily_scores(..., include_history=True)`
+
+## 새 스코어링 비교 실행 예시
+
+동일 후보군/동일 기간으로 old vs new를 비교하려면:
+
+```bash
+# baseline (daily)
+python scripts/run_pipeline.py --source csv --db data/market_pipeline.db --prices-csv data/sample_daily_prices.csv --top-n 5 --rebalance-frequency daily --min-holding-days 0 --keep-rank-threshold 5 --scoring-profile improved_v1
+
+# improved_old (weekly + 기존 scoring)
+python scripts/run_pipeline.py --source csv --db data/market_pipeline.db --prices-csv data/sample_daily_prices.csv --top-n 5 --rebalance-frequency weekly --min-holding-days 5 --keep-rank-threshold 7 --scoring-profile improved_v1
+
+# improved_new (weekly + 새 scoring)
+python scripts/run_pipeline.py --source csv --db data/market_pipeline.db --prices-csv data/sample_daily_prices.csv --top-n 5 --rebalance-frequency weekly --min-holding-days 5 --keep-rank-threshold 7 --scoring-profile improved_v2
+
+# 성과 비교 리포트
+python scripts/generate_performance_report.py \
+  --db data/market_pipeline.db \
+  --baseline-run-id <baseline_run_id> \
+  --improved-run-id <improved_old_run_id> \
+  --improved-new-run-id <improved_new_run_id> \
+  --benchmark KOSPI
+```
 
 ## KRX 운영 시 주의사항
 

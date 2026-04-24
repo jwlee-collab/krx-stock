@@ -38,7 +38,11 @@ def init_db(conn: sqlite3.Connection) -> None:
             ret_1d REAL,
             ret_5d REAL,
             momentum_20d REAL,
+            momentum_60d REAL,
+            sma_20_gap REAL,
+            sma_60_gap REAL,
             range_pct REAL,
+            volatility_20d REAL,
             volume_z20 REAL,
             PRIMARY KEY (symbol, date),
             FOREIGN KEY (symbol, date) REFERENCES daily_prices(symbol, date)
@@ -62,7 +66,8 @@ def init_db(conn: sqlite3.Connection) -> None:
             initial_equity REAL,
             rebalance_frequency TEXT NOT NULL DEFAULT 'daily',
             min_holding_days INTEGER NOT NULL DEFAULT 0,
-            keep_rank_threshold INTEGER
+            keep_rank_threshold INTEGER,
+            scoring_profile TEXT NOT NULL DEFAULT 'improved_v1'
         );
 
         CREATE TABLE IF NOT EXISTS backtest_results (
@@ -159,6 +164,11 @@ def init_db(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "backtest_runs", "rebalance_frequency", "rebalance_frequency TEXT NOT NULL DEFAULT 'daily'")
     _ensure_column(conn, "backtest_runs", "min_holding_days", "min_holding_days INTEGER NOT NULL DEFAULT 0")
     _ensure_column(conn, "backtest_runs", "keep_rank_threshold", "keep_rank_threshold INTEGER")
+    _ensure_column(conn, "backtest_runs", "scoring_profile", "scoring_profile TEXT NOT NULL DEFAULT 'improved_v1'")
     _ensure_column(conn, "paper_positions", "entry_date", "entry_date TEXT")
+    _ensure_column(conn, "daily_features", "momentum_60d", "momentum_60d REAL")
+    _ensure_column(conn, "daily_features", "sma_20_gap", "sma_20_gap REAL")
+    _ensure_column(conn, "daily_features", "sma_60_gap", "sma_60_gap REAL")
+    _ensure_column(conn, "daily_features", "volatility_20d", "volatility_20d REAL")
 
     conn.commit()

@@ -4,14 +4,56 @@ import sqlite3
 from collections import defaultdict
 
 
-def score_formula(ret_1d: float | None, ret_5d: float | None, momentum_20d: float | None, range_pct: float | None, volume_z20: float | None) -> float:
-    """Unified score formula for both latest and historical scoring."""
+DEFAULT_SCORING_PROFILE = "improved_v1"
+SUPPORTED_SCORING_PROFILES = {"improved_v1", "improved_v2"}
+
+
+def score_formula_v1(
+    ret_1d: float | None,
+    ret_5d: float | None,
+    momentum_20d: float | None,
+    range_pct: float | None,
+    volume_z20: float | None,
+) -> float:
+    """Legacy short/medium mixed formula."""
     r1 = ret_1d or 0.0
     r5 = ret_5d or 0.0
     m20 = momentum_20d or 0.0
     vol = volume_z20 or 0.0
     rng = range_pct or 0.0
     return (0.20 * r1) + (0.35 * r5) + (0.35 * m20) + (0.10 * vol) - (0.05 * rng)
+
+
+def score_formula_v2(
+    ret_5d: float | None,
+    momentum_20d: float | None,
+    momentum_60d: float | None,
+    sma_20_gap: float | None,
+    sma_60_gap: float | None,
+    range_pct: float | None,
+    volatility_20d: float | None,
+    volume_z20: float | None,
+) -> float:
+    """Medium-term trend focused formula with noise penalties."""
+    r5 = ret_5d or 0.0
+    m20 = momentum_20d or 0.0
+    m60 = momentum_60d or 0.0
+    gap20 = sma_20_gap or 0.0
+    gap60 = sma_60_gap or 0.0
+    rng = range_pct or 0.0
+    vol20 = volatility_20d or 0.0
+    vol_z = volume_z20 or 0.0
+
+    return (
+        (0.15 * r5)
+        + (0.35 * m20)
+        + (0.30 * m60)
+        + (0.12 * gap20)
+        + (0.10 * gap60)
+        + (0.05 * vol_z)
+        - (0.03 * rng)
+        - (0.04 * vol20)
+    )
 
 
 def _rank_desc(values: list[tuple[str, float]]) -> list[tuple[str, float, int]]:
@@ -32,8 +74,12 @@ def generate_daily_scores(
     as_of_date: str | None = None,
     include_history: bool = False,
     allowed_symbols: list[str] | None = None,
+    scoring_profile: str = DEFAULT_SCORING_PROFILE,
 ) -> int:
     """Generate scores for one date (latest or provided) or all dates (historical mode)."""
+    if scoring_profile not in SUPPORTED_SCORING_PROFILES:
+        raise ValueError(f"unsupported scoring_profile: {scoring_profile}")
+
     score_date: str | None = as_of_date
     symbol_filter_sql = ""
     symbol_filter_params: list[str] = []
@@ -46,7 +92,7 @@ def generate_daily_scores(
     if include_history:
         rows = conn.execute(
             f"""
-            SELECT symbol,date,ret_1d,ret_5d,momentum_20d,range_pct,volume_z20
+            SELECT symbol,date,ret_1d,ret_5d,momentum_20d,momentum_60d,sma_20_gap,sma_60_gap,range_pct,volatility_20d,volume_z20
             FROM daily_features
             WHERE 1=1 {symbol_filter_sql}
             ORDER BY date, symbol
@@ -63,7 +109,7 @@ def generate_daily_scores(
             return 0
         rows = conn.execute(
             f"""
-            SELECT symbol,date,ret_1d,ret_5d,momentum_20d,range_pct,volume_z20
+            SELECT symbol,date,ret_1d,ret_5d,momentum_20d,momentum_60d,sma_20_gap,sma_60_gap,range_pct,volatility_20d,volume_z20
             FROM daily_features
             WHERE date = ? {symbol_filter_sql}
             ORDER BY symbol
@@ -73,7 +119,19 @@ def generate_daily_scores(
 
     by_date: dict[str, list[tuple[str, float]]] = defaultdict(list)
     for r in rows:
-        s = score_formula(r["ret_1d"], r["ret_5d"], r["momentum_20d"], r["range_pct"], r["volume_z20"])
+        if scoring_profile == "improved_v1":
+            s = score_formula_v1(r["ret_1d"], r["ret_5d"], r["momentum_20d"], r["range_pct"], r["volume_z20"])
+        else:
+            s = score_formula_v2(
+                r["ret_5d"],
+                r["momentum_20d"],
+                r["momentum_60d"],
+                r["sma_20_gap"],
+                r["sma_60_gap"],
+                r["range_pct"],
+                r["volatility_20d"],
+                r["volume_z20"],
+            )
         by_date[r["date"]].append((r["symbol"], s))
 
     out_rows: list[tuple] = []
