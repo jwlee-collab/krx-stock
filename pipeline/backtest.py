@@ -54,6 +54,7 @@ def run_backtest(
     rebalance_frequency: str = "daily",
     min_holding_days: int = 0,
     keep_rank_threshold: int | None = None,
+    scoring_profile: str = "improved_v1",
 ) -> str:
     """Equal-weight long backtest using daily_scores and next-day close returns."""
     if rebalance_frequency not in {"daily", "weekly"}:
@@ -84,8 +85,8 @@ def run_backtest(
         """
         INSERT INTO backtest_runs(
             run_id,created_at,top_n,start_date,end_date,initial_equity,
-            rebalance_frequency,min_holding_days,keep_rank_threshold
-        ) VALUES(?,?,?,?,?,?,?,?,?)
+            rebalance_frequency,min_holding_days,keep_rank_threshold,scoring_profile
+        ) VALUES(?,?,?,?,?,?,?,?,?,?)
         """,
         (
             run_id,
@@ -97,6 +98,7 @@ def run_backtest(
             rebalance_frequency,
             int(min_holding_days),
             int(keep_rank_threshold),
+            scoring_profile,
         ),
     )
 

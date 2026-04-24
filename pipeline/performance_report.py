@@ -343,21 +343,32 @@ def generate_performance_report(
     benchmark: str = "KOSPI",
     baseline_run_id: str | None = None,
     improved_run_id: str | None = None,
+    improved_new_run_id: str | None = None,
 ) -> dict[str, str | int]:
     # Backward compatibility: run_id means improved target if explicit ids absent.
     improved_target = improved_run_id or run_id or _get_latest_run_id(conn)
     baseline_target = baseline_run_id or _get_latest_run_id_by_freq(conn, "daily") or improved_target
 
     improved_series, improved_dates = _load_strategy_series(
-        conn, improved_target, key="improved_strategy", label="improved_strategy"
+        conn, improved_target, key="improved_strategy_old", label="improved_strategy_old"
     )
     baseline_series, baseline_dates = _load_strategy_series(
         conn, baseline_target, key="baseline_strategy", label="baseline_strategy"
     )
 
-    common_dates = sorted(set(improved_dates) & set(baseline_dates))
+    strategy_series_map: dict[str, tuple[SeriesResult, list[str]]] = {
+        "baseline_strategy": (baseline_series, baseline_dates),
+        "improved_strategy_old": (improved_series, improved_dates),
+    }
+    if improved_new_run_id:
+        improved_new_series, improved_new_dates = _load_strategy_series(
+            conn, improved_new_run_id, key="improved_strategy_new", label="improved_strategy_new"
+        )
+        strategy_series_map["improved_strategy_new"] = (improved_new_series, improved_new_dates)
+
+    common_dates = sorted(set.intersection(*[set(v[1]) for v in strategy_series_map.values()]))
     if not common_dates:
-        raise ValueError("No overlapping dates between baseline and improved runs")
+        raise ValueError("No overlapping dates across selected strategy runs")
 
     def _slice(series: SeriesResult, dates: list[str]) -> SeriesResult:
         idx = {d: i for i, d in enumerate(dates)}
@@ -373,6 +384,10 @@ def generate_performance_report(
 
     baseline_series = _slice(baseline_series, baseline_dates)
     improved_series = _slice(improved_series, improved_dates)
+    improved_new_series = None
+    if improved_new_run_id:
+        raw_series, raw_dates = strategy_series_map["improved_strategy_new"]
+        improved_new_series = _slice(raw_series, raw_dates)
     initial_equity = _get_initial_equity(conn, improved_target)
 
     equal_series = _build_equal_weight_universe(conn, common_dates, initial_equity)
@@ -394,12 +409,10 @@ def generate_performance_report(
         (report_id, improved_target, created_at, benchmark_name, benchmark_source, common_dates[0], common_dates[-1], notes),
     )
 
-    metrics = [
-        _compute_metrics(baseline_series, initial_equity),
-        _compute_metrics(improved_series, initial_equity),
-        _compute_metrics(equal_series, initial_equity),
-        _compute_metrics(benchmark_series, initial_equity),
-    ]
+    metrics = [_compute_metrics(baseline_series, initial_equity), _compute_metrics(improved_series, initial_equity)]
+    if improved_new_series is not None:
+        metrics.append(_compute_metrics(improved_new_series, initial_equity))
+    metrics.extend([_compute_metrics(equal_series, initial_equity), _compute_metrics(benchmark_series, initial_equity)])
 
     conn.executemany(
         """
@@ -428,9 +441,10 @@ def generate_performance_report(
 
     baseline_monthly = _monthly_returns(common_dates, baseline_series.returns)
     improved_monthly = _monthly_returns(common_dates, improved_series.returns)
+    improved_new_monthly = _monthly_returns(common_dates, improved_new_series.returns) if improved_new_series else {}
     equal_monthly = _monthly_returns(common_dates, equal_series.returns)
     benchmark_monthly = _monthly_returns(common_dates, benchmark_series.returns)
-    months = sorted(set(baseline_monthly) | set(improved_monthly) | set(equal_monthly) | set(benchmark_monthly))
+    months = sorted(set(baseline_monthly) | set(improved_monthly) | set(improved_new_monthly) | set(equal_monthly) | set(benchmark_monthly))
     conn.executemany(
         "INSERT INTO performance_report_monthly(report_id,month,strategy_return,equal_weight_return,benchmark_return) VALUES(?,?,?,?,?)",
         [(report_id, m, improved_monthly.get(m, 0.0), equal_monthly.get(m, 0.0), benchmark_monthly.get(m, 0.0)) for m in months],
@@ -460,29 +474,51 @@ def generate_performance_report(
     curve_csv = out_dir / f"equity_curve_comparison_{improved_target}.csv"
     with curve_csv.open("w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        writer.writerow(["date", "baseline_strategy", "improved_strategy", "equal_weight_universe", "benchmark_kospi"])
+        curve_header = ["date", "baseline_strategy", "improved_strategy_old"]
+        if improved_new_series:
+            curve_header.append("improved_strategy_new")
+        curve_header.extend(["equal_weight_universe", "benchmark_kospi"])
+        writer.writerow(curve_header)
         for i, d in enumerate(common_dates):
-            writer.writerow([d, baseline_series.equities[i], improved_series.equities[i], equal_series.equities[i], benchmark_series.equities[i]])
+            row = [d, baseline_series.equities[i], improved_series.equities[i]]
+            if improved_new_series:
+                row.append(improved_new_series.equities[i])
+            row.extend([equal_series.equities[i], benchmark_series.equities[i]])
+            writer.writerow(row)
 
     monthly_csv = out_dir / f"monthly_returns_{improved_target}.csv"
     with monthly_csv.open("w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        writer.writerow([
-            "month", "baseline_strategy", "improved_strategy", "equal_weight_universe", "benchmark_kospi",
-            "baseline_strategy(표시)", "improved_strategy(표시)", "equal_weight_universe(표시)", "benchmark_kospi(표시)",
-        ])
+        header = ["month", "baseline_strategy", "improved_strategy_old"]
+        if improved_new_series:
+            header.append("improved_strategy_new")
+        header.extend(["equal_weight_universe", "benchmark_kospi"])
+        header_display = ["baseline_strategy(표시)", "improved_strategy_old(표시)"]
+        if improved_new_series:
+            header_display.append("improved_strategy_new(표시)")
+        header_display.extend(["equal_weight_universe(표시)", "benchmark_kospi(표시)"])
+        writer.writerow(header + header_display)
         for month in months:
             b0 = baseline_monthly.get(month, 0.0)
             b1 = improved_monthly.get(month, 0.0)
+            b2 = improved_new_monthly.get(month, 0.0)
             e = equal_monthly.get(month, 0.0)
             k = benchmark_monthly.get(month, 0.0)
-            writer.writerow([month, b0, b1, e, k, _fmt_pct(b0), _fmt_pct(b1), _fmt_pct(e), _fmt_pct(k)])
+            row = [month, b0, b1]
+            if improved_new_series:
+                row.append(b2)
+            row.extend([e, k, _fmt_pct(b0), _fmt_pct(b1)])
+            if improved_new_series:
+                row.append(_fmt_pct(b2))
+            row.extend([_fmt_pct(e), _fmt_pct(k)])
+            writer.writerow(row)
 
     return {
         "report_id": report_id,
         "run_id": improved_target,
         "baseline_run_id": baseline_target,
         "improved_run_id": improved_target,
+        "improved_new_run_id": improved_new_run_id,
         "summary_csv": str(summary_csv),
         "curve_csv": str(curve_csv),
         "monthly_csv": str(monthly_csv),

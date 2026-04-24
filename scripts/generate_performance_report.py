@@ -19,7 +19,8 @@ def main() -> None:
     parser.add_argument("--db", default="data/market_pipeline.db")
     parser.add_argument("--run-id", default=None, help="Deprecated alias: improved run_id")
     parser.add_argument("--baseline-run-id", default=None, help="Baseline strategy run_id (typically daily rebalancing)")
-    parser.add_argument("--improved-run-id", default=None, help="Improved strategy run_id (weekly/holding constraints)")
+    parser.add_argument("--improved-run-id", default=None, help="Improved(old scoring) strategy run_id")
+    parser.add_argument("--improved-new-run-id", default=None, help="Improved(new scoring) strategy run_id")
     parser.add_argument("--benchmark", default="KOSPI", choices=["KOSPI", "KOSPI200"], help="Benchmark index preference")
     parser.add_argument("--output-dir", default="data/reports")
     args = parser.parse_args()
@@ -34,6 +35,7 @@ def main() -> None:
         benchmark=args.benchmark,
         baseline_run_id=args.baseline_run_id,
         improved_run_id=args.improved_run_id,
+        improved_new_run_id=args.improved_new_run_id,
     )
     print(json.dumps(result, indent=2, ensure_ascii=False))
 

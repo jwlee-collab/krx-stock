@@ -12,7 +12,13 @@ Modules:
 from .db import get_connection, init_db
 from .ingest import ingest_daily_prices_csv
 from .features import generate_daily_features
-from .scoring import generate_daily_scores, score_formula
+from .scoring import (
+    DEFAULT_SCORING_PROFILE,
+    SUPPORTED_SCORING_PROFILES,
+    generate_daily_scores,
+    score_formula_v1,
+    score_formula_v2,
+)
 from .backtest import run_backtest
 from .paper_trading import run_paper_trading_cycle
 from .validator import validate_pipeline
@@ -23,7 +29,10 @@ __all__ = [
     "ingest_daily_prices_csv",
     "generate_daily_features",
     "generate_daily_scores",
-    "score_formula",
+    "DEFAULT_SCORING_PROFILE",
+    "SUPPORTED_SCORING_PROFILES",
+    "score_formula_v1",
+    "score_formula_v2",
     "run_backtest",
     "run_paper_trading_cycle",
     "validate_pipeline",

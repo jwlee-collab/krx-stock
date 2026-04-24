@@ -14,7 +14,7 @@ if str(ROOT) not in sys.path:
 from pipeline.db import get_connection, init_db
 from pipeline.ingest import ingest_daily_prices_csv, ingest_krx_prices, resolve_krx_symbols
 from pipeline.features import generate_daily_features
-from pipeline.scoring import generate_daily_scores
+from pipeline.scoring import DEFAULT_SCORING_PROFILE, SUPPORTED_SCORING_PROFILES, generate_daily_scores
 from pipeline.universe_filter import UniverseFilterConfig, filter_universe
 from pipeline.backtest import run_backtest
 from pipeline.paper_trading import run_paper_trading_cycle
@@ -58,6 +58,7 @@ def main() -> None:
     p.add_argument("--shock-lookback-days", type=int, default=20)
     p.add_argument("--shock-abs-return-threshold", type=float, default=0.18)
     p.add_argument("--shock-max-hits", type=int, default=1)
+    p.add_argument("--scoring-profile", choices=sorted(SUPPORTED_SCORING_PROFILES), default=DEFAULT_SCORING_PROFILE)
     args = p.parse_args()
 
     conn = get_connection(args.db)
@@ -124,13 +125,19 @@ def main() -> None:
             print(json.dumps(summary, indent=2, ensure_ascii=False))
             return
 
-    score = generate_daily_scores(conn, include_history=True, allowed_symbols=selected_symbols)
+    score = generate_daily_scores(
+        conn,
+        include_history=True,
+        allowed_symbols=selected_symbols,
+        scoring_profile=args.scoring_profile,
+    )
     run_id = run_backtest(
         conn,
         top_n=args.top_n,
         rebalance_frequency=args.rebalance_frequency,
         min_holding_days=args.min_holding_days,
         keep_rank_threshold=args.keep_rank_threshold,
+        scoring_profile=args.scoring_profile,
     )
     paper = run_paper_trading_cycle(
         conn,
@@ -147,6 +154,7 @@ def main() -> None:
         "feature_changes": feat,
         "universe_filter": universe_summary,
         "score_changes": score,
+        "scoring_profile": args.scoring_profile,
         "backtest_run_id": run_id,
         "paper": paper,
     }
