@@ -155,13 +155,61 @@ python scripts/validate_pipeline.py --db data/market_pipeline.db --top-n 3
 - 백테스트 결과 row 생성 여부
 - paper trading 사이클 정상 실행 여부
 
+
+### 5) 백테스트 성과 비교 리포트 생성
+
+```bash
+python scripts/generate_performance_report.py \
+  --db data/market_pipeline.db \
+  --benchmark KOSPI \
+  --output-dir data/reports
+```
+
+옵션:
+- `--run-id`: 특정 `backtest_runs.run_id`를 지정해서 리포트 생성 (미지정 시 최신 run 자동 선택)
+- `--benchmark`: `KOSPI` 또는 `KOSPI200` 선호값
+
+생성 산출물:
+- `performance_comparison_<run_id>.csv` (요약 지표)
+- `equity_curve_comparison_<run_id>.csv` (누적 자산 곡선 비교 데이터)
+- `monthly_returns_<run_id>.csv` (월별 수익률 요약)
+- SQLite 테이블:
+  - `performance_report_runs`
+  - `performance_report_summary`
+  - `performance_report_curve`
+  - `performance_report_monthly`
+
+비교 기준:
+1. `strategy`: 기존 점수 기반 top-N 백테스트 (`backtest_results`) 결과 재사용
+2. `equal_weight_universe`: 같은 날짜의 `daily_scores` 후보군 전체를 동일비중으로 보유
+3. `benchmark_kospi`: pykrx 인덱스(`KOSPI=1001`, `KOSPI200=1028`) 조회를 우선 사용
+   - 인덱스 데이터를 가져오지 못하면 `daily_prices` 전체 동일비중 프록시를 자동 사용
+   - 실제 사용된 소스는 `performance_report_runs.benchmark_source`와 리포트 JSON 출력에서 확인 가능
+
+지표 정의:
+- 실제 초기 자본: `backtest_runs.initial_equity` (없으면 첫 기록/수익률 역산)
+- 첫 기록 시점 자산: 백테스트 첫 행 자산(첫 리밸런싱 이후)
+- 마지막 자산, 총 수익률, 연환산 수익률
+- 최대 낙폭(MDD), 변동성(연환산), 샤프비율(무위험수익률 0 가정)
+- 거래 횟수(추정): 일자별 편입 종목 집합 변화량(매수+매도)
+- 평균 보유 종목 수
+
+리포트 해석 팁:
+- `strategy`가 `equal_weight_universe` 대비 초과성과를 내면, 스코어 랭킹 자체의 선택력이 있다고 해석할 수 있습니다.
+- `strategy`가 `benchmark_kospi` 대비 우수하더라도 `MDD/변동성`이 과도하면 위험-보상 균형을 함께 확인해야 합니다.
+- `실제 초기 자본`과 `첫 기록 시점 자산`이 다른 이유는, 본 백테스트가 `d0→d1` 수익률을 첫 행에 기록하기 때문입니다.
+
 ## Data model (핵심 테이블)
 
 - `daily_prices(symbol, date, open, high, low, close, volume)`
 - `daily_features(symbol, date, ret_1d, ret_5d, momentum_20d, range_pct, volume_z20)`
 - `daily_scores(symbol, date, score, rank)`
-- `backtest_runs(run_id, created_at, top_n, start_date, end_date)`
+- `backtest_runs(run_id, created_at, top_n, start_date, end_date, initial_equity)`
 - `backtest_results(run_id, date, equity, daily_return, position_count)`
+- `performance_report_runs(report_id, base_run_id, benchmark_name, benchmark_source, start_date, end_date, ...)`
+- `performance_report_summary(report_id, strategy_key, actual_initial_capital, first_recorded_equity, ending_equity, ... )`
+- `performance_report_curve(report_id, date, strategy_equity, equal_weight_equity, benchmark_equity)`
+- `performance_report_monthly(report_id, month, strategy_return, equal_weight_return, benchmark_return)`
 - `paper_positions(symbol, qty, entry_price, updated_at)`
 - `paper_orders(order_id, created_at, symbol, side, qty, price, reason)`
 
