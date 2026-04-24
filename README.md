@@ -186,6 +186,53 @@ python scripts/validate_pipeline.py --db data/market_pipeline.db --top-n 3
 - paper trading 사이클 정상 실행 여부
 
 
+### 5-1) 전략 강건성(robustness) 실험 자동화
+
+`trend_v2`가 특정 구간에서만 우연히 좋았는지 확인하기 위해, 동일 후보군/데이터에서 여러 파라미터 조합을 반복 실행해 비교 리포트를 생성할 수 있습니다.
+
+```bash
+python scripts/run_robustness_experiments.py \
+  --db data/market_pipeline.db \
+  --output-dir data/reports \
+  --period-months 3,6,12 \
+  --top-n-values 3,5,10 \
+  --min-holding-days-values 5,10 \
+  --keep-rank-offsets 2,4 \
+  --scoring-versions old,trend_v2 \
+  --rebalance-frequency daily
+```
+
+핵심 동작:
+- 조합 축 자동 반복:
+  - 기간: 3/6/12개월
+  - `top_n`: 3/5/10
+  - `min_holding_days`: 5/10
+  - `keep_rank_threshold`: `top_n+2`, `top_n+4`
+  - `scoring_version`: `old`, `trend_v2`
+- 각 조합마다 `daily_scores` 재계산 + `run_backtest(...)` 실행
+- 결과 저장:
+  - SQLite
+    - `robustness_experiment_batches`
+    - `robustness_experiment_results`
+    - `robustness_experiment_stability`
+  - CSV
+    - `robustness_experiments_<batch_id>.csv`
+    - `robustness_stability_<batch_id>.csv`
+  - Markdown 요약
+    - `robustness_summary_<batch_id>.md`
+
+최소 비교 지표(요구사항 반영):
+- 총 수익률 (`total_return`)
+- 최대 낙폭 (`max_drawdown`)
+- 샤프비율 (`sharpe`)
+- 거래 횟수 (`trade_count`)
+- 후보군 평균 대비 초과수익 (`excess_return_vs_universe`)
+
+정렬/해석:
+- 개별 실험은 `robustness_score` 기준으로 정렬
+- 기간 축을 묶은 안정성 요약은 `stability_score` 기준으로 정렬
+- 요약 Markdown에서 “가장 안정적인 설정”을 쉬운 문장으로 확인 가능
+
 ### 5) 백테스트 성과 비교 리포트 생성
 
 ```bash
