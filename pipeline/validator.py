@@ -4,16 +4,37 @@ import sqlite3
 
 from .features import generate_daily_features
 from .scoring import generate_daily_scores
+from .universe_filter import UniverseFilterConfig, filter_universe
 from .backtest import run_backtest
 from .paper_trading import run_paper_trading_cycle
 
 
-def validate_pipeline(conn: sqlite3.Connection, top_n: int = 3) -> dict:
+def validate_pipeline(conn: sqlite3.Connection, top_n: int = 3, validate_universe_filter: bool = True) -> dict:
     """Run end-to-end pipeline checks against current SQLite DB contents."""
     results: dict[str, object] = {}
 
     feat_changes = generate_daily_features(conn)
-    score_changes = generate_daily_scores(conn, include_history=True)
+    selected_symbols = None
+    universe_summary = None
+    if validate_universe_filter:
+        cfg = UniverseFilterConfig(
+            min_close_price=0.0,
+            min_avg_dollar_volume_20d=0.0,
+            min_avg_volume_20d=0.0,
+            min_data_days_60d=1,
+            shock_lookback_days=20,
+            shock_abs_return_threshold=1.0,
+            shock_max_hits=999,
+        )
+        universe_summary = filter_universe(conn, cfg)
+        selected_symbols = universe_summary["selected_symbols"]
+
+        removed_total = sum(universe_summary["removed_by_reason"].values())
+        assert universe_summary["before_count"] >= universe_summary["after_count"], "Universe filter count mismatch"
+        assert removed_total >= universe_summary["removed_count"], "Universe filter reason summary mismatch"
+        results["universe_filter"] = universe_summary
+
+    score_changes = generate_daily_scores(conn, include_history=True, allowed_symbols=selected_symbols)
     results["feature_rows_written"] = feat_changes
     results["score_rows_written"] = score_changes
 

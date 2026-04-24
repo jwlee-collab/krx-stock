@@ -15,6 +15,7 @@ from pipeline.db import get_connection, init_db
 from pipeline.ingest import ingest_daily_prices_csv, ingest_krx_prices, resolve_krx_symbols
 from pipeline.features import generate_daily_features
 from pipeline.scoring import generate_daily_scores
+from pipeline.universe_filter import UniverseFilterConfig, filter_universe
 from pipeline.backtest import run_backtest
 from pipeline.paper_trading import run_paper_trading_cycle
 
@@ -46,6 +47,14 @@ def main() -> None:
     p.add_argument("--end-date", default=None, help="YYYY-MM-DD")
 
     p.add_argument("--top-n", type=int, default=3)
+    p.add_argument("--disable-universe-filter", action="store_true", help="Disable pre-scoring universe filter")
+    p.add_argument("--min-close-price", type=float, default=3000.0)
+    p.add_argument("--min-avg-dollar-volume-20d", type=float, default=1_000_000_000.0)
+    p.add_argument("--min-avg-volume-20d", type=float, default=100_000.0)
+    p.add_argument("--min-data-days-60d", type=int, default=60)
+    p.add_argument("--shock-lookback-days", type=int, default=20)
+    p.add_argument("--shock-abs-return-threshold", type=float, default=0.18)
+    p.add_argument("--shock-max-hits", type=int, default=1)
     args = p.parse_args()
 
     conn = get_connection(args.db)
@@ -64,7 +73,28 @@ def main() -> None:
         ing = ingest_krx_prices(conn, symbols=symbols, start_date=args.start_date, end_date=end_date)
 
     feat = generate_daily_features(conn)
-    score = generate_daily_scores(conn, include_history=True)
+
+    universe_summary = None
+    selected_symbols = None
+    apply_filter = (not args.disable_universe_filter) and args.source == "krx" and not _parse_symbols(args.symbols)
+    if apply_filter:
+        cfg = UniverseFilterConfig(
+            min_close_price=args.min_close_price,
+            min_avg_dollar_volume_20d=args.min_avg_dollar_volume_20d,
+            min_avg_volume_20d=args.min_avg_volume_20d,
+            min_data_days_60d=args.min_data_days_60d,
+            shock_lookback_days=args.shock_lookback_days,
+            shock_abs_return_threshold=args.shock_abs_return_threshold,
+            shock_max_hits=args.shock_max_hits,
+        )
+        universe_summary = filter_universe(conn, cfg)
+        selected_symbols = universe_summary["selected_symbols"]
+        print(
+            f"[universe_filter] before={universe_summary['before_count']} after={universe_summary['after_count']} removed={universe_summary['removed_count']}"
+        )
+        print(f"[universe_filter] removed_by_reason={json.dumps(universe_summary['removed_by_reason'], ensure_ascii=False)}")
+
+    score = generate_daily_scores(conn, include_history=True, allowed_symbols=selected_symbols)
     run_id = run_backtest(conn, top_n=args.top_n)
     paper = run_paper_trading_cycle(conn, target_positions=args.top_n)
 
@@ -73,6 +103,7 @@ def main() -> None:
         "source": args.source,
         "ingest_changes": ing,
         "feature_changes": feat,
+        "universe_filter": universe_summary,
         "score_changes": score,
         "backtest_run_id": run_id,
         "paper": paper,

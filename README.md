@@ -9,6 +9,7 @@
 1. `daily_prices` 적재
 2. `daily_features` 생성
 3. `daily_scores` 생성 및 랭킹
+   - (신규) 전체 시장 사용 시 유니버스 필터를 먼저 적용
 4. historical scoring (`include_history=True`)
 5. SQLite 기반 백테스트
 6. SQLite 기반 모의매매(paper trading)
@@ -20,6 +21,7 @@
 - `pipeline/ingest.py` — CSV 적재 + `pykrx` 기반 KRX 적재
 - `pipeline/features.py` — OHLCV 기반 피처 생성
 - `pipeline/scoring.py` — 스코어 계산 + 랭킹 저장
+- `pipeline/universe_filter.py` — 스코어링 전 유니버스(후보군) 필터링
 - `pipeline/backtest.py` — 일별 리밸런싱 백테스트
 - `pipeline/paper_trading.py` — 일회성 모의매매 리밸런싱 사이클
 - `pipeline/validator.py` — 전체 파이프라인 검증
@@ -91,6 +93,46 @@ python scripts/run_pipeline.py \
 
 `--symbols`를 생략하면 `--market` 기준으로 티커를 자동 수집합니다.
 
+### 3-1) 전체 시장 스캔 시 유니버스 필터
+
+기본적으로 `run_pipeline.py`는 **스코어링 전에** 다음 필터를 적용합니다.
+
+1. 최근 종가 하한 (`--min-close-price`, 기본: `3000`)
+2. 최근 20일 평균 거래대금 하한 (`--min-avg-dollar-volume-20d`, 기본: `1_000_000_000`)
+3. 최근 20일 평균 거래량 하한 (`--min-avg-volume-20d`, 기본: `100_000`)
+4. 최근 60거래일 데이터 최소 개수 (`--min-data-days-60d`, 기본: `60`)
+5. 이상 급등/급락 필터
+   - 최근 `N`일(`--shock-lookback-days`, 기본: `20`) 동안
+   - 일간 수익률 절대값이 `threshold`(`--shock-abs-return-threshold`, 기본: `0.18`) 이상인 횟수가
+   - `--shock-max-hits`(기본: `1`) 초과 시 제외
+
+실행 시 필터 전/후 종목 수와, 이유별 제거 건수를 로그로 출력합니다.
+
+필터를 끄려면:
+
+```bash
+python scripts/run_pipeline.py --source krx --market ALL --disable-universe-filter
+```
+
+전체 시장 스캔 예시(필터 파라미터 조정):
+
+```bash
+python scripts/run_pipeline.py \
+  --source krx \
+  --db data/market_pipeline.db \
+  --market ALL \
+  --start-date 2025-01-01 \
+  --end-date 2025-12-31 \
+  --top-n 20 \
+  --min-close-price 3000 \
+  --min-avg-dollar-volume-20d 1000000000 \
+  --min-avg-volume-20d 100000 \
+  --min-data-days-60d 60 \
+  --shock-lookback-days 20 \
+  --shock-abs-return-threshold 0.18 \
+  --shock-max-hits 1
+```
+
 ### 4) 검증 실행
 
 ```bash
@@ -99,6 +141,7 @@ python scripts/validate_pipeline.py --db data/market_pipeline.db --top-n 3
 
 검증 항목:
 - 가격/피처/스코어 row 존재 여부
+- 유니버스 필터 요약 일관성 점검(필터 전/후 count, reason 집계)
 - 백테스트 결과 row 생성 여부
 - paper trading 사이클 정상 실행 여부
 
