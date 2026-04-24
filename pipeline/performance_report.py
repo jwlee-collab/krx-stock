@@ -120,6 +120,12 @@ def _get_run_dates(conn: sqlite3.Connection, run_id: str) -> list[str]:
     return dates
 
 
+
+
+def _get_scoring_profile(conn: sqlite3.Connection, run_id: str) -> str:
+    row = conn.execute("SELECT COALESCE(scoring_profile, 'old') AS scoring_profile FROM backtest_runs WHERE run_id=?", (run_id,)).fetchone()
+    return str(row["scoring_profile"]) if row else "old"
+
 def _get_initial_equity(conn: sqlite3.Connection, run_id: str) -> float:
     run = conn.execute("SELECT initial_equity FROM backtest_runs WHERE run_id=?", (run_id,)).fetchone()
     if run and run["initial_equity"] is not None:
@@ -349,11 +355,13 @@ def generate_performance_report(
     improved_target = improved_run_id or run_id or _get_latest_run_id(conn)
     baseline_target = baseline_run_id or _get_latest_run_id_by_freq(conn, "daily") or improved_target
 
+    improved_profile = _get_scoring_profile(conn, improved_target)
     improved_series, improved_dates = _load_strategy_series(
-        conn, improved_target, key="improved_strategy_old", label="improved_strategy_old"
+        conn, improved_target, key="improved_strategy_old", label=f"improved_strategy_old ({improved_profile})"
     )
+    baseline_profile = _get_scoring_profile(conn, baseline_target)
     baseline_series, baseline_dates = _load_strategy_series(
-        conn, baseline_target, key="baseline_strategy", label="baseline_strategy"
+        conn, baseline_target, key="baseline_strategy", label=f"baseline_strategy ({baseline_profile})"
     )
 
     strategy_series_map: dict[str, tuple[SeriesResult, list[str]]] = {
@@ -361,8 +369,9 @@ def generate_performance_report(
         "improved_strategy_old": (improved_series, improved_dates),
     }
     if improved_new_run_id:
+        improved_new_profile = _get_scoring_profile(conn, improved_new_run_id)
         improved_new_series, improved_new_dates = _load_strategy_series(
-            conn, improved_new_run_id, key="improved_strategy_new", label="improved_strategy_new"
+            conn, improved_new_run_id, key="improved_strategy_new", label=f"improved_strategy_new ({improved_new_profile})"
         )
         strategy_series_map["improved_strategy_new"] = (improved_new_series, improved_new_dates)
 
@@ -519,6 +528,9 @@ def generate_performance_report(
         "baseline_run_id": baseline_target,
         "improved_run_id": improved_target,
         "improved_new_run_id": improved_new_run_id,
+        "baseline_scoring_profile": baseline_profile,
+        "improved_old_scoring_profile": improved_profile,
+        "improved_new_scoring_profile": improved_new_profile if improved_new_run_id else None,
         "summary_csv": str(summary_csv),
         "curve_csv": str(curve_csv),
         "monthly_csv": str(monthly_csv),

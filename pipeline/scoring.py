@@ -4,8 +4,23 @@ import sqlite3
 from collections import defaultdict
 
 
-DEFAULT_SCORING_PROFILE = "improved_v1"
-SUPPORTED_SCORING_PROFILES = {"improved_v1", "improved_v2"}
+SCORING_VERSION_ALIASES = {
+    "old": "old",
+    "improved_v1": "old",
+    "trend_v2": "trend_v2",
+    "improved_v2": "trend_v2",
+}
+DEFAULT_SCORING_PROFILE = "old"
+SUPPORTED_SCORING_PROFILES = set(SCORING_VERSION_ALIASES)
+
+
+def normalize_scoring_profile(scoring_profile: str) -> str:
+    try:
+        return SCORING_VERSION_ALIASES[scoring_profile]
+    except KeyError as exc:
+        raise ValueError(
+            f"unsupported scoring_profile: {scoring_profile} (supported: {sorted(SUPPORTED_SCORING_PROFILES)})"
+        ) from exc
 
 
 def score_formula_v1(
@@ -77,8 +92,7 @@ def generate_daily_scores(
     scoring_profile: str = DEFAULT_SCORING_PROFILE,
 ) -> int:
     """Generate scores for one date (latest or provided) or all dates (historical mode)."""
-    if scoring_profile not in SUPPORTED_SCORING_PROFILES:
-        raise ValueError(f"unsupported scoring_profile: {scoring_profile}")
+    scoring_version = normalize_scoring_profile(scoring_profile)
 
     score_date: str | None = as_of_date
     symbol_filter_sql = ""
@@ -119,7 +133,7 @@ def generate_daily_scores(
 
     by_date: dict[str, list[tuple[str, float]]] = defaultdict(list)
     for r in rows:
-        if scoring_profile == "improved_v1":
+        if scoring_version == "old":
             s = score_formula_v1(r["ret_1d"], r["ret_5d"], r["momentum_20d"], r["range_pct"], r["volume_z20"])
         else:
             s = score_formula_v2(
