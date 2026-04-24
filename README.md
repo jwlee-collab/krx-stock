@@ -254,9 +254,9 @@ python scripts/generate_performance_report.py \
 
 ## Scoring 철학과 해석 (노이즈 완화 중심)
 
-`run_pipeline.py --scoring-profile`로 점수식을 선택할 수 있습니다.
-- `improved_v1`: 기존 식(단기 신호 반응이 상대적으로 큼)
-- `improved_v2`: 중기 추세 중심 신호(권장)
+`run_pipeline.py --scoring-version`으로 점수식을 선택할 수 있습니다.
+- `old` (`improved_v1` 별칭): 기존 식(단기 신호 반응이 상대적으로 큼)
+- `trend_v2` (`improved_v2` 별칭): 중기 추세 중심 신호(권장)
 
 ### 기존 점수식 (`improved_v1`)
 ```text
@@ -264,6 +264,47 @@ score_v1 = 0.20*ret_1d + 0.35*ret_5d + 0.35*momentum_20d + 0.10*volume_z20 - 0.0
 ```
 - `ret_1d`는 하루 노이즈(뉴스/수급 급변)에 민감합니다.
 - `range_pct`는 단기 변동폭이라 추세 신호보다 이벤트성 흔들림을 반영하기 쉽습니다.
+
+
+
+### scoring 버전 실행 예시 (동일 후보군/동일 기간 비교)
+
+아래처럼 **같은 DB/같은 기간**에서 scoring 버전만 바꿔 2회 실행하면 `improved_strategy_old` vs `improved_strategy_new`를 공정하게 비교할 수 있습니다.
+
+```bash
+# 1) old scoring run
+python scripts/run_pipeline.py \
+  --source krx \
+  --db data/market_pipeline.db \
+  --market KOSPI \
+  --start-date 2025-01-01 \
+  --end-date 2025-12-31 \
+  --top-n 10 \
+  --rebalance-frequency weekly \
+  --min-holding-days 5 \
+  --keep-rank-threshold 15 \
+  --scoring-version old
+
+# 2) trend_v2 scoring run (동일 조건)
+python scripts/run_pipeline.py \
+  --source krx \
+  --db data/market_pipeline.db \
+  --market KOSPI \
+  --start-date 2025-01-01 \
+  --end-date 2025-12-31 \
+  --top-n 10 \
+  --rebalance-frequency weekly \
+  --min-holding-days 5 \
+  --keep-rank-threshold 15 \
+  --scoring-version trend_v2
+
+# 3) 리포트 비교
+python scripts/generate_performance_report.py \
+  --db data/market_pipeline.db \
+  --baseline-run-id <baseline_run_id> \
+  --improved-run-id <old_run_id> \
+  --improved-new-run-id <trend_v2_run_id>
+```
 
 ### 새 점수식 (`improved_v2`)
 ```text
@@ -293,13 +334,13 @@ score_v2 =
 
 ```bash
 # baseline (daily)
-python scripts/run_pipeline.py --source csv --db data/market_pipeline.db --prices-csv data/sample_daily_prices.csv --top-n 5 --rebalance-frequency daily --min-holding-days 0 --keep-rank-threshold 5 --scoring-profile improved_v1
+python scripts/run_pipeline.py --source csv --db data/market_pipeline.db --prices-csv data/sample_daily_prices.csv --top-n 5 --rebalance-frequency daily --min-holding-days 0 --keep-rank-threshold 5 --scoring-version old
 
 # improved_old (weekly + 기존 scoring)
-python scripts/run_pipeline.py --source csv --db data/market_pipeline.db --prices-csv data/sample_daily_prices.csv --top-n 5 --rebalance-frequency weekly --min-holding-days 5 --keep-rank-threshold 7 --scoring-profile improved_v1
+python scripts/run_pipeline.py --source csv --db data/market_pipeline.db --prices-csv data/sample_daily_prices.csv --top-n 5 --rebalance-frequency weekly --min-holding-days 5 --keep-rank-threshold 7 --scoring-version old
 
 # improved_new (weekly + 새 scoring)
-python scripts/run_pipeline.py --source csv --db data/market_pipeline.db --prices-csv data/sample_daily_prices.csv --top-n 5 --rebalance-frequency weekly --min-holding-days 5 --keep-rank-threshold 7 --scoring-profile improved_v2
+python scripts/run_pipeline.py --source csv --db data/market_pipeline.db --prices-csv data/sample_daily_prices.csv --top-n 5 --rebalance-frequency weekly --min-holding-days 5 --keep-rank-threshold 7 --scoring-version trend_v2
 
 # 성과 비교 리포트
 python scripts/generate_performance_report.py \

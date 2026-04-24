@@ -14,7 +14,12 @@ if str(ROOT) not in sys.path:
 from pipeline.db import get_connection, init_db
 from pipeline.ingest import ingest_daily_prices_csv, ingest_krx_prices, resolve_krx_symbols
 from pipeline.features import generate_daily_features
-from pipeline.scoring import DEFAULT_SCORING_PROFILE, SUPPORTED_SCORING_PROFILES, generate_daily_scores
+from pipeline.scoring import (
+    DEFAULT_SCORING_PROFILE,
+    SUPPORTED_SCORING_PROFILES,
+    generate_daily_scores,
+    normalize_scoring_profile,
+)
 from pipeline.universe_filter import UniverseFilterConfig, filter_universe
 from pipeline.backtest import run_backtest
 from pipeline.paper_trading import run_paper_trading_cycle
@@ -58,8 +63,13 @@ def main() -> None:
     p.add_argument("--shock-lookback-days", type=int, default=20)
     p.add_argument("--shock-abs-return-threshold", type=float, default=0.18)
     p.add_argument("--shock-max-hits", type=int, default=1)
-    p.add_argument("--scoring-profile", choices=sorted(SUPPORTED_SCORING_PROFILES), default=DEFAULT_SCORING_PROFILE)
+    p.add_argument("--scoring-profile", choices=sorted(SUPPORTED_SCORING_PROFILES), default=None, help="Deprecated alias for --scoring-version")
+    p.add_argument("--scoring-version", choices=["old", "trend_v2"], default=DEFAULT_SCORING_PROFILE)
     args = p.parse_args()
+
+    if args.scoring_profile and args.scoring_version != DEFAULT_SCORING_PROFILE:
+        raise ValueError("--scoring-profile and --scoring-version cannot be set together")
+    selected_scoring = normalize_scoring_profile(args.scoring_profile or args.scoring_version)
 
     conn = get_connection(args.db)
     init_db(conn)
@@ -129,7 +139,7 @@ def main() -> None:
         conn,
         include_history=True,
         allowed_symbols=selected_symbols,
-        scoring_profile=args.scoring_profile,
+        scoring_profile=selected_scoring,
     )
     run_id = run_backtest(
         conn,
@@ -137,7 +147,7 @@ def main() -> None:
         rebalance_frequency=args.rebalance_frequency,
         min_holding_days=args.min_holding_days,
         keep_rank_threshold=args.keep_rank_threshold,
-        scoring_profile=args.scoring_profile,
+        scoring_profile=selected_scoring,
     )
     paper = run_paper_trading_cycle(
         conn,
@@ -154,7 +164,7 @@ def main() -> None:
         "feature_changes": feat,
         "universe_filter": universe_summary,
         "score_changes": score,
-        "scoring_profile": args.scoring_profile,
+        "scoring_profile": selected_scoring,
         "backtest_run_id": run_id,
         "paper": paper,
     }
