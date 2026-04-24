@@ -59,7 +59,10 @@ def init_db(conn: sqlite3.Connection) -> None:
             top_n INTEGER NOT NULL,
             start_date TEXT,
             end_date TEXT,
-            initial_equity REAL
+            initial_equity REAL,
+            rebalance_frequency TEXT NOT NULL DEFAULT 'daily',
+            min_holding_days INTEGER NOT NULL DEFAULT 0,
+            keep_rank_threshold INTEGER
         );
 
         CREATE TABLE IF NOT EXISTS backtest_results (
@@ -126,6 +129,7 @@ def init_db(conn: sqlite3.Connection) -> None:
             symbol TEXT PRIMARY KEY,
             qty REAL NOT NULL,
             entry_price REAL NOT NULL,
+            entry_date TEXT,
             updated_at TEXT NOT NULL
         );
 
@@ -139,6 +143,12 @@ def init_db(conn: sqlite3.Connection) -> None:
             reason TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS paper_rebalance_log (
+            as_of_date TEXT PRIMARY KEY,
+            executed_at TEXT NOT NULL,
+            rebalance_frequency TEXT NOT NULL
+        );
+
         CREATE INDEX IF NOT EXISTS idx_prices_date ON daily_prices(date);
         CREATE INDEX IF NOT EXISTS idx_features_date ON daily_features(date);
         CREATE INDEX IF NOT EXISTS idx_scores_date_rank ON daily_scores(date, rank);
@@ -146,5 +156,9 @@ def init_db(conn: sqlite3.Connection) -> None:
     )
 
     _ensure_column(conn, "backtest_runs", "initial_equity", "initial_equity REAL")
+    _ensure_column(conn, "backtest_runs", "rebalance_frequency", "rebalance_frequency TEXT NOT NULL DEFAULT 'daily'")
+    _ensure_column(conn, "backtest_runs", "min_holding_days", "min_holding_days INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "backtest_runs", "keep_rank_threshold", "keep_rank_threshold INTEGER")
+    _ensure_column(conn, "paper_positions", "entry_date", "entry_date TEXT")
 
     conn.commit()

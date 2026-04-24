@@ -17,7 +17,9 @@ from pipeline.performance_report import generate_performance_report
 def main() -> None:
     parser = argparse.ArgumentParser(description="Generate backtest performance comparison report")
     parser.add_argument("--db", default="data/market_pipeline.db")
-    parser.add_argument("--run-id", default=None, help="Target backtest run_id. If omitted, latest run is used.")
+    parser.add_argument("--run-id", default=None, help="Deprecated alias: improved run_id")
+    parser.add_argument("--baseline-run-id", default=None, help="Baseline strategy run_id (typically daily rebalancing)")
+    parser.add_argument("--improved-run-id", default=None, help="Improved strategy run_id (weekly/holding constraints)")
     parser.add_argument("--benchmark", default="KOSPI", choices=["KOSPI", "KOSPI200"], help="Benchmark index preference")
     parser.add_argument("--output-dir", default="data/reports")
     args = parser.parse_args()
@@ -30,6 +32,8 @@ def main() -> None:
         output_dir=args.output_dir,
         run_id=args.run_id,
         benchmark=args.benchmark,
+        baseline_run_id=args.baseline_run_id,
+        improved_run_id=args.improved_run_id,
     )
     print(json.dumps(result, indent=2, ensure_ascii=False))
 

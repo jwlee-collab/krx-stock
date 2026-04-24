@@ -22,8 +22,8 @@
 - `pipeline/features.py` — OHLCV 기반 피처 생성
 - `pipeline/scoring.py` — 스코어 계산 + 랭킹 저장
 - `pipeline/universe_filter.py` — 스코어링 전 유니버스(후보군) 필터링
-- `pipeline/backtest.py` — 일별 리밸런싱 백테스트
-- `pipeline/paper_trading.py` — 일회성 모의매매 리밸런싱 사이클
+- `pipeline/backtest.py` — 리밸런싱 주기/보유기간/유지규칙을 지원하는 백테스트
+- `pipeline/paper_trading.py` — 동일 규칙을 반영한 모의매매 리밸런싱 사이클
 - `pipeline/validator.py` — 전체 파이프라인 검증
 - `scripts/generate_sample_prices.py` — KRX 6자리 코드 기반 샘플 데이터 생성
 - `scripts/run_pipeline.py` — 전체 파이프라인 실행
@@ -62,7 +62,34 @@ python scripts/run_pipeline.py \
   --source csv \
   --db data/market_pipeline.db \
   --prices-csv data/sample_daily_prices.csv \
-  --top-n 3
+  --top-n 3 \
+  --rebalance-frequency daily \
+  --min-holding-days 5 \
+  --keep-rank-threshold 5
+```
+
+
+### 2-1) 매매 빈도 제어 옵션 (백테스트/모의매매 공통)
+
+- `--rebalance-frequency`: `daily`(기본) 또는 `weekly`
+  - `weekly` 정의: **ISO 주차 기준으로 각 주의 첫 거래일에만 종목 교체**를 수행합니다.
+  - 주중 나머지 거래일에는 기존 포지션을 유지하고 수익률만 반영합니다.
+- `--min-holding-days` (기본: `5`)
+  - 신규 매수 종목은 최소 N거래일 유지합니다.
+- `--keep-rank-threshold` (기본: `top_n`)
+  - 기존 보유 종목의 순위가 임계치 이내면 즉시 교체하지 않고 계속 보유합니다.
+
+예시(회전율 완화형):
+
+```bash
+python scripts/run_pipeline.py \
+  --source csv \
+  --db data/market_pipeline.db \
+  --prices-csv data/sample_daily_prices.csv \
+  --top-n 3 \
+  --rebalance-frequency weekly \
+  --min-holding-days 5 \
+  --keep-rank-threshold 5
 ```
 
 ### 3) KRX 실데이터(pykrx) 기반 실행
@@ -76,7 +103,10 @@ python scripts/run_pipeline.py \
   --symbols 005930,000660,035420,035720 \
   --start-date 2025-01-01 \
   --end-date 2025-12-31 \
-  --top-n 3
+  --top-n 3 \
+  --rebalance-frequency daily \
+  --min-holding-days 5 \
+  --keep-rank-threshold 5
 ```
 
 #### (b) 시장 단위 유니버스 (KOSPI/KOSDAQ/ALL)
@@ -161,12 +191,16 @@ python scripts/validate_pipeline.py --db data/market_pipeline.db --top-n 3
 ```bash
 python scripts/generate_performance_report.py \
   --db data/market_pipeline.db \
+  --baseline-run-id <daily_run_id> \
+  --improved-run-id <improved_run_id> \
   --benchmark KOSPI \
   --output-dir data/reports
 ```
 
 옵션:
-- `--run-id`: 특정 `backtest_runs.run_id`를 지정해서 리포트 생성 (미지정 시 최신 run 자동 선택)
+- `--baseline-run-id`: baseline 전략 run_id (일간 리밸런싱 권장)
+- `--improved-run-id`: 개선 전략 run_id (weekly/min-holding/keep-threshold 적용)
+- `--run-id`: (하위호환) improved run_id alias
 - `--benchmark`: `KOSPI` 또는 `KOSPI200` 선호값
 
 생성 산출물:
@@ -179,10 +213,11 @@ python scripts/generate_performance_report.py \
   - `performance_report_curve`
   - `performance_report_monthly`
 
-비교 기준:
-1. `strategy`: 기존 점수 기반 top-N 백테스트 (`backtest_results`) 결과 재사용
-2. `equal_weight_universe`: 같은 날짜의 `daily_scores` 후보군 전체를 동일비중으로 보유
-3. `benchmark_kospi`: pykrx 인덱스(`KOSPI=1001`, `KOSPI200=1028`) 조회를 우선 사용
+비교 기준(동일 후보군/동일 교집합 기간):
+1. `baseline_strategy`: 기존 일간 리밸런싱 전략
+2. `improved_strategy`: 개선 전략(주간 리밸런싱 + 최소 보유기간 + 유지 규칙)
+3. `equal_weight_universe`: 같은 날짜의 `daily_scores` 후보군 전체를 동일비중으로 보유
+4. `benchmark_kospi`: pykrx 인덱스(`KOSPI=1001`, `KOSPI200=1028`) 조회를 우선 사용
    - 인덱스 데이터를 가져오지 못하면 `daily_prices` 전체 동일비중 프록시를 자동 사용
    - 실제 사용된 소스는 `performance_report_runs.benchmark_source`와 리포트 JSON 출력에서 확인 가능
 
@@ -195,8 +230,8 @@ python scripts/generate_performance_report.py \
 - 평균 보유 종목 수
 
 리포트 해석 팁:
-- `strategy`가 `equal_weight_universe` 대비 초과성과를 내면, 스코어 랭킹 자체의 선택력이 있다고 해석할 수 있습니다.
-- `strategy`가 `benchmark_kospi` 대비 우수하더라도 `MDD/변동성`이 과도하면 위험-보상 균형을 함께 확인해야 합니다.
+- `improved_strategy`가 `baseline_strategy`보다 거래 횟수는 크게 낮고, 수익률 저하가 제한적이면 개선 성공으로 해석할 수 있습니다.
+- `improved_strategy`가 `equal_weight_universe`/`benchmark_kospi` 대비 우수하더라도 `MDD/변동성`까지 함께 확인해야 합니다.
 - `실제 초기 자본`과 `첫 기록 시점 자산`이 다른 이유는, 본 백테스트가 `d0→d1` 수익률을 첫 행에 기록하기 때문입니다.
 
 ## Data model (핵심 테이블)
@@ -204,13 +239,14 @@ python scripts/generate_performance_report.py \
 - `daily_prices(symbol, date, open, high, low, close, volume)`
 - `daily_features(symbol, date, ret_1d, ret_5d, momentum_20d, range_pct, volume_z20)`
 - `daily_scores(symbol, date, score, rank)`
-- `backtest_runs(run_id, created_at, top_n, start_date, end_date, initial_equity)`
+- `backtest_runs(run_id, created_at, top_n, start_date, end_date, initial_equity, rebalance_frequency, min_holding_days, keep_rank_threshold)`
 - `backtest_results(run_id, date, equity, daily_return, position_count)`
 - `performance_report_runs(report_id, base_run_id, benchmark_name, benchmark_source, start_date, end_date, ...)`
 - `performance_report_summary(report_id, strategy_key, actual_initial_capital, first_recorded_equity, ending_equity, ... )`
 - `performance_report_curve(report_id, date, strategy_equity, equal_weight_equity, benchmark_equity)`
 - `performance_report_monthly(report_id, month, strategy_return, equal_weight_return, benchmark_return)`
-- `paper_positions(symbol, qty, entry_price, updated_at)`
+- `paper_positions(symbol, qty, entry_price, entry_date, updated_at)`
+- `paper_rebalance_log(as_of_date, executed_at, rebalance_frequency)`
 - `paper_orders(order_id, created_at, symbol, side, qty, price, reason)`
 
 ## Unified scoring behavior
