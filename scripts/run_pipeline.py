@@ -47,6 +47,9 @@ def main() -> None:
     p.add_argument("--end-date", default=None, help="YYYY-MM-DD")
 
     p.add_argument("--top-n", type=int, default=3)
+    p.add_argument("--rebalance-frequency", choices=["daily", "weekly"], default="daily")
+    p.add_argument("--min-holding-days", type=int, default=5)
+    p.add_argument("--keep-rank-threshold", type=int, default=None, help="Keep existing holdings while rank <= this threshold (default: top_n)")
     p.add_argument("--disable-universe-filter", action="store_true", help="Disable pre-scoring universe filter")
     p.add_argument("--min-close-price", type=float, default=3000.0)
     p.add_argument("--min-avg-dollar-volume-20d", type=float, default=1_000_000_000.0)
@@ -122,8 +125,20 @@ def main() -> None:
             return
 
     score = generate_daily_scores(conn, include_history=True, allowed_symbols=selected_symbols)
-    run_id = run_backtest(conn, top_n=args.top_n)
-    paper = run_paper_trading_cycle(conn, target_positions=args.top_n)
+    run_id = run_backtest(
+        conn,
+        top_n=args.top_n,
+        rebalance_frequency=args.rebalance_frequency,
+        min_holding_days=args.min_holding_days,
+        keep_rank_threshold=args.keep_rank_threshold,
+    )
+    paper = run_paper_trading_cycle(
+        conn,
+        target_positions=args.top_n,
+        rebalance_frequency=args.rebalance_frequency,
+        min_holding_days=args.min_holding_days,
+        keep_rank_threshold=args.keep_rank_threshold,
+    )
 
     summary = {
         "db": args.db,
