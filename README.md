@@ -685,15 +685,21 @@ python scripts/run_start_window_robustness.py \
   --top-n-values 3,5 \
   --min-holding-days-values 3,5,10 \
   --keep-rank-offsets 2,4 \
+  --keep-rank-threshold-values 5,7,9 \
   --scoring-versions old \
   --rebalance-frequency weekly \
   --market-filter-modes off \
   --entry-gate-modes off \
   --market-scopes KOSPI \
   --position-stop-loss-modes off,on \
-  --position-stop-loss-pct-values 0.10 \
+  --position-stop-loss-pcts none,0.10 \
   --portfolio-dd-cut-modes off
 ```
+
+옵션 메모:
+- `--keep-rank-threshold-values`를 주면 absolute threshold grid를 사용하며, 미지정 시 기존 `--keep-rank-offsets`를 사용합니다.
+- `--position-stop-loss-pcts` / `--portfolio-dd-cut-pcts`는 mode와 독립적으로 해석됩니다. 예: `none,0.10` → OFF + ON(10%).
+- stability score는 1/3/6/12개월 가중치(0.10/0.20/0.30/0.40)를 고정 사용하며, missing horizon이 있어도 재정규화하지 않습니다.
 
 산출물:
 - CSV
