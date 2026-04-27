@@ -14,7 +14,7 @@ def _is_week_boundary(date_str: str, prev_date: str | None) -> bool:
 
 
 def _build_target_holdings(
-    ranked_symbols: list[str],
+    ranked_rows: list[sqlite3.Row],
     rank_by_symbol: dict[str, int],
     current_symbols: set[str],
     entry_index_by_symbol: dict[str, int],
@@ -22,6 +22,12 @@ def _build_target_holdings(
     top_n: int,
     min_holding_days: int,
     keep_rank_threshold: int,
+    entry_gate_enabled: bool = False,
+    min_entry_score: float = 0.0,
+    require_positive_momentum20: bool = False,
+    require_positive_momentum60: bool = False,
+    require_above_sma20: bool = False,
+    require_above_sma60: bool = False,
 ) -> set[str]:
     keep_due_rank = {
         sym
@@ -36,11 +42,28 @@ def _build_target_holdings(
     kept = set(keep_due_rank) | set(keep_due_holding_period)
 
     target = list(kept)
-    for sym in ranked_symbols:
+    for row in ranked_rows:
+        sym = row["symbol"]
         if sym in kept:
             continue
         if len(target) >= top_n:
             break
+        if entry_gate_enabled:
+            score = float(row["score"]) if row["score"] is not None else 0.0
+            m20 = row["momentum_20d"]
+            m60 = row["momentum_60d"]
+            g20 = row["sma_20_gap"]
+            g60 = row["sma_60_gap"]
+            if score < float(min_entry_score):
+                continue
+            if require_positive_momentum20 and (m20 is None or float(m20) <= 0.0):
+                continue
+            if require_positive_momentum60 and (m60 is None or float(m60) <= 0.0):
+                continue
+            if require_above_sma20 and (g20 is None or float(g20) <= 0.0):
+                continue
+            if require_above_sma60 and (g60 is None or float(g60) <= 0.0):
+                continue
         target.append(sym)
     return set(target)
 
@@ -99,6 +122,12 @@ def run_backtest(
     market_filter_enabled: bool = False,
     market_filter_ma20_reduce_by: int = 1,
     market_filter_ma60_mode: str = "block_new_buys",
+    entry_gate_enabled: bool = False,
+    min_entry_score: float = 0.0,
+    require_positive_momentum20: bool = False,
+    require_positive_momentum60: bool = False,
+    require_above_sma20: bool = False,
+    require_above_sma60: bool = False,
 ) -> str:
     """Equal-weight long backtest using daily_scores and next-day close returns."""
     if rebalance_frequency not in {"daily", "weekly"}:
@@ -135,8 +164,11 @@ def run_backtest(
             run_id,created_at,top_n,start_date,end_date,initial_equity,
             rebalance_frequency,min_holding_days,keep_rank_threshold,scoring_profile,
             market_filter_enabled,market_filter_ma20_reduce_by,market_filter_ma60_mode,
-            ma20_trigger_count,ma60_trigger_count,reduced_target_count_days,blocked_new_buy_days,cash_mode_days
-        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ma20_trigger_count,ma60_trigger_count,reduced_target_count_days,blocked_new_buy_days,cash_mode_days,
+            entry_gate_enabled,min_entry_score,require_positive_momentum20,require_positive_momentum60,
+            require_above_sma20,require_above_sma60,entry_gate_rejected_count,entry_gate_cash_days,
+            average_actual_position_count,min_actual_position_count,max_actual_position_count
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """,
         (
             run_id,
@@ -157,6 +189,17 @@ def run_backtest(
             0,
             0,
             0,
+            int(bool(entry_gate_enabled)),
+            float(min_entry_score),
+            int(bool(require_positive_momentum20)),
+            int(bool(require_positive_momentum60)),
+            int(bool(require_above_sma20)),
+            int(bool(require_above_sma60)),
+            0,
+            0,
+            0.0,
+            0,
+            0,
         ),
     )
 
@@ -171,6 +214,8 @@ def run_backtest(
     reduced_target_count_days = 0
     blocked_new_buy_days = 0
     cash_mode_days = 0
+    entry_gate_rejected_count = 0
+    entry_gate_cash_days = 0
 
     for i in range(len(all_dates) - 1):
         d0 = all_dates[i]
@@ -184,10 +229,17 @@ def run_backtest(
 
         if should_rebalance:
             ranked_rows = conn.execute(
-                "SELECT symbol, rank FROM daily_scores WHERE date=? ORDER BY rank ASC, symbol ASC",
+                """
+                SELECT s.symbol, s.rank, s.score,
+                       f.momentum_20d, f.momentum_60d, f.sma_20_gap, f.sma_60_gap
+                FROM daily_scores s
+                LEFT JOIN daily_features f
+                  ON f.symbol = s.symbol AND f.date = s.date
+                WHERE s.date=?
+                ORDER BY s.rank ASC, s.symbol ASC
+                """,
                 (d0,),
             ).fetchall()
-            ranked_symbols = [r["symbol"] for r in ranked_rows]
             rank_by_symbol = {r["symbol"]: int(r["rank"]) for r in ranked_rows}
 
             effective_top_n = int(top_n)
@@ -219,7 +271,7 @@ def run_backtest(
                         action = "block_new_buys"
 
             target_holdings = _build_target_holdings(
-                ranked_symbols=ranked_symbols,
+                ranked_rows=ranked_rows,
                 rank_by_symbol=rank_by_symbol,
                 current_symbols=current_holdings,
                 entry_index_by_symbol=entry_index_by_symbol,
@@ -227,9 +279,46 @@ def run_backtest(
                 top_n=effective_top_n,
                 min_holding_days=int(min_holding_days),
                 keep_rank_threshold=int(keep_rank_threshold),
+                entry_gate_enabled=entry_gate_enabled,
+                min_entry_score=min_entry_score,
+                require_positive_momentum20=require_positive_momentum20,
+                require_positive_momentum60=require_positive_momentum60,
+                require_above_sma20=require_above_sma20,
+                require_above_sma60=require_above_sma60,
             )
             if block_new_buys:
                 target_holdings = target_holdings & current_holdings
+            if entry_gate_enabled:
+                open_slots = max(0, effective_top_n - len(current_holdings))
+                rejects = 0
+                fills = 0
+                for row in ranked_rows:
+                    sym = row["symbol"]
+                    if sym in current_holdings:
+                        continue
+                    score = float(row["score"]) if row["score"] is not None else 0.0
+                    m20 = row["momentum_20d"]
+                    m60 = row["momentum_60d"]
+                    g20 = row["sma_20_gap"]
+                    g60 = row["sma_60_gap"]
+                    passed = True
+                    if score < float(min_entry_score):
+                        passed = False
+                    if require_positive_momentum20 and (m20 is None or float(m20) <= 0.0):
+                        passed = False
+                    if require_positive_momentum60 and (m60 is None or float(m60) <= 0.0):
+                        passed = False
+                    if require_above_sma20 and (g20 is None or float(g20) <= 0.0):
+                        passed = False
+                    if require_above_sma60 and (g60 is None or float(g60) <= 0.0):
+                        passed = False
+                    if passed:
+                        fills += 1
+                        if fills >= open_slots:
+                            break
+                    else:
+                        rejects += 1
+                entry_gate_rejected_count += rejects
 
             if market_filter_enabled and (regime["below_ma20"] or regime["below_ma60"]):
                 market_filter_event_rows.append(
@@ -270,6 +359,8 @@ def run_backtest(
                     returns.append((row1["close"] - row0["close"]) / row0["close"])
             daily_ret = (sum(returns) / len(returns)) if returns else 0.0
             pos_count = len(returns)
+        if entry_gate_enabled and pos_count < int(top_n):
+            entry_gate_cash_days += 1
 
         equity *= 1.0 + daily_ret
         result_rows.append((run_id, d1, equity, daily_ret, pos_count))
@@ -298,7 +389,12 @@ def run_backtest(
             ma60_trigger_count=?,
             reduced_target_count_days=?,
             blocked_new_buy_days=?,
-            cash_mode_days=?
+            cash_mode_days=?,
+            entry_gate_rejected_count=?,
+            entry_gate_cash_days=?,
+            average_actual_position_count=?,
+            min_actual_position_count=?,
+            max_actual_position_count=?
         WHERE run_id=?
         """,
         (
@@ -307,6 +403,11 @@ def run_backtest(
             int(reduced_target_count_days),
             int(blocked_new_buy_days),
             int(cash_mode_days),
+            int(entry_gate_rejected_count),
+            int(entry_gate_cash_days),
+            (sum(r[4] for r in result_rows) / len(result_rows)) if result_rows else 0.0,
+            min((r[4] for r in result_rows), default=0),
+            max((r[4] for r in result_rows), default=0),
             run_id,
         ),
     )

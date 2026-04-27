@@ -247,6 +247,106 @@ CLI 옵션:
 - 구현: 각 symbol/date에 대해 `ROW_NUMBER`를 사용해 직전 `lookback_days` 구간(`rn-lookback` ~ `rn-1`)의 `close*volume` 평균으로 유니버스를 산출합니다.
 - 검증: 파이프라인 실행 시 `lookahead_validation` 로그(checked/violations)를 출력합니다.
 
+### 3-3-3) Entry Gate + 현금 보유 허용 (무조건 top_n 매수 방지)
+
+왜 필요한가:
+- 기존 top_n 전략은 후보군이 전반적으로 약한 날에도 “상대적 1등”을 강제로 매수할 수 있습니다.
+- 이 경우 회복장 이전 구간에서 손실/변동성이 커질 수 있습니다.
+
+Entry Gate 개념:
+- **신규 진입 후보**에 최소 품질 조건을 적용해, 조건 통과 종목만 매수합니다.
+- 기존 보유 종목은 기존 규칙(`min_holding_days`, `keep_rank_threshold`)을 먼저 적용합니다.
+- 조건 통과 종목이 부족하면 **남은 슬롯은 비우고 현금으로 유지**합니다.
+
+`run_pipeline.py` 옵션:
+- `--enable-entry-gate` (기본 OFF)
+- `--min-entry-score` (기본 `0.0`)
+- `--require-positive-momentum20` (기본 OFF)
+- `--require-positive-momentum60` (기본 OFF)
+- `--require-above-sma20` (기본 OFF)
+- `--require-above-sma60` (기본 OFF)
+
+진단 지표(백테스트 결과):
+- `entry_gate_enabled`
+- `entry_gate_rejected_count`
+- `entry_gate_cash_days`
+- `average_actual_position_count`
+- `min_actual_position_count`
+- `max_actual_position_count`
+
+예시(기본 trend gate):
+
+```bash
+python scripts/run_pipeline.py \
+  --source krx \
+  --db data/entry_gate_demo.db \
+  --universe-file data/krx_source_universe_500.csv \
+  --start-date 2025-01-01 \
+  --end-date 2025-12-31 \
+  --top-n 5 \
+  --rebalance-frequency weekly \
+  --enable-entry-gate \
+  --min-entry-score 0.0 \
+  --require-positive-momentum20 \
+  --require-above-sma20
+```
+
+### 3-3-4) KOSPI / KOSDAQ 분리 진단 (market scope)
+
+왜 분리해서 보나:
+- source universe 500이 KOSPI/KOSDAQ 혼합이면, 시장 특성 차이(변동성/유동성/테마 민감도)로 성과가 섞여 보입니다.
+- 동일 전략이라도 시장별 적합도가 다를 수 있어 분리 진단이 필요합니다.
+
+`run_robustness_experiments.py` 옵션:
+- `--market-scopes KOSPI,KOSDAQ,ALL`
+  - `KOSPI`: `universe-file`의 `market=KOSPI`만 사용
+  - `KOSDAQ`: `market=KOSDAQ`만 사용
+  - `ALL`: 전체 혼합
+
+결과에 함께 기록:
+- `market_scope`, `source_symbol_count`, `average_daily_universe_count`
+- `selected_kospi_count`, `selected_kosdaq_count`
+- `kospi_contribution_return`, `kosdaq_contribution_return`
+
+추천 비교 실험:
+
+```bash
+python scripts/run_robustness_experiments.py \
+  --db data/entry_gate_market_scope.db \
+  --universe-file data/krx_source_universe_500.csv \
+  --universe-mode rolling_liquidity \
+  --universe-size 100 \
+  --universe-lookback-days 20 \
+  --period-months 3,6,12 \
+  --top-n-values 5 \
+  --min-holding-days-values 5 \
+  --keep-rank-offsets 4 \
+  --scoring-versions old \
+  --rebalance-frequency weekly \
+  --market-scopes KOSPI,KOSDAQ,ALL \
+  --entry-gate-modes off,on \
+  --entry-gate-rule-set basic_trend \
+  --min-entry-score-values 0.0,0.1
+```
+
+요청한 최소 조합만 돌릴 때:
+
+```bash
+python scripts/run_robustness_experiments.py \
+  --db data/entry_gate_market_scope_minimal.db \
+  --universe-file data/krx_source_universe_500.csv \
+  --period-months 3,6,12 \
+  --top-n-values 5 \
+  --min-holding-days-values 5 \
+  --keep-rank-offsets 4 \
+  --scoring-versions old \
+  --rebalance-frequency weekly \
+  --market-scopes KOSPI,KOSDAQ,ALL \
+  --entry-gate-modes off,on \
+  --entry-gate-rule-set basic_trend \
+  --min-entry-score-values 0.0
+```
+
 ### 3-4) 가장 안전한 검증 경로
 
 1. CSV 형식/행 수 점검 (`symbol` 컬럼 + 500개 행):
