@@ -594,8 +594,8 @@ def main() -> None:
             for p_month in periods:
                 req_end = _add_months(date.fromisoformat(s), p_month).isoformat()
                 actual_end = _nearest_trading_on_or_before(all_dates, req_end)
-                base_kwargs = dict(
-                    batch_id=batch_id, config_id=cfg.config_id, run_id=None,
+                window_kwargs = dict(
+                    batch_id=batch_id, config_id=cfg.config_id,
                     requested_start_date=s, actual_start_date=actual_start,
                     requested_end_date=req_end, actual_end_date=actual_end,
                     period_months=p_month, window_label=f"{s}_fwd_{p_month}m",
@@ -608,23 +608,65 @@ def main() -> None:
                     portfolio_dd_cut_enabled=cfg.portfolio_dd_cut_enabled,
                     portfolio_dd_cut_pct=cfg.portfolio_dd_cut_pct,
                     portfolio_dd_cooldown_days=cfg.portfolio_dd_cooldown_days,
-                    total_return=None, benchmark_return=None, excess_return=None, sharpe=None, max_drawdown=None,
-                    trade_count=None, average_actual_position_count=None, position_stop_loss_count=None,
-                    portfolio_dd_cut_count=None, win_vs_benchmark=None, cost_metadata_json=None, skipped=1,
+                )
+                result_metric_kwargs = dict(
+                    total_return=None,
+                    benchmark_return=None,
+                    excess_return=None,
+                    sharpe=None,
+                    max_drawdown=None,
+                    trade_count=None,
+                    average_actual_position_count=None,
+                    position_stop_loss_count=None,
+                    portfolio_dd_cut_count=None,
+                    win_vs_benchmark=None,
+                    cost_metadata_json=None,
                 )
                 if actual_start is None:
-                    results.append(WindowResult(**base_kwargs, skip_reason="insufficient_future_data"))
+                    results.append(
+                        WindowResult(
+                            **window_kwargs,
+                            run_id=None,
+                            **result_metric_kwargs,
+                            skipped=1,
+                            skip_reason="insufficient_future_data",
+                        )
+                    )
                     continue
                 if warmup_days < args.min_warmup_days:
-                    results.append(WindowResult(**base_kwargs, skip_reason="insufficient_warmup_data"))
+                    results.append(
+                        WindowResult(
+                            **window_kwargs,
+                            run_id=None,
+                            **result_metric_kwargs,
+                            skipped=1,
+                            skip_reason="insufficient_warmup_data",
+                        )
+                    )
                     continue
                 if req_end > max_db_date or actual_end is None or actual_end <= actual_start:
-                    results.append(WindowResult(**base_kwargs, skip_reason="insufficient_future_data"))
+                    results.append(
+                        WindowResult(
+                            **window_kwargs,
+                            run_id=None,
+                            **result_metric_kwargs,
+                            skipped=1,
+                            skip_reason="insufficient_future_data",
+                        )
+                    )
                     continue
 
                 score_cnt = conn.execute("SELECT COUNT(1) FROM daily_scores WHERE date=?", (actual_start,)).fetchone()[0]
                 if score_cnt == 0:
-                    results.append(WindowResult(**base_kwargs, skip_reason="no_scores"))
+                    results.append(
+                        WindowResult(
+                            **window_kwargs,
+                            run_id=None,
+                            **result_metric_kwargs,
+                            skipped=1,
+                            skip_reason="no_scores",
+                        )
+                    )
                     continue
                 if scope_symbols:
                     placeholders = ",".join(["?"] * len(scope_symbols))
@@ -633,7 +675,15 @@ def main() -> None:
                         (actual_start, *scope_symbols),
                     ).fetchone()[0]
                     if tradable == 0:
-                        results.append(WindowResult(**base_kwargs, skip_reason="no_tradable_universe"))
+                        results.append(
+                            WindowResult(
+                                **window_kwargs,
+                                run_id=None,
+                                **result_metric_kwargs,
+                                skipped=1,
+                                skip_reason="no_tradable_universe",
+                            )
+                        )
                         continue
 
                 try:
@@ -663,12 +713,28 @@ def main() -> None:
                         portfolio_dd_cooldown_days=cfg.portfolio_dd_cooldown_days,
                     )
                 except Exception:
-                    results.append(WindowResult(**base_kwargs, skip_reason="backtest_error"))
+                    results.append(
+                        WindowResult(
+                            **window_kwargs,
+                            run_id=None,
+                            **result_metric_kwargs,
+                            skipped=1,
+                            skip_reason="backtest_error",
+                        )
+                    )
                     continue
 
                 bt_rows = conn.execute("SELECT equity,daily_return FROM backtest_results WHERE run_id=? ORDER BY date", (run_id,)).fetchall()
                 if not bt_rows:
-                    results.append(WindowResult(**base_kwargs, run_id=run_id, skip_reason="no_backtest_rows"))
+                    results.append(
+                        WindowResult(
+                            **window_kwargs,
+                            run_id=run_id,
+                            **result_metric_kwargs,
+                            skipped=1,
+                            skip_reason="no_backtest_rows",
+                        )
+                    )
                     continue
 
                 equities = [float(r[0]) for r in bt_rows]
@@ -694,10 +760,8 @@ def main() -> None:
                 }
                 results.append(
                     WindowResult(
-                        **base_kwargs,
+                        **window_kwargs,
                         run_id=run_id,
-                        skipped=0,
-                        skip_reason="",
                         total_return=total_return,
                         benchmark_return=benchmark_return,
                         excess_return=excess,
@@ -709,6 +773,8 @@ def main() -> None:
                         portfolio_dd_cut_count=int(bt_meta[2]) if bt_meta else None,
                         win_vs_benchmark=(1 if (excess is not None and excess > 0) else (0 if excess is not None else None)),
                         cost_metadata_json=json.dumps(cost_meta, ensure_ascii=False),
+                        skipped=0,
+                        skip_reason="",
                     )
                 )
 
