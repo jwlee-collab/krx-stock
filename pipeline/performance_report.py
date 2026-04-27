@@ -126,6 +126,21 @@ def _get_scoring_profile(conn: sqlite3.Connection, run_id: str) -> str:
     row = conn.execute("SELECT COALESCE(scoring_profile, 'old') AS scoring_profile FROM backtest_runs WHERE run_id=?", (run_id,)).fetchone()
     return str(row["scoring_profile"]) if row else "old"
 
+
+def _get_market_filter_label(conn: sqlite3.Connection, run_id: str) -> str:
+    row = conn.execute(
+        """
+        SELECT COALESCE(market_filter_enabled,0) AS enabled,
+               COALESCE(market_filter_ma20_reduce_by,1) AS ma20_cut,
+               COALESCE(market_filter_ma60_mode,'block_new_buys') AS ma60_mode
+        FROM backtest_runs WHERE run_id=?
+        """,
+        (run_id,),
+    ).fetchone()
+    if not row or int(row["enabled"]) == 0:
+        return "mfilter=OFF"
+    return f"mfilter=ON(ma20_cut={int(row['ma20_cut'])},ma60={row['ma60_mode']})"
+
 def _get_initial_equity(conn: sqlite3.Connection, run_id: str) -> float:
     run = conn.execute("SELECT initial_equity FROM backtest_runs WHERE run_id=?", (run_id,)).fetchone()
     if run and run["initial_equity"] is not None:
@@ -180,7 +195,10 @@ def _simulate_holdings_from_run(conn: sqlite3.Connection, run_id: str, dates: li
         """
         SELECT top_n, COALESCE(rebalance_frequency,'daily') AS rebalance_frequency,
                COALESCE(min_holding_days,0) AS min_holding_days,
-               COALESCE(keep_rank_threshold, top_n) AS keep_rank_threshold
+               COALESCE(keep_rank_threshold, top_n) AS keep_rank_threshold,
+               COALESCE(market_filter_enabled,0) AS market_filter_enabled,
+               COALESCE(market_filter_ma20_reduce_by,1) AS market_filter_ma20_reduce_by,
+               COALESCE(market_filter_ma60_mode,'block_new_buys') AS market_filter_ma60_mode
         FROM backtest_runs WHERE run_id=?
         """,
         (run_id,),
@@ -194,6 +212,31 @@ def _simulate_holdings_from_run(conn: sqlite3.Connection, run_id: str, dates: li
     keep_rank_threshold = int(run["keep_rank_threshold"])
 
     prev_dates = [conn.execute("SELECT MAX(date) AS d FROM daily_prices WHERE date < ?", (d,)).fetchone()["d"] for d in dates]
+
+    market_filter_enabled = int(run["market_filter_enabled"]) == 1
+    market_filter_ma20_reduce_by = int(run["market_filter_ma20_reduce_by"])
+    market_filter_ma60_mode = str(run["market_filter_ma60_mode"])
+
+    market_rows = conn.execute(
+        """
+        SELECT date, AVG(close) AS market_close
+        FROM daily_prices
+        GROUP BY date
+        ORDER BY date
+        """
+    ).fetchall()
+    market_close_by_date = {r["date"]: float(r["market_close"]) for r in market_rows if r["market_close"] is not None}
+    ordered_market_dates = [d for d in sorted(market_close_by_date) if d in prev_dates]
+    regime_by_date: dict[str, dict[str, bool]] = {}
+    closes = [market_close_by_date[d] for d in ordered_market_dates]
+    for idx, d in enumerate(ordered_market_dates):
+        ma20 = (sum(closes[idx - 19 : idx + 1]) / 20.0) if idx >= 19 else None
+        ma60 = (sum(closes[idx - 59 : idx + 1]) / 60.0) if idx >= 59 else None
+        c = closes[idx]
+        regime_by_date[d] = {
+            "below_ma20": (ma20 is not None and c < ma20),
+            "below_ma60": (ma60 is not None and c < ma60),
+        }
 
     current_holdings: set[str] = set()
     entry_index_by_symbol: dict[str, int] = {}
@@ -214,16 +257,30 @@ def _simulate_holdings_from_run(conn: sqlite3.Connection, run_id: str, dates: li
             ).fetchall()
             ranked_symbols = [r["symbol"] for r in ranked]
             rank_by_symbol = {r["symbol"]: int(r["rank"]) for r in ranked}
+            effective_top_n = top_n
+            block_new_buys = False
+            if market_filter_enabled:
+                regime = regime_by_date.get(d0, {"below_ma20": False, "below_ma60": False})
+                if regime["below_ma20"]:
+                    effective_top_n = max(0, effective_top_n - max(0, market_filter_ma20_reduce_by))
+                if regime["below_ma60"]:
+                    if market_filter_ma60_mode == "cash":
+                        effective_top_n = 0
+                    elif market_filter_ma60_mode == "block_new_buys":
+                        block_new_buys = True
+
             target = _build_target_holdings(
                 ranked_symbols,
                 rank_by_symbol,
                 current_holdings,
                 entry_index_by_symbol,
                 i,
-                top_n,
+                effective_top_n,
                 min_holding_days,
                 keep_rank_threshold,
             )
+            if block_new_buys:
+                target = target & current_holdings
             for sym in target - current_holdings:
                 entry_index_by_symbol[sym] = i
             for sym in current_holdings - target:
@@ -357,11 +414,11 @@ def generate_performance_report(
 
     improved_profile = _get_scoring_profile(conn, improved_target)
     improved_series, improved_dates = _load_strategy_series(
-        conn, improved_target, key="improved_strategy_old", label=f"improved_strategy_old ({improved_profile})"
+        conn, improved_target, key="improved_strategy_old", label=f"improved_strategy_old ({improved_profile}, {_get_market_filter_label(conn, improved_target)})"
     )
     baseline_profile = _get_scoring_profile(conn, baseline_target)
     baseline_series, baseline_dates = _load_strategy_series(
-        conn, baseline_target, key="baseline_strategy", label=f"baseline_strategy ({baseline_profile})"
+        conn, baseline_target, key="baseline_strategy", label=f"baseline_strategy ({baseline_profile}, {_get_market_filter_label(conn, baseline_target)})"
     )
 
     strategy_series_map: dict[str, tuple[SeriesResult, list[str]]] = {
@@ -371,7 +428,7 @@ def generate_performance_report(
     if improved_new_run_id:
         improved_new_profile = _get_scoring_profile(conn, improved_new_run_id)
         improved_new_series, improved_new_dates = _load_strategy_series(
-            conn, improved_new_run_id, key="improved_strategy_new", label=f"improved_strategy_new ({improved_new_profile})"
+            conn, improved_new_run_id, key="improved_strategy_new", label=f"improved_strategy_new ({improved_new_profile}, {_get_market_filter_label(conn, improved_new_run_id)})"
         )
         strategy_series_map["improved_strategy_new"] = (improved_new_series, improved_new_dates)
 

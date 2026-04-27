@@ -67,7 +67,10 @@ def init_db(conn: sqlite3.Connection) -> None:
             rebalance_frequency TEXT NOT NULL DEFAULT 'daily',
             min_holding_days INTEGER NOT NULL DEFAULT 0,
             keep_rank_threshold INTEGER,
-            scoring_profile TEXT NOT NULL DEFAULT 'improved_v1'
+            scoring_profile TEXT NOT NULL DEFAULT 'improved_v1',
+            market_filter_enabled INTEGER NOT NULL DEFAULT 0,
+            market_filter_ma20_reduce_by INTEGER NOT NULL DEFAULT 1,
+            market_filter_ma60_mode TEXT NOT NULL DEFAULT 'block_new_buys'
         );
 
         CREATE TABLE IF NOT EXISTS backtest_results (
@@ -153,6 +156,9 @@ def init_db(conn: sqlite3.Connection) -> None:
             keep_rank_offset INTEGER NOT NULL,
             scoring_version TEXT NOT NULL,
             rebalance_frequency TEXT NOT NULL,
+            market_filter_enabled INTEGER NOT NULL DEFAULT 0,
+            market_filter_ma20_reduce_by INTEGER NOT NULL DEFAULT 1,
+            market_filter_ma60_mode TEXT NOT NULL DEFAULT 'block_new_buys',
             total_return REAL NOT NULL,
             max_drawdown REAL NOT NULL,
             sharpe REAL NOT NULL,
@@ -216,10 +222,16 @@ def init_db(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "backtest_runs", "min_holding_days", "min_holding_days INTEGER NOT NULL DEFAULT 0")
     _ensure_column(conn, "backtest_runs", "keep_rank_threshold", "keep_rank_threshold INTEGER")
     _ensure_column(conn, "backtest_runs", "scoring_profile", "scoring_profile TEXT NOT NULL DEFAULT 'improved_v1'")
+    _ensure_column(conn, "backtest_runs", "market_filter_enabled", "market_filter_enabled INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "backtest_runs", "market_filter_ma20_reduce_by", "market_filter_ma20_reduce_by INTEGER NOT NULL DEFAULT 1")
+    _ensure_column(conn, "backtest_runs", "market_filter_ma60_mode", "market_filter_ma60_mode TEXT NOT NULL DEFAULT 'block_new_buys'")
     _ensure_column(conn, "paper_positions", "entry_date", "entry_date TEXT")
     _ensure_column(conn, "daily_features", "momentum_60d", "momentum_60d REAL")
     _ensure_column(conn, "daily_features", "sma_20_gap", "sma_20_gap REAL")
     _ensure_column(conn, "daily_features", "sma_60_gap", "sma_60_gap REAL")
     _ensure_column(conn, "daily_features", "volatility_20d", "volatility_20d REAL")
+    _ensure_column(conn, "robustness_experiment_results", "market_filter_enabled", "market_filter_enabled INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "robustness_experiment_results", "market_filter_ma20_reduce_by", "market_filter_ma20_reduce_by INTEGER NOT NULL DEFAULT 1")
+    _ensure_column(conn, "robustness_experiment_results", "market_filter_ma60_mode", "market_filter_ma60_mode TEXT NOT NULL DEFAULT 'block_new_buys'")
 
     conn.commit()

@@ -242,6 +242,81 @@ python scripts/run_pipeline.py --source krx --symbols 005930 --universe-file dat
 
 실행 로그에서 `[universe] loaded symbols=... from file=...`가 보이면 `--universe-file` 우선 규칙이 적용된 것입니다.
 
+### 3-5) 시장 필터(Market Regime Filter) 옵션
+
+목적: **종목을 더 잘 고르는 것보다, 시장이 약할 때 포지션을 줄여 낙폭을 완화**하기 위한 보수적 옵션입니다.
+
+동작 기준(프록시):
+- 시장 지표는 `daily_prices` 전체 종목의 일별 평균 종가를 사용한 **KOSPI 방향 프록시**입니다.
+- `--enable-market-filter`를 켜면 아래 규칙이 리밸런싱 시점에 적용됩니다.
+
+규칙:
+1. 20일선 하회: 목표 보유 수를 축소
+   - `--market-filter-ma20-reduce-by` (기본 1)
+   - 예: `top_n=3`이고 20일선 하회면 `2종목` 목표
+2. 60일선 하회: 위험 회피 모드
+   - `--market-filter-ma60-mode block_new_buys` (기본): 신규 매수 금지, 기존 보유만 유지
+   - `--market-filter-ma60-mode cash`: 목표 보유 0으로 축소(현금 대기)
+   - `--market-filter-ma60-mode none`: 60일선 규칙 비활성
+
+기본 전략(old + weekly + hold=5 + keep=7 + top_n=3)에 필터 ON 적용:
+
+```bash
+python scripts/run_pipeline.py \
+  --source krx \
+  --db data/market_pipeline.db \
+  --market KOSPI \
+  --start-date 2025-01-01 \
+  --end-date 2025-12-31 \
+  --scoring-version old \
+  --top-n 3 \
+  --rebalance-frequency weekly \
+  --min-holding-days 5 \
+  --keep-rank-threshold 7 \
+  --enable-market-filter \
+  --market-filter-ma20-reduce-by 1 \
+  --market-filter-ma60-mode block_new_buys
+```
+
+필터 OFF(기존 기준 전략):
+
+```bash
+python scripts/run_pipeline.py \
+  --source krx \
+  --db data/market_pipeline.db \
+  --market KOSPI \
+  --start-date 2025-01-01 \
+  --end-date 2025-12-31 \
+  --scoring-version old \
+  --top-n 3 \
+  --rebalance-frequency weekly \
+  --min-holding-days 5 \
+  --keep-rank-threshold 7
+```
+
+`run_pipeline.py` 출력 JSON의 `market_filter` 필드에서 ON/OFF 및 파라미터를 바로 확인할 수 있습니다.
+
+### 3-6) robustness에서 필터 ON/OFF 비교
+
+아래처럼 `--market-filter-modes off,on`을 주면 같은 파라미터 조합을 필터 OFF/ON으로 모두 실행합니다.
+
+```bash
+python scripts/run_robustness_experiments.py \
+  --db data/market_pipeline.db \
+  --output-dir data/reports \
+  --period-months 3,6,12 \
+  --top-n-values 3 \
+  --min-holding-days-values 5 \
+  --keep-rank-offsets 4 \
+  --scoring-versions old \
+  --rebalance-frequency weekly \
+  --market-filter-modes off,on \
+  --market-filter-ma20-reduce-by 1 \
+  --market-filter-ma60-mode block_new_buys
+```
+
+생성되는 요약 Markdown/CSV에서 `market_filter_enabled`, `market_filter_ma20_reduce_by`, `market_filter_ma60_mode` 컬럼으로 비교할 수 있습니다.
+
 ### 4) 검증 실행
 
 ```bash
