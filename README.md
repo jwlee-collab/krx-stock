@@ -1369,3 +1369,101 @@ python scripts/run_robustness_experiments.py \
 --portfolio-dd-cooldown-days-values 20
 ```
 
+
+## 시작일 기준 rolling-window 평가
+
+`scripts/run_start_window_robustness.py`는 **요청 시작일(requested_start_date)** 을 먼저 만들고, 이를 실제 거래일로 매핑해 forward window를 평가합니다.
+
+- 매핑 규칙: `actual_start_date = requested_start_date 이상인 첫 거래일`
+- 종료일 규칙: `requested_end_date = requested_start_date + period_months - 1일`
+- 실제 종료일: `actual_end_date = requested_end_date 이하인 마지막 거래일`
+- 경계 규칙: `window_start`, `window_end`는 모두 **inclusive**
+
+결과 상세 CSV/SQLite(`start_window_robustness_results`)에는 다음 컬럼이 저장됩니다.
+- `requested_start_date`, `actual_start_date`
+- `requested_end_date`, `actual_end_date`
+- `actual_trading_days`, `period_months`
+
+### 중복 시작일 제거
+
+명시 start-date와 monthly/quarterly anchor를 함께 쓰면, 거래일 매핑 후 같은 `actual_start_date`로 합쳐질 수 있습니다.
+이 스크립트는 동일 `actual_start_date`를 1회만 평가하고, 어떤 requested start들이 합쳐졌는지 Markdown summary에 기록합니다.
+
+### skip_reason 표준화
+
+지원 skip reason:
+- `insufficient_future_data`
+- `insufficient_warmup_data`
+- `no_trading_days`
+- `no_scores`
+- `no_tradable_universe`
+- `invalid_config`
+- `backtest_error`
+
+`--min-warmup-days`(기본 60) 이전 거래일 수가 부족하면 `insufficient_warmup_data`로 skip됩니다.
+모든 summary(평균수익, 초과수익, 샤프, MDD, 승률) 계산에서는 **skipped window를 완전히 제외**합니다.
+
+### benchmark / excess 정의
+
+`--benchmark-mode` 지원값:
+- `none`
+- `source_universe_equal_weight`
+- `rolling_universe_equal_weight`
+- `kospi_index` (현재 구조에서는 NA 처리 가능)
+
+benchmark를 계산할 수 없으면 `benchmark_return`, `excess_return`, `win_vs_benchmark`는 0이 아니라 `NULL/NA`로 저장/표시합니다.
+
+### stability_score 정의
+
+config별 최종 `stability_score`는 horizon 가중 평균(평가된 window만 사용)입니다.
+
+- 1M = 0.10
+- 3M = 0.20
+- 6M = 0.30
+- 12M = 0.40
+
+즉, 1개월 구간 수가 많아도 1M 노이즈가 전체를 과도하게 지배하지 않게 설계했습니다.
+배치 메타데이터에는 `stability_score_description`이 함께 저장됩니다.
+
+### cost model / 재현성 메타데이터
+
+batch metadata(`start_window_robustness_batches`)에 아래가 저장됩니다.
+- `commission_bps`, `tax_bps`, `slippage_bps`, `cost_model`
+- `score_rows_used`, `universe_rows_used`
+- `score_generation_scope`, `universe_generation_scope`
+- lookahead validation(`lookahead_checked`, `lookahead_violations`)
+
+비용이 0 또는 `unspecified`면 Markdown에 경고가 표시됩니다.
+
+### stale daily_scores 혼입 방지
+
+이 스크립트는 실험 scope(점수버전/시장범위/유니버스 모드)마다 `daily_scores`를 재생성하며,
+메타데이터에 generation scope와 사용 row 수를 남겨 stale row 혼입 가능성을 추적합니다.
+
+### lookahead validation
+
+`rolling_liquidity` 사용 시 `validate_rolling_universe_no_lookahead` 결과를 저장합니다.
+`violations > 0`이면 기본적으로 실행을 중단하며, `--allow-lookahead-violations`를 준 경우에만 강행할 수 있습니다.
+
+### 예시 실행
+
+```bash
+python scripts/run_start_window_robustness.py \
+  --db data/test_start_window.db \
+  --output-dir data/reports \
+  --start-dates 2024-01-01,2024-01-02,2024-04-06 \
+  --start-date-frequency monthly \
+  --min-start-date 2024-01-01 \
+  --max-start-date 2024-04-30 \
+  --period-months 1,3 \
+  --top-n-values 3,5 \
+  --min-holding-days-values 3 \
+  --keep-rank-offsets 2 \
+  --scoring-versions old \
+  --entry-gate-modes off \
+  --market-filter-modes off \
+  --market-scopes ALL \
+  --position-stop-loss-pcts none,0.10 \
+  --portfolio-dd-cut-modes off \
+  --min-warmup-days 20
+```
