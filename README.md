@@ -125,13 +125,19 @@ python scripts/run_pipeline.py \
 
 #### (c) 후보군 CSV 파일 직접 지정 (`--universe-file`)
 
-`symbol` 컬럼만 있으면 됩니다. `data/kospi100_manual.csv`는 **KRX 100개 종목 코드 후보군**을 담는 예시 파일이며, 현재는 단일 컬럼(`symbol`) 100행으로 유지합니다.
+`symbol` 컬럼만 있으면 됩니다.
+
+- `data/kospi100_manual.csv`: **KRX 100개 종목 코드 후보군**(기존 파일, 단일 컬럼 유지)
+- `data/krx_source_universe_500.csv`: **dynamic universe 실험용 500개 source pool**
+  - 컬럼: `symbol,name,market,note`
+  - `symbol`은 KRX 6자리 문자열
+  - `note`에 표시된 것처럼 **수동 관리 후보군이며 정기 업데이트 필요**
 
 ```bash
 python scripts/run_pipeline.py \
   --source krx \
   --db data/market_pipeline.db \
-  --universe-file data/kospi100_manual.csv \
+  --universe-file data/krx_source_universe_500.csv \
   --start-date 2025-01-01 \
   --end-date 2025-12-31 \
   --top-n 10
@@ -243,30 +249,47 @@ CLI 옵션:
 
 ### 3-4) 가장 안전한 검증 경로
 
-1. CSV 형식/행 수 점검 (`symbol` 컬럼 + 100개 행):
+1. CSV 형식/행 수 점검 (`symbol` 컬럼 + 500개 행):
+
+```bash
+python scripts/validate_universe_csv.py --file data/krx_source_universe_500.csv
+```
+
+원라인(행 수/고유값/중복/6자리/market 분포) 확인 예시:
 
 ```bash
 python - <<'PY'
 import csv
-with open("data/kospi100_manual.csv", newline="", encoding="utf-8") as f:
+import re
+from collections import Counter
+
+with open("data/krx_source_universe_500.csv", newline="", encoding="utf-8") as f:
     r = csv.DictReader(f)
-    assert "symbol" in (r.fieldnames or []), "symbol 컬럼이 필요합니다."
     rows = list(r)
-assert len(rows) == 100, f"expected 100 rows, got {len(rows)}"
-print("ok: symbol column exists / rows=100")
+    cols = r.fieldnames or []
+
+symbols = [str(x.get("symbol", "")).zfill(6) for x in rows]
+print("rows:", len(rows))
+print("unique_symbols:", len(set(symbols)))
+print("columns:", cols)
+print("all_6digit:", all(re.fullmatch(r"\\d{6}", s) for s in symbols))
+if "market" in cols:
+    print("market_distribution:", dict(Counter((x.get("market") or "").upper() for x in rows)))
+else:
+    print("market_distribution: no market column")
 PY
 ```
 
 2. 파이프라인 실행 (`--universe-file`):
 
 ```bash
-python scripts/run_pipeline.py --source krx --universe-file data/kospi100_manual.csv --start-date 2025-01-01 --end-date 2025-01-31
+python scripts/run_pipeline.py --source krx --universe-file data/krx_source_universe_500.csv --start-date 2025-01-01 --end-date 2025-01-31
 ```
 
 3. 기존 방식과 충돌 없는지 확인 (`--symbols`와 동시 전달):
 
 ```bash
-python scripts/run_pipeline.py --source krx --symbols 005930 --universe-file data/kospi100_manual.csv --start-date 2025-01-01 --end-date 2025-01-31
+python scripts/run_pipeline.py --source krx --symbols 005930 --universe-file data/krx_source_universe_500.csv --start-date 2025-01-01 --end-date 2025-01-31
 ```
 
 실행 로그에서 `[universe] loaded symbols=... from file=...`가 보이면 `--universe-file` 우선 규칙이 적용된 것입니다.
@@ -295,7 +318,7 @@ python scripts/inspect_daily_universe.py \
 !python scripts/run_pipeline.py \
   --source krx \
   --db data/dynamic_universe_3y.db \
-  --universe-file data/kospi100_manual.csv \
+  --universe-file data/krx_source_universe_500.csv \
   --universe-mode rolling_liquidity \
   --universe-size 100 \
   --universe-lookback-days 20 \
@@ -307,6 +330,8 @@ python scripts/inspect_daily_universe.py \
   --keep-rank-threshold 7 \
   --scoring-version old
 ```
+
+위 예시는 **source universe = 500개**, **rolling universe size = 100개**, **lookback = 20거래일** 설정입니다.
 
 ### 3-4-2) static kospi100 vs rolling_liquidity 비교 예시
 
