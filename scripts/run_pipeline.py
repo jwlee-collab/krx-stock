@@ -13,6 +13,7 @@ if str(ROOT) not in sys.path:
 
 from pipeline.db import get_connection, init_db
 from pipeline.ingest import ingest_daily_prices_csv, ingest_krx_prices, resolve_krx_symbols
+from pipeline.universe_input import load_symbols_from_universe_csv, parse_symbols_arg
 from pipeline.features import generate_daily_features
 from pipeline.scoring import (
     DEFAULT_SCORING_PROFILE,
@@ -31,12 +32,6 @@ def _parse_markets(value: str) -> list[str]:
     return [x.strip().upper() for x in value.split(",") if x.strip()]
 
 
-def _parse_symbols(value: str | None) -> list[str]:
-    if not value:
-        return []
-    return [x.strip() for x in value.split(",") if x.strip()]
-
-
 def main() -> None:
     p = argparse.ArgumentParser(description="Run full SQLite KRX market pipeline")
     p.add_argument("--db", default="data/market_pipeline.db")
@@ -47,6 +42,7 @@ def main() -> None:
 
     # KRX(pykrx) mode
     p.add_argument("--symbols", help="Comma-separated KRX 6-digit symbols (e.g. 005930,000660)")
+    p.add_argument("--universe-file", help="CSV path containing at least a symbol column")
     p.add_argument("--market", default="ALL", help="KOSPI, KOSDAQ, or ALL")
     p.add_argument("--start-date", default="2025-01-01", help="YYYY-MM-DD")
     p.add_argument("--end-date", default=None, help="YYYY-MM-DD")
@@ -74,13 +70,19 @@ def main() -> None:
     conn = get_connection(args.db)
     init_db(conn)
 
+    explicit_symbols: list[str] = []
+
     if args.source == "csv":
         if not args.prices_csv:
             raise ValueError("--prices-csv is required when --source csv")
         ing = ingest_daily_prices_csv(conn, args.prices_csv)
     else:
         markets = _parse_markets(args.market)
-        symbols = _parse_symbols(args.symbols)
+        symbols = parse_symbols_arg(args.symbols)
+        if args.universe_file:
+            symbols = load_symbols_from_universe_csv(args.universe_file)
+            print(f"[universe] loaded symbols={len(symbols)} from file={args.universe_file}")
+        explicit_symbols = symbols
         if not symbols:
             symbols = resolve_krx_symbols(markets=markets, as_of_date=args.end_date)
             if not symbols:
@@ -101,8 +103,12 @@ def main() -> None:
     feat = generate_daily_features(conn)
 
     universe_summary = None
-    selected_symbols = None
-    apply_filter = (not args.disable_universe_filter) and args.source == "krx" and not _parse_symbols(args.symbols)
+    selected_symbols = explicit_symbols or None
+    apply_filter = (
+        (not args.disable_universe_filter)
+        and args.source == "krx"
+        and not selected_symbols
+    )
     if apply_filter:
         cfg = UniverseFilterConfig(
             min_close_price=args.min_close_price,
