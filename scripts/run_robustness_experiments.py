@@ -239,7 +239,16 @@ def main() -> None:
     p.add_argument("--top-n-values", default="3,5,10")
     p.add_argument("--min-holding-days-values", default="5,10")
     p.add_argument("--keep-rank-offsets", default="2,4", help="keep_rank_threshold = top_n + offset")
-    p.add_argument("--scoring-versions", default="old,trend_v2,hybrid_v3")
+    p.add_argument(
+        "--scoring-versions",
+        default="old,hybrid_v4",
+        help="Comma-separated scoring profiles for the experiment set (default focuses on old,hybrid_v4)",
+    )
+    p.add_argument(
+        "--include-trend-v2",
+        action="store_true",
+        help="Add trend_v2 as an auxiliary profile on top of --scoring-versions",
+    )
     p.add_argument("--rebalance-frequency", choices=["daily", "weekly"], default="daily")
     p.add_argument("--initial-equity", type=float, default=100000.0)
     args = p.parse_args()
@@ -259,6 +268,9 @@ def main() -> None:
     min_holding_days_values = _parse_int_list(args.min_holding_days_values)
     keep_offsets = _parse_int_list(args.keep_rank_offsets)
     scoring_versions = [normalize_scoring_profile(v) for v in _parse_str_list(args.scoring_versions)]
+    if args.include_trend_v2:
+        scoring_versions.append(normalize_scoring_profile("trend_v2"))
+    scoring_versions = list(dict.fromkeys(scoring_versions))
 
     batch_id = str(uuid.uuid4())
     created_at = datetime.now(timezone.utc).isoformat()
