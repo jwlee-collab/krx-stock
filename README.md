@@ -1201,3 +1201,171 @@ python scripts/run_robustness_experiments.py \
 # 6) outputs
 !ls -lh data/reports | tail -n 20
 ```
+
+## KOSPI-only Dynamic Universe 운영 가이드 (안정화 버전)
+
+### 1) KOSPI source universe 생성: strict vs partial
+
+이번 버전의 `scripts/build_kospi_universe.py`는 아래 순서로 데이터를 수집합니다.
+
+1. `pykrx` KOSPI 수집
+2. 실패 시 기존 `data/kospi_source_universe_500.csv` fallback
+3. 그래도 실패 시 `FinanceDataReader.StockListing('KOSPI')`
+4. 모두 실패하면 친절한 에러 메시지로 종료
+
+> 주의: 가짜/임의 종목코드는 생성하지 않습니다.
+
+#### strict mode (500 미만이면 실패)
+
+```bash
+python scripts/build_kospi_universe.py \
+  --output data/kospi_source_universe_500.csv \
+  --target-size 500 \
+  --min-size 500
+```
+
+#### partial mode (예: 300개 이상이면 진행)
+
+```bash
+python scripts/build_kospi_universe.py \
+  --output data/kospi_source_universe_500.csv \
+  --target-size 500 \
+  --min-size 300 \
+  --allow-partial
+```
+
+검증:
+
+```bash
+python scripts/validate_universe_csv.py \
+  --file data/kospi_source_universe_500.csv \
+  --require-kospi-only
+```
+
+`validate_universe_csv.py`는 row 수, unique/duplicate, 6자리 symbol, `market=KOSPI`, UTF-8 BOM 여부를 함께 점검합니다.
+
+### 2) Colab 실행 예시
+
+```bash
+!python scripts/build_kospi_universe.py \
+  --output data/kospi_source_universe_500.csv \
+  --target-size 500 \
+  --min-size 300 \
+  --allow-partial
+
+!python scripts/validate_universe_csv.py \
+  --file data/kospi_source_universe_500.csv \
+  --require-kospi-only
+
+!python scripts/run_pipeline.py \
+  --source krx \
+  --db data/kospi_dynamic_3y.db \
+  --universe-file data/kospi_source_universe_500.csv \
+  --universe-mode rolling_liquidity \
+  --universe-size 100 \
+  --universe-lookback-days 20 \
+  --start-date 2022-01-01 \
+  --end-date 2025-03-31 \
+  --top-n 5 \
+  --rebalance-frequency weekly \
+  --min-holding-days 5 \
+  --keep-rank-threshold 7 \
+  --scoring-version old
+```
+
+### 3) 파일 용도 구분
+
+- `data/kospi100_manual.csv`: 고정 100개 테스트용
+- `data/krx_source_universe_500.csv`: KOSPI+KOSDAQ 혼합 실험용
+- `data/kospi_source_universe_500.csv`: KOSPI-only dynamic universe source pool
+
+### 4) KOSPI-only 권장 실험 흐름
+
+1. KOSPI source universe 생성 또는 검증
+2. `rolling_liquidity`로 날짜별 거래대금 상위 100개 구성
+3. `old` scoring 유지
+4. `weekly` 리밸런싱
+5. `top_n=3,5,10` 비교
+6. 1/3/6/12개월 성과 비교
+
+## Risk Cut (MDD 완화 목적)
+
+### 핵심 원칙
+
+- stop loss는 수익률을 항상 높이기 위한 기능이 아니라 **MDD를 줄이기 위한 기능**입니다.
+- stop loss가 너무 빡세면 좋은 종목도 노이즈 구간에서 잘려나갈 수 있습니다.
+- 1개월 성과는 노이즈가 커서 과신하지 말고, 3/6/12개월 + MDD + Sharpe + 후보군 대비 초과수익을 함께 봐야 합니다.
+- 총수익률이 약간 낮아져도 MDD가 크게 줄고 Sharpe가 개선되면 실전성 측면에서 의미가 큽니다.
+
+### 백테스트 옵션
+
+- 개별 종목 손절(기본 OFF)
+  - `--enable-position-stop-loss`
+  - `--position-stop-loss-pct` (기본 0.08)
+- 트레일링 스탑(기본 OFF, 진단 포함)
+  - `--enable-trailing-stop`
+  - `--trailing-stop-pct` (기본 0.10)
+- 포트폴리오 DD 컷(기본 OFF)
+  - `--enable-portfolio-dd-cut`
+  - `--portfolio-dd-cut-pct` (기본 0.10)
+  - `--portfolio-dd-cooldown-days` (기본 20)
+
+**우선순위 규칙:** position stop loss는 리스크 관리 규칙이므로 `min_holding_days`보다 우선합니다.
+
+### KOSPI-only + risk cut 실행 예시
+
+```bash
+python scripts/run_pipeline.py \
+  --source krx \
+  --db data/kospi_dynamic_3y.db \
+  --universe-file data/kospi_source_universe_500.csv \
+  --universe-mode rolling_liquidity \
+  --universe-size 100 \
+  --universe-lookback-days 20 \
+  --start-date 2022-01-01 \
+  --end-date 2025-03-31 \
+  --top-n 5 \
+  --rebalance-frequency weekly \
+  --min-holding-days 5 \
+  --keep-rank-threshold 7 \
+  --scoring-version old \
+  --enable-position-stop-loss \
+  --position-stop-loss-pct 0.08 \
+  --enable-portfolio-dd-cut \
+  --portfolio-dd-cut-pct 0.10 \
+  --portfolio-dd-cooldown-days 20
+```
+
+출력 JSON의 `risk_cut.diagnostics`에서 stop/dd-cut 카운터를 확인할 수 있습니다.
+
+### Robustness에서 risk cut ON/OFF 비교
+
+```bash
+python scripts/run_robustness_experiments.py \
+  --db data/kospi_dynamic_3y.db \
+  --universe-file data/kospi_source_universe_500.csv \
+  --universe-mode rolling_liquidity \
+  --universe-size 100 \
+  --universe-lookback-days 20 \
+  --output-dir data/reports \
+  --period-months 1,3,6,12 \
+  --top-n-values 3,5,10 \
+  --min-holding-days-values 3,5,10 \
+  --keep-rank-offsets 2,4 \
+  --scoring-versions old \
+  --rebalance-frequency weekly \
+  --market-filter-modes off \
+  --entry-gate-modes off,on \
+  --market-scopes KOSPI \
+  --position-stop-loss-modes off,on \
+  --position-stop-loss-pct-values 0.08,0.10
+```
+
+추가 확장(선택):
+
+```bash
+--portfolio-dd-cut-modes off,on \
+--portfolio-dd-cut-pct-values 0.10,0.15 \
+--portfolio-dd-cooldown-days-values 20
+```
+

@@ -77,6 +77,13 @@ def main() -> None:
     p.add_argument("--require-positive-momentum60", action="store_true")
     p.add_argument("--require-above-sma20", action="store_true")
     p.add_argument("--require-above-sma60", action="store_true")
+    p.add_argument("--enable-position-stop-loss", action="store_true")
+    p.add_argument("--position-stop-loss-pct", type=float, default=0.08)
+    p.add_argument("--enable-trailing-stop", action="store_true")
+    p.add_argument("--trailing-stop-pct", type=float, default=0.10)
+    p.add_argument("--enable-portfolio-dd-cut", action="store_true")
+    p.add_argument("--portfolio-dd-cut-pct", type=float, default=0.10)
+    p.add_argument("--portfolio-dd-cooldown-days", type=int, default=20)
     args = p.parse_args()
 
     if args.scoring_profile and args.scoring_version != DEFAULT_SCORING_PROFILE:
@@ -209,6 +216,13 @@ def main() -> None:
         require_positive_momentum60=args.require_positive_momentum60,
         require_above_sma20=args.require_above_sma20,
         require_above_sma60=args.require_above_sma60,
+        enable_position_stop_loss=args.enable_position_stop_loss,
+        position_stop_loss_pct=args.position_stop_loss_pct,
+        enable_trailing_stop=args.enable_trailing_stop,
+        trailing_stop_pct=args.trailing_stop_pct,
+        enable_portfolio_dd_cut=args.enable_portfolio_dd_cut,
+        portfolio_dd_cut_pct=args.portfolio_dd_cut_pct,
+        portfolio_dd_cooldown_days=args.portfolio_dd_cooldown_days,
     )
     market_filter_summary_row = conn.execute(
         """
@@ -222,7 +236,12 @@ def main() -> None:
                entry_gate_cash_days,
                average_actual_position_count,
                min_actual_position_count,
-               max_actual_position_count
+               max_actual_position_count,
+               position_stop_loss_count,
+               trailing_stop_count,
+               portfolio_dd_cut_count,
+               portfolio_dd_cooldown_days_count,
+               risk_cut_cash_days
         FROM backtest_runs
         WHERE run_id=?
         """,
@@ -240,6 +259,8 @@ def main() -> None:
         require_positive_momentum60=args.require_positive_momentum60,
         require_above_sma20=args.require_above_sma20,
         require_above_sma60=args.require_above_sma60,
+        enable_position_stop_loss=args.enable_position_stop_loss,
+        position_stop_loss_pct=args.position_stop_loss_pct,
     )
 
     summary = {
@@ -283,6 +304,22 @@ def main() -> None:
                 "average_actual_position_count": float(market_filter_summary_row["average_actual_position_count"]) if market_filter_summary_row else 0.0,
                 "min_actual_position_count": int(market_filter_summary_row["min_actual_position_count"]) if market_filter_summary_row else 0,
                 "max_actual_position_count": int(market_filter_summary_row["max_actual_position_count"]) if market_filter_summary_row else 0,
+            },
+        },
+        "risk_cut": {
+            "enable_position_stop_loss": args.enable_position_stop_loss,
+            "position_stop_loss_pct": args.position_stop_loss_pct,
+            "enable_trailing_stop": args.enable_trailing_stop,
+            "trailing_stop_pct": args.trailing_stop_pct,
+            "enable_portfolio_dd_cut": args.enable_portfolio_dd_cut,
+            "portfolio_dd_cut_pct": args.portfolio_dd_cut_pct,
+            "portfolio_dd_cooldown_days": args.portfolio_dd_cooldown_days,
+            "diagnostics": {
+                "position_stop_loss_count": int(market_filter_summary_row["position_stop_loss_count"]) if market_filter_summary_row else 0,
+                "trailing_stop_count": int(market_filter_summary_row["trailing_stop_count"]) if market_filter_summary_row else 0,
+                "portfolio_dd_cut_count": int(market_filter_summary_row["portfolio_dd_cut_count"]) if market_filter_summary_row else 0,
+                "portfolio_dd_cooldown_days_count": int(market_filter_summary_row["portfolio_dd_cooldown_days_count"]) if market_filter_summary_row else 0,
+                "risk_cut_cash_days": int(market_filter_summary_row["risk_cut_cash_days"]) if market_filter_summary_row else 0,
             },
         },
     }
