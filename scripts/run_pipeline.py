@@ -15,6 +15,10 @@ from pipeline.db import get_connection, init_db
 from pipeline.ingest import ingest_daily_prices_csv, ingest_krx_prices, resolve_krx_symbols
 from pipeline.universe_input import load_symbols_from_universe_csv, parse_symbols_arg
 from pipeline.features import generate_daily_features
+from pipeline.dynamic_universe import (
+    build_rolling_liquidity_universe,
+    validate_rolling_universe_no_lookahead,
+)
 from pipeline.scoring import (
     DEFAULT_SCORING_PROFILE,
     SUPPORTED_SCORING_PROFILES,
@@ -64,6 +68,9 @@ def main() -> None:
     p.add_argument("--market-filter-ma20-reduce-by", type=int, default=1, help="If market close is below 20D MA, reduce target holdings by this count")
     p.add_argument("--market-filter-ma60-mode", choices=["none", "block_new_buys", "cash"], default="block_new_buys", help="If market close is below 60D MA: none, block new buys, or move to cash")
     p.add_argument("--scoring-version", choices=["old", "trend_v2", "hybrid_v3", "hybrid_v4"], default=DEFAULT_SCORING_PROFILE)
+    p.add_argument("--universe-mode", choices=["static", "rolling_liquidity"], default="static")
+    p.add_argument("--universe-size", type=int, default=100)
+    p.add_argument("--universe-lookback-days", type=int, default=20)
     args = p.parse_args()
 
     if args.scoring_profile and args.scoring_version != DEFAULT_SCORING_PROFILE:
@@ -150,11 +157,35 @@ def main() -> None:
             print(json.dumps(summary, indent=2, ensure_ascii=False))
             return
 
+    universe_build_summary = None
+    lookahead_validation = None
+    if args.universe_mode == "rolling_liquidity":
+        # Look-ahead prevention: date t universe is built from data up to t-1 only.
+        universe_build_summary = build_rolling_liquidity_universe(
+            conn,
+            universe_size=args.universe_size,
+            lookback_days=args.universe_lookback_days,
+        )
+        lookahead_validation = validate_rolling_universe_no_lookahead(
+            conn,
+            universe_size=args.universe_size,
+            lookback_days=args.universe_lookback_days,
+        )
+        print(
+            f"[daily_universe] mode=rolling_liquidity size={args.universe_size} lookback={args.universe_lookback_days} rows_changed={universe_build_summary['row_changes']}"
+        )
+        print(
+            f"[daily_universe] lookahead_validation checked={lookahead_validation['checked_rows']} violations={lookahead_validation['violations']}"
+        )
+
     score = generate_daily_scores(
         conn,
         include_history=True,
         allowed_symbols=selected_symbols,
         scoring_profile=selected_scoring,
+        universe_mode=args.universe_mode,
+        universe_size=args.universe_size,
+        universe_lookback_days=args.universe_lookback_days,
     )
     run_id = run_backtest(
         conn,
@@ -194,6 +225,11 @@ def main() -> None:
         "feature_changes": feat,
         "universe_filter": universe_summary,
         "score_changes": score,
+        "universe_mode": args.universe_mode,
+        "universe_size": args.universe_size,
+        "universe_lookback_days": args.universe_lookback_days,
+        "daily_universe_build": universe_build_summary,
+        "daily_universe_lookahead_validation": lookahead_validation,
         "scoring_profile": selected_scoring,
         "backtest_run_id": run_id,
         "paper": paper,

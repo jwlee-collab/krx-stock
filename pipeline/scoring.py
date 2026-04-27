@@ -158,18 +158,34 @@ def generate_daily_scores(
     include_history: bool = False,
     allowed_symbols: list[str] | None = None,
     scoring_profile: str = DEFAULT_SCORING_PROFILE,
+    universe_mode: str = "static",
+    universe_size: int = 100,
+    universe_lookback_days: int = 20,
 ) -> int:
     """Generate scores for one date (latest or provided) or all dates (historical mode)."""
     scoring_version = normalize_scoring_profile(scoring_profile)
 
     score_date: str | None = as_of_date
     symbol_filter_sql = ""
-    symbol_filter_params: list[str] = []
+    symbol_filter_params: list[str | int] = []
     if allowed_symbols is not None:
         if not allowed_symbols:
             return 0
         symbol_filter_sql = f" AND symbol IN ({','.join('?' for _ in allowed_symbols)})"
         symbol_filter_params = allowed_symbols
+    elif universe_mode == "rolling_liquidity":
+        symbol_filter_sql = """
+            AND EXISTS (
+                SELECT 1
+                FROM daily_universe u
+                WHERE u.date = daily_features.date
+                  AND u.symbol = daily_features.symbol
+                  AND u.universe_mode = 'rolling_liquidity'
+                  AND u.universe_size = ?
+                  AND u.lookback_days = ?
+            )
+        """
+        symbol_filter_params = [int(universe_size), int(universe_lookback_days)]
 
     if include_history:
         rows = conn.execute(
@@ -267,5 +283,39 @@ def generate_daily_scores(
                     f"DELETE FROM daily_scores WHERE date=? AND symbol NOT IN ({','.join('?' for _ in allowed_symbols)})",
                     [score_date, *allowed_symbols],
                 )
+    elif universe_mode == "rolling_liquidity":
+        if include_history:
+            conn.execute(
+                """
+                DELETE FROM daily_scores
+                WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM daily_universe u
+                    WHERE u.date=daily_scores.date
+                      AND u.symbol=daily_scores.symbol
+                      AND u.universe_mode='rolling_liquidity'
+                      AND u.universe_size=?
+                      AND u.lookback_days=?
+                )
+                """,
+                (int(universe_size), int(universe_lookback_days)),
+            )
+        elif score_date:
+            conn.execute(
+                """
+                DELETE FROM daily_scores
+                WHERE date=?
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM daily_universe u
+                      WHERE u.date=daily_scores.date
+                        AND u.symbol=daily_scores.symbol
+                        AND u.universe_mode='rolling_liquidity'
+                        AND u.universe_size=?
+                        AND u.lookback_days=?
+                  )
+                """,
+                (score_date, int(universe_size), int(universe_lookback_days)),
+            )
     conn.commit()
     return conn.total_changes - before

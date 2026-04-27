@@ -57,6 +57,19 @@ def init_db(conn: sqlite3.Connection) -> None:
             FOREIGN KEY (symbol, date) REFERENCES daily_prices(symbol, date)
         );
 
+        CREATE TABLE IF NOT EXISTS daily_universe (
+            date TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            universe_rank INTEGER NOT NULL,
+            avg_dollar_volume REAL NOT NULL,
+            universe_mode TEXT NOT NULL,
+            universe_size INTEGER NOT NULL,
+            lookback_days INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (date, symbol, universe_mode, universe_size, lookback_days),
+            FOREIGN KEY (symbol, date) REFERENCES daily_prices(symbol, date)
+        );
+
         CREATE TABLE IF NOT EXISTS backtest_runs (
             run_id TEXT PRIMARY KEY,
             created_at TEXT NOT NULL,
@@ -177,6 +190,9 @@ def init_db(conn: sqlite3.Connection) -> None:
             keep_rank_offset INTEGER NOT NULL,
             scoring_version TEXT NOT NULL,
             rebalance_frequency TEXT NOT NULL,
+            universe_mode TEXT NOT NULL DEFAULT 'static',
+            universe_size INTEGER,
+            universe_lookback_days INTEGER,
             market_filter_enabled INTEGER NOT NULL DEFAULT 0,
             market_filter_ma20_reduce_by INTEGER NOT NULL DEFAULT 1,
             market_filter_ma60_mode TEXT NOT NULL DEFAULT 'block_new_buys',
@@ -238,6 +254,7 @@ def init_db(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_prices_date ON daily_prices(date);
         CREATE INDEX IF NOT EXISTS idx_features_date ON daily_features(date);
         CREATE INDEX IF NOT EXISTS idx_scores_date_rank ON daily_scores(date, rank);
+        CREATE INDEX IF NOT EXISTS idx_daily_universe_date_rank ON daily_universe(date, universe_mode, universe_rank);
         CREATE INDEX IF NOT EXISTS idx_robustness_results_batch_score ON robustness_experiment_results(batch_id, robustness_score DESC);
         CREATE INDEX IF NOT EXISTS idx_robustness_stability_batch_score ON robustness_experiment_stability(batch_id, stability_score DESC);
         """
@@ -262,6 +279,9 @@ def init_db(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "daily_features", "sma_60_gap", "sma_60_gap REAL")
     _ensure_column(conn, "daily_features", "volatility_20d", "volatility_20d REAL")
     _ensure_column(conn, "robustness_experiment_results", "market_filter_enabled", "market_filter_enabled INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "robustness_experiment_results", "universe_mode", "universe_mode TEXT NOT NULL DEFAULT 'static'")
+    _ensure_column(conn, "robustness_experiment_results", "universe_size", "universe_size INTEGER")
+    _ensure_column(conn, "robustness_experiment_results", "universe_lookback_days", "universe_lookback_days INTEGER")
     _ensure_column(conn, "robustness_experiment_results", "market_filter_ma20_reduce_by", "market_filter_ma20_reduce_by INTEGER NOT NULL DEFAULT 1")
     _ensure_column(conn, "robustness_experiment_results", "market_filter_ma60_mode", "market_filter_ma60_mode TEXT NOT NULL DEFAULT 'block_new_buys'")
     _ensure_column(conn, "robustness_experiment_results", "ma20_trigger_count", "ma20_trigger_count INTEGER NOT NULL DEFAULT 0")

@@ -219,6 +219,28 @@ python scripts/run_pipeline.py \
 - `--universe-file`: CSV 파일 경로만 넘기면 `symbol` 컬럼을 읽어 자동 후보군 구성
   - 운영/실험에서 후보군 버전 관리가 쉽고, Colab에서 문자열 조립 작업이 사라집니다.
 
+### 3-3-1) Static Universe vs Dynamic Universe
+
+- **static**(기본): 기존과 동일하게 `--universe-file` 또는 `--symbols`로 고정 후보군을 사용합니다.
+- **rolling_liquidity**: 날짜별로 후보군을 다시 구성합니다.
+  - 구현 범위(이번 버전): 현재 DB의 `daily_prices` 종목 풀 안에서 계산
+  - 공식: `avg_dollar_volume_20d = mean(close * volume)` (최근 20거래일, **t-1까지**)
+  - t일 후보군은 `t-1`까지의 정보만으로 상위 N개를 뽑습니다(룩어헤드 바이어스 방지).
+
+CLI 옵션:
+
+- `--universe-mode static|rolling_liquidity` (기본: `static`)
+- `--universe-size` (기본: `100`)
+- `--universe-lookback-days` (기본: `20`)
+
+`rolling_liquidity` 실행 시 `daily_universe` 테이블이 생성/갱신되며, scoring/backtest는 해당 날짜의 유니버스 종목만 사용합니다.
+
+### 3-3-2) 룩어헤드 바이어스 방지 원칙
+
+- 원칙: **t일 후보군 계산에 t일 데이터는 사용하지 않는다.**
+- 구현: 각 symbol/date에 대해 `ROW_NUMBER`를 사용해 직전 `lookback_days` 구간(`rn-lookback` ~ `rn-1`)의 `close*volume` 평균으로 유니버스를 산출합니다.
+- 검증: 파이프라인 실행 시 `lookahead_validation` 로그(checked/violations)를 출력합니다.
+
 ### 3-4) 가장 안전한 검증 경로
 
 1. CSV 형식/행 수 점검 (`symbol` 컬럼 + 100개 행):
@@ -248,6 +270,77 @@ python scripts/run_pipeline.py --source krx --symbols 005930 --universe-file dat
 ```
 
 실행 로그에서 `[universe] loaded symbols=... from file=...`가 보이면 `--universe-file` 우선 규칙이 적용된 것입니다.
+
+Dynamic universe 검증(요약/카운트/Top10/Static 비교):
+
+```bash
+python scripts/inspect_daily_universe.py \
+  --db data/dynamic_universe_3y.db \
+  --universe-mode rolling_liquidity \
+  --universe-size 100 \
+  --universe-lookback-days 20 \
+  --compare-static-universe-file data/kospi100_manual.csv
+```
+
+출력에서 아래를 확인합니다.
+- `daily_universe_summary.row_count`, `min_date`, `max_date`
+- `universe_count_by_date_*` (날짜별 count)
+- `top10_for_date` (특정 날짜 상위 10개)
+- `size_violations_over_limit` (universe_size 준수 여부)
+- `rolling_vs_static_comparison.is_different` (static 대비 후보군 차이)
+
+### 3-4-1) Colab dynamic universe 실행 예시
+
+```bash
+!python scripts/run_pipeline.py \
+  --source krx \
+  --db data/dynamic_universe_3y.db \
+  --universe-file data/kospi100_manual.csv \
+  --universe-mode rolling_liquidity \
+  --universe-size 100 \
+  --universe-lookback-days 20 \
+  --start-date 2022-01-01 \
+  --end-date 2025-03-31 \
+  --top-n 3 \
+  --rebalance-frequency weekly \
+  --min-holding-days 5 \
+  --keep-rank-threshold 7 \
+  --scoring-version old
+```
+
+### 3-4-2) static kospi100 vs rolling_liquidity 비교 예시
+
+```bash
+# 1) static
+python scripts/run_pipeline.py \
+  --source krx \
+  --db data/static_kospi100.db \
+  --universe-file data/kospi100_manual.csv \
+  --universe-mode static \
+  --start-date 2022-01-01 \
+  --end-date 2025-03-31 \
+  --top-n 3 \
+  --rebalance-frequency weekly \
+  --min-holding-days 5 \
+  --keep-rank-threshold 7 \
+  --scoring-version old
+
+# 2) rolling_liquidity
+python scripts/run_pipeline.py \
+  --source krx \
+  --db data/dynamic_universe_3y.db \
+  --universe-file data/kospi100_manual.csv \
+  --universe-mode rolling_liquidity \
+  --universe-size 100 \
+  --universe-lookback-days 20 \
+  --start-date 2022-01-01 \
+  --end-date 2025-03-31 \
+  --top-n 3 \
+  --rebalance-frequency weekly \
+  --min-holding-days 5 \
+  --keep-rank-threshold 7 \
+  --scoring-version old
+```
 
 ### 3-5) 시장 필터(Market Regime Filter) 옵션
 
