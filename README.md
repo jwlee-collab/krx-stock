@@ -1026,3 +1026,178 @@ python scripts/analyze_universe_sensitivity.py \
 - 실전/리서치 모두에서 **실행 시 사용한 universe 파일 경로를 로그로 남기고**, 리포트와 함께 아카이브하세요.
 - 전략 변경 없이 후보군만 바꾼 A/B 실험을 정기 실행해, 민감도(수익/MDD/초과수익)를 모니터링하세요.
 - top_n=3 성과가 높더라도 상위 3종목 기여 비중이 과도하면, top_n=5 또는 10으로 완화한 대안을 병행 검증하세요.
+
+---
+
+## KOSPI 전용 Dynamic Universe 실험 가이드 (2026-04 업데이트)
+
+### Universe 파일 역할 구분 (중요)
+
+- `data/kospi100_manual.csv`: **고정 100개 테스트용(static) 후보군**
+- `data/krx_source_universe_500.csv`: **KOSPI+KOSDAQ 혼합 500개 실험용 후보군**
+- `data/kospi_source_universe_500.csv`: **KOSPI 전용 dynamic universe 실험용 후보군**
+
+> 주의: `kospi100_manual.csv`와 `krx_source_universe_500.csv`는 유지하고 삭제하지 않습니다.
+
+### KOSPI 전용 source universe 생성/갱신
+
+현재 저장소에는 `data/kospi_source_universe_500.csv`를 포함합니다.  
+다만 이 파일은 현재 검증 가능한 KOSPI-only 스냅샷(300개)이며, Colab/로컬에서 아래 스크립트로 **목표 500개**를 재생성해 사용하세요.
+
+```bash
+python scripts/build_kospi_universe.py \
+  --output data/kospi_source_universe_500.csv \
+  --target-size 500 \
+  --lookback-days 20 \
+  --as-of-date 2025-03-31
+```
+
+- 생성 규칙: `pykrx`로 KOSPI 종목 목록을 가져오고, 최근 `lookback-days` 평균 거래대금 기준 상위 종목을 선택
+- 출력 컬럼: `symbol,name,market,note`
+- `symbol`: 6자리 문자열, `market`: `KOSPI`
+
+### Universe CSV 검증
+
+```bash
+python scripts/validate_universe_csv.py \
+  --file data/kospi_source_universe_500.csv \
+  --require-kospi-only
+```
+
+500개를 강제 검증하려면:
+
+```bash
+python scripts/validate_universe_csv.py \
+  --file data/kospi_source_universe_500.csv \
+  --expected-rows 500 \
+  --require-kospi-only
+```
+
+검증 항목:
+- row 수
+- unique symbol 수
+- 중복 여부
+- 6자리 코드 여부
+- `market` 컬럼 KOSPI-only 여부
+- UTF-8 BOM 여부
+
+### KOSPI-only dynamic universe 실행 예시
+
+```bash
+python scripts/run_pipeline.py \
+  --source krx \
+  --db data/kospi_dynamic_500_to_100_3y.db \
+  --universe-file data/kospi_source_universe_500.csv \
+  --universe-mode rolling_liquidity \
+  --universe-size 100 \
+  --universe-lookback-days 20 \
+  --start-date 2022-01-01 \
+  --end-date 2025-03-31 \
+  --top-n 5 \
+  --rebalance-frequency weekly \
+  --min-holding-days 5 \
+  --keep-rank-threshold 7 \
+  --scoring-version old
+```
+
+### KOSPI-only robustness 실험 예시 (1/3/6/12개월 동시 평가)
+
+```bash
+python scripts/run_robustness_experiments.py \
+  --db data/kospi_dynamic_500_to_100_3y.db \
+  --universe-file data/kospi_source_universe_500.csv \
+  --universe-mode rolling_liquidity \
+  --universe-size 100 \
+  --universe-lookback-days 20 \
+  --output-dir data/reports \
+  --period-months 1,3,6,12 \
+  --top-n-values 3,5,10 \
+  --min-holding-days-values 3,5,10 \
+  --keep-rank-offsets 2,4 \
+  --scoring-versions old \
+  --rebalance-frequency weekly \
+  --market-filter-modes off \
+  --entry-gate-modes off,on \
+  --min-entry-score-values 0.0 \
+  --entry-gate-rule-set basic_trend \
+  --market-scopes KOSPI
+```
+
+### 3개월/6개월 수익률 개선 가능성 확인 실험 흐름
+
+1. `--period-months 1,3,6,12`로 전체 기간을 동시에 계산
+2. 1개월은 참고 지표로만 보고, 3/6개월 구간에서 조합별 순위 변화 확인
+3. `top-n`, `min-holding-days`, `keep-rank-offset` 조합 중 3/6개월 상위 반복 출현 조합 추리기
+4. 같은 조합의 12개월/MDD/샤프/후보군 대비 초과수익까지 동시 확인
+5. 3/6개월 개선 + 12개월 안정성까지 보이는 조합만 최종 후보로 채택
+
+### 1개월 수익률 해석 원칙 (반드시 준수)
+
+- 1개월 수익률은 노이즈가 크므로 최종 전략 선택 기준으로 과신하지 말 것
+- 1개월 성과는 단기 손실 위험, 진입 타이밍 민감도, 전략 반응 속도 확인용으로 사용할 것
+- 최종 판단은 3/6/12개월 성과, MDD, 샤프비율, 후보군 평균 대비 초과수익을 함께 볼 것
+- 1개월은 좋지만 3/6/12개월이 나쁘면 단기 운이 좋았을 가능성이 크다
+- 1개월은 약하지만 3/6/12개월이 안정적이면 스윙/중기 전략으로 볼 수 있다
+
+### Colab 실행 흐름 (KOSPI 전용)
+
+1. 최신 저장소 clone
+2. `pykrx` 설치
+3. KOSPI 500 후보군 생성 또는 검증
+4. KOSPI dynamic universe DB 생성
+5. 1/3/6/12개월 robustness 실험 실행
+6. 결과 CSV 확인
+
+예시:
+
+```bash
+# 1) clone
+!git clone <YOUR_REPO_URL>
+%cd krx-stock
+
+# 2) install
+!pip install pykrx
+
+# 3) build / validate
+!python scripts/build_kospi_universe.py --output data/kospi_source_universe_500.csv --target-size 500 --lookback-days 20
+!python scripts/validate_universe_csv.py --file data/kospi_source_universe_500.csv --expected-rows 500 --require-kospi-only
+
+# 4) run pipeline
+!python scripts/run_pipeline.py \
+  --source krx \
+  --db data/kospi_dynamic_500_to_100_3y.db \
+  --universe-file data/kospi_source_universe_500.csv \
+  --universe-mode rolling_liquidity \
+  --universe-size 100 \
+  --universe-lookback-days 20 \
+  --start-date 2022-01-01 \
+  --end-date 2025-03-31 \
+  --top-n 5 \
+  --rebalance-frequency weekly \
+  --min-holding-days 5 \
+  --keep-rank-threshold 7 \
+  --scoring-version old
+
+# 5) robustness (1/3/6/12m)
+!python scripts/run_robustness_experiments.py \
+  --db data/kospi_dynamic_500_to_100_3y.db \
+  --universe-file data/kospi_source_universe_500.csv \
+  --universe-mode rolling_liquidity \
+  --universe-size 100 \
+  --universe-lookback-days 20 \
+  --output-dir data/reports \
+  --period-months 1,3,6,12 \
+  --top-n-values 3,5,10 \
+  --min-holding-days-values 3,5,10 \
+  --keep-rank-offsets 2,4 \
+  --scoring-versions old \
+  --rebalance-frequency weekly \
+  --market-filter-modes off \
+  --entry-gate-modes off,on \
+  --min-entry-score-values 0.0 \
+  --entry-gate-rule-set basic_trend \
+  --market-scopes KOSPI
+
+# 6) outputs
+!ls -lh data/reports | tail -n 20
+```
