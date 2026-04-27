@@ -99,7 +99,19 @@ def init_db(conn: sqlite3.Connection) -> None:
             entry_gate_cash_days INTEGER NOT NULL DEFAULT 0,
             average_actual_position_count REAL NOT NULL DEFAULT 0.0,
             min_actual_position_count INTEGER NOT NULL DEFAULT 0,
-            max_actual_position_count INTEGER NOT NULL DEFAULT 0
+            max_actual_position_count INTEGER NOT NULL DEFAULT 0,
+            enable_position_stop_loss INTEGER NOT NULL DEFAULT 0,
+            position_stop_loss_pct REAL NOT NULL DEFAULT 0.08,
+            enable_trailing_stop INTEGER NOT NULL DEFAULT 0,
+            trailing_stop_pct REAL NOT NULL DEFAULT 0.10,
+            enable_portfolio_dd_cut INTEGER NOT NULL DEFAULT 0,
+            portfolio_dd_cut_pct REAL NOT NULL DEFAULT 0.10,
+            portfolio_dd_cooldown_days INTEGER NOT NULL DEFAULT 20,
+            position_stop_loss_count INTEGER NOT NULL DEFAULT 0,
+            trailing_stop_count INTEGER NOT NULL DEFAULT 0,
+            portfolio_dd_cut_count INTEGER NOT NULL DEFAULT 0,
+            portfolio_dd_cooldown_days_count INTEGER NOT NULL DEFAULT 0,
+            risk_cut_cash_days INTEGER NOT NULL DEFAULT 0
         );
 
         CREATE TABLE IF NOT EXISTS backtest_market_filter_events (
@@ -125,6 +137,20 @@ def init_db(conn: sqlite3.Connection) -> None:
             daily_return REAL NOT NULL,
             position_count INTEGER NOT NULL,
             PRIMARY KEY (run_id, date),
+            FOREIGN KEY (run_id) REFERENCES backtest_runs(run_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS backtest_risk_events (
+            event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id TEXT NOT NULL,
+            date TEXT NOT NULL,
+            symbol TEXT,
+            event_type TEXT NOT NULL,
+            trigger_price REAL,
+            reference_price REAL,
+            return_pct REAL,
+            action TEXT NOT NULL,
+            created_at TEXT NOT NULL,
             FOREIGN KEY (run_id) REFERENCES backtest_runs(run_id)
         );
 
@@ -223,6 +249,18 @@ def init_db(conn: sqlite3.Connection) -> None:
             average_actual_position_count REAL NOT NULL DEFAULT 0.0,
             min_actual_position_count INTEGER NOT NULL DEFAULT 0,
             max_actual_position_count INTEGER NOT NULL DEFAULT 0,
+            enable_position_stop_loss INTEGER NOT NULL DEFAULT 0,
+            position_stop_loss_pct REAL NOT NULL DEFAULT 0.08,
+            enable_trailing_stop INTEGER NOT NULL DEFAULT 0,
+            trailing_stop_pct REAL NOT NULL DEFAULT 0.10,
+            enable_portfolio_dd_cut INTEGER NOT NULL DEFAULT 0,
+            portfolio_dd_cut_pct REAL NOT NULL DEFAULT 0.10,
+            portfolio_dd_cooldown_days INTEGER NOT NULL DEFAULT 20,
+            position_stop_loss_count INTEGER NOT NULL DEFAULT 0,
+            trailing_stop_count INTEGER NOT NULL DEFAULT 0,
+            portfolio_dd_cut_count INTEGER NOT NULL DEFAULT 0,
+            portfolio_dd_cooldown_days_count INTEGER NOT NULL DEFAULT 0,
+            risk_cut_cash_days INTEGER NOT NULL DEFAULT 0,
             market_scope TEXT NOT NULL DEFAULT 'ALL',
             source_symbol_count INTEGER NOT NULL DEFAULT 0,
             average_daily_universe_count REAL NOT NULL DEFAULT 0.0,
@@ -284,6 +322,7 @@ def init_db(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_features_date ON daily_features(date);
         CREATE INDEX IF NOT EXISTS idx_scores_date_rank ON daily_scores(date, rank);
         CREATE INDEX IF NOT EXISTS idx_daily_universe_date_rank ON daily_universe(date, universe_mode, universe_rank);
+        CREATE INDEX IF NOT EXISTS idx_backtest_risk_events_run_date ON backtest_risk_events(run_id, date);
         CREATE INDEX IF NOT EXISTS idx_robustness_results_batch_score ON robustness_experiment_results(batch_id, robustness_score DESC);
         CREATE INDEX IF NOT EXISTS idx_robustness_stability_batch_score ON robustness_experiment_stability(batch_id, stability_score DESC);
         """
@@ -313,11 +352,36 @@ def init_db(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "backtest_runs", "average_actual_position_count", "average_actual_position_count REAL NOT NULL DEFAULT 0.0")
     _ensure_column(conn, "backtest_runs", "min_actual_position_count", "min_actual_position_count INTEGER NOT NULL DEFAULT 0")
     _ensure_column(conn, "backtest_runs", "max_actual_position_count", "max_actual_position_count INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "backtest_runs", "enable_position_stop_loss", "enable_position_stop_loss INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "backtest_runs", "position_stop_loss_pct", "position_stop_loss_pct REAL NOT NULL DEFAULT 0.08")
+    _ensure_column(conn, "backtest_runs", "enable_trailing_stop", "enable_trailing_stop INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "backtest_runs", "trailing_stop_pct", "trailing_stop_pct REAL NOT NULL DEFAULT 0.10")
+    _ensure_column(conn, "backtest_runs", "enable_portfolio_dd_cut", "enable_portfolio_dd_cut INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "backtest_runs", "portfolio_dd_cut_pct", "portfolio_dd_cut_pct REAL NOT NULL DEFAULT 0.10")
+    _ensure_column(conn, "backtest_runs", "portfolio_dd_cooldown_days", "portfolio_dd_cooldown_days INTEGER NOT NULL DEFAULT 20")
+    _ensure_column(conn, "backtest_runs", "position_stop_loss_count", "position_stop_loss_count INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "backtest_runs", "trailing_stop_count", "trailing_stop_count INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "backtest_runs", "portfolio_dd_cut_count", "portfolio_dd_cut_count INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "backtest_runs", "portfolio_dd_cooldown_days_count", "portfolio_dd_cooldown_days_count INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "backtest_runs", "risk_cut_cash_days", "risk_cut_cash_days INTEGER NOT NULL DEFAULT 0")
     _ensure_column(conn, "paper_positions", "entry_date", "entry_date TEXT")
     _ensure_column(conn, "daily_features", "momentum_60d", "momentum_60d REAL")
     _ensure_column(conn, "daily_features", "sma_20_gap", "sma_20_gap REAL")
     _ensure_column(conn, "daily_features", "sma_60_gap", "sma_60_gap REAL")
     _ensure_column(conn, "daily_features", "volatility_20d", "volatility_20d REAL")
+
+    _ensure_column(conn, "robustness_experiment_results", "enable_position_stop_loss", "enable_position_stop_loss INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "robustness_experiment_results", "position_stop_loss_pct", "position_stop_loss_pct REAL NOT NULL DEFAULT 0.08")
+    _ensure_column(conn, "robustness_experiment_results", "enable_trailing_stop", "enable_trailing_stop INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "robustness_experiment_results", "trailing_stop_pct", "trailing_stop_pct REAL NOT NULL DEFAULT 0.10")
+    _ensure_column(conn, "robustness_experiment_results", "enable_portfolio_dd_cut", "enable_portfolio_dd_cut INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "robustness_experiment_results", "portfolio_dd_cut_pct", "portfolio_dd_cut_pct REAL NOT NULL DEFAULT 0.10")
+    _ensure_column(conn, "robustness_experiment_results", "portfolio_dd_cooldown_days", "portfolio_dd_cooldown_days INTEGER NOT NULL DEFAULT 20")
+    _ensure_column(conn, "robustness_experiment_results", "position_stop_loss_count", "position_stop_loss_count INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "robustness_experiment_results", "trailing_stop_count", "trailing_stop_count INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "robustness_experiment_results", "portfolio_dd_cut_count", "portfolio_dd_cut_count INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "robustness_experiment_results", "portfolio_dd_cooldown_days_count", "portfolio_dd_cooldown_days_count INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "robustness_experiment_results", "risk_cut_cash_days", "risk_cut_cash_days INTEGER NOT NULL DEFAULT 0")
     _ensure_column(conn, "robustness_experiment_results", "market_filter_enabled", "market_filter_enabled INTEGER NOT NULL DEFAULT 0")
     _ensure_column(conn, "robustness_experiment_results", "universe_mode", "universe_mode TEXT NOT NULL DEFAULT 'static'")
     _ensure_column(conn, "robustness_experiment_results", "universe_size", "universe_size INTEGER")

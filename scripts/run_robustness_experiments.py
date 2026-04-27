@@ -69,6 +69,18 @@ class ExperimentResult:
     average_actual_position_count: float
     min_actual_position_count: int
     max_actual_position_count: int
+    enable_position_stop_loss: int
+    position_stop_loss_pct: float
+    enable_trailing_stop: int
+    trailing_stop_pct: float
+    enable_portfolio_dd_cut: int
+    portfolio_dd_cut_pct: float
+    portfolio_dd_cooldown_days: int
+    position_stop_loss_count: int
+    trailing_stop_count: int
+    portfolio_dd_cut_count: int
+    portfolio_dd_cooldown_days_count: int
+    risk_cut_cash_days: int
     market_scope: str
     source_symbol_count: int
     average_daily_universe_count: float
@@ -391,6 +403,11 @@ def main() -> None:
     p.add_argument("--require-positive-momentum60", action="store_true")
     p.add_argument("--require-above-sma20", action="store_true")
     p.add_argument("--require-above-sma60", action="store_true")
+    p.add_argument("--position-stop-loss-modes", default="off,on", help="Comma-separated: off,on")
+    p.add_argument("--position-stop-loss-pct-values", default="0.08,0.10")
+    p.add_argument("--portfolio-dd-cut-modes", default="off,on", help="Comma-separated: off,on")
+    p.add_argument("--portfolio-dd-cut-pct-values", default="0.10")
+    p.add_argument("--portfolio-dd-cooldown-days-values", default="20")
     args = p.parse_args()
 
     conn = get_connection(args.db)
@@ -434,6 +451,17 @@ def main() -> None:
     min_entry_scores = _parse_float_list(args.min_entry_score_values)
     if args.min_entry_score is not None and args.min_entry_score_values == "0.0":
         min_entry_scores = [float(args.min_entry_score)]
+    position_stop_loss_modes = [x.strip().lower() for x in args.position_stop_loss_modes.split(",") if x.strip()]
+    position_stop_loss_modes = list(dict.fromkeys(position_stop_loss_modes))
+    if [m for m in position_stop_loss_modes if m not in {"off", "on"}]:
+        raise ValueError("invalid --position-stop-loss-modes")
+    position_stop_loss_pct_values = _parse_float_list(args.position_stop_loss_pct_values)
+    portfolio_dd_cut_modes = [x.strip().lower() for x in args.portfolio_dd_cut_modes.split(",") if x.strip()]
+    portfolio_dd_cut_modes = list(dict.fromkeys(portfolio_dd_cut_modes))
+    if [m for m in portfolio_dd_cut_modes if m not in {"off", "on"}]:
+        raise ValueError("invalid --portfolio-dd-cut-modes")
+    portfolio_dd_cut_pct_values = _parse_float_list(args.portfolio_dd_cut_pct_values)
+    portfolio_dd_cooldown_days_values = _parse_int_list(args.portfolio_dd_cooldown_days_values)
 
     selected_symbols = parse_symbols_arg(args.symbols)
     selected_symbol_to_market: dict[str, str] = {s: "UNKNOWN" for s in selected_symbols}
@@ -518,152 +546,243 @@ def main() -> None:
                                 for entry_mode in entry_gate_modes:
                                     entry_gate_enabled = entry_mode == "on"
                                     for min_entry_score in min_entry_scores:
-                                        require_positive_momentum20 = args.require_positive_momentum20
-                                        require_positive_momentum60 = args.require_positive_momentum60
-                                        require_above_sma20 = args.require_above_sma20
-                                        require_above_sma60 = args.require_above_sma60
-                                        if args.entry_gate_rule_set == "basic_trend":
-                                            require_positive_momentum20 = True
-                                            require_above_sma20 = True
+                                        for pos_sl_mode in position_stop_loss_modes:
+                                            for pos_sl_pct in position_stop_loss_pct_values:
+                                                for port_dd_mode in portfolio_dd_cut_modes:
+                                                    for port_dd_cut_pct in portfolio_dd_cut_pct_values:
+                                                        for port_dd_cd_days in portfolio_dd_cooldown_days_values:
+                                                            enable_position_stop_loss = pos_sl_mode == "on"
+                                                            enable_portfolio_dd_cut = port_dd_mode == "on"
+                                                            require_positive_momentum20 = args.require_positive_momentum20
+                                                            require_positive_momentum60 = args.require_positive_momentum60
+                                                            require_above_sma20 = args.require_above_sma20
+                                                            require_above_sma60 = args.require_above_sma60
+                                                            if args.entry_gate_rule_set == "basic_trend":
+                                                                require_positive_momentum20 = True
+                                                                require_above_sma20 = True
 
-                                        generate_daily_scores(
-                                            conn,
-                                            include_history=True,
-                                            allowed_symbols=scoped_symbols or None,
-                                            scoring_profile=scoring_version,
-                                            universe_mode=args.universe_mode,
-                                            universe_size=args.universe_size,
-                                            universe_lookback_days=args.universe_lookback_days,
-                                        )
-                                        run_id = run_backtest(
-                                            conn,
-                                            top_n=top_n,
-                                            start_date=start_date,
-                                            end_date=end_date,
-                                            initial_equity=args.initial_equity,
-                                            rebalance_frequency=args.rebalance_frequency,
-                                            min_holding_days=min_holding_days,
-                                            keep_rank_threshold=keep_rank_threshold,
-                                            scoring_profile=scoring_version,
-                                            market_filter_enabled=market_filter_enabled,
-                                            market_filter_ma20_reduce_by=args.market_filter_ma20_reduce_by,
-                                            market_filter_ma60_mode=args.market_filter_ma60_mode,
-                                            entry_gate_enabled=entry_gate_enabled,
-                                            min_entry_score=min_entry_score,
-                                            require_positive_momentum20=require_positive_momentum20,
-                                            require_positive_momentum60=require_positive_momentum60,
-                                            require_above_sma20=require_above_sma20,
-                                            require_above_sma60=require_above_sma60,
-                                        )
+                                                            generate_daily_scores(
+                                                                conn,
+                                                                include_history=True,
+                                                                allowed_symbols=scoped_symbols or None,
+                                                                scoring_profile=scoring_version,
+                                                                universe_mode=args.universe_mode,
+                                                                universe_size=args.universe_size,
+                                                                universe_lookback_days=args.universe_lookback_days,
+                                                            )
+                                                            run_id = run_backtest(
+                                                                conn,
+                                                                top_n=top_n,
+                                                                start_date=start_date,
+                                                                end_date=end_date,
+                                                                initial_equity=args.initial_equity,
+                                                                rebalance_frequency=args.rebalance_frequency,
+                                                                min_holding_days=min_holding_days,
+                                                                keep_rank_threshold=keep_rank_threshold,
+                                                                scoring_profile=scoring_version,
+                                                                market_filter_enabled=market_filter_enabled,
+                                                                market_filter_ma20_reduce_by=args.market_filter_ma20_reduce_by,
+                                                                market_filter_ma60_mode=args.market_filter_ma60_mode,
+                                                                entry_gate_enabled=entry_gate_enabled,
+                                                                min_entry_score=min_entry_score,
+                                                                require_positive_momentum20=require_positive_momentum20,
+                                                                require_positive_momentum60=require_positive_momentum60,
+                                                                require_above_sma20=require_above_sma20,
+                                                                require_above_sma60=require_above_sma60,
+                                                                enable_position_stop_loss=enable_position_stop_loss,
+                                                                position_stop_loss_pct=pos_sl_pct,
+                                                                enable_portfolio_dd_cut=enable_portfolio_dd_cut,
+                                                                portfolio_dd_cut_pct=port_dd_cut_pct,
+                                                                portfolio_dd_cooldown_days=port_dd_cd_days,
+                                                            )
 
-                                        bt_rows = conn.execute(
-                                "SELECT date,equity,daily_return FROM backtest_results WHERE run_id=? ORDER BY date",
-                                (run_id,),
-                            ).fetchall()
-                                        if not bt_rows:
-                                            continue
+                                                            bt_rows = conn.execute(
+                                                                "SELECT date,equity,daily_return FROM backtest_results WHERE run_id=? ORDER BY date",
+                                                                (run_id,),
+                                                            ).fetchall()
+                                                            if not bt_rows:
+                                                                continue
 
-                                        returns = [float(r["daily_return"]) for r in bt_rows]
-                                        equities = [float(r["equity"]) for r in bt_rows]
-                                        total_return = _safe_div(equities[-1] - args.initial_equity, args.initial_equity)
-                                        mdd = _max_drawdown(equities)
-                                        sharpe = _sharpe(returns)
-                                        market_diag = conn.execute(
-                                """
-                                SELECT ma20_trigger_count, ma60_trigger_count, reduced_target_count_days,
-                                       blocked_new_buy_days, cash_mode_days, entry_gate_enabled,
-                                       min_entry_score, require_positive_momentum20, require_positive_momentum60,
-                                       require_above_sma20, require_above_sma60, entry_gate_rejected_count,
-                                       entry_gate_cash_days, average_actual_position_count,
-                                       min_actual_position_count, max_actual_position_count
-                                FROM backtest_runs
-                                WHERE run_id=?
-                                """,
-                                (run_id,),
-                            ).fetchone()
+                                                            returns = [float(r["daily_return"]) for r in bt_rows]
+                                                            equities = [float(r["equity"]) for r in bt_rows]
+                                                            total_return = _safe_div(equities[-1] - args.initial_equity, args.initial_equity)
+                                                            mdd = _max_drawdown(equities)
+                                                            sharpe = _sharpe(returns)
+                                                            market_diag = conn.execute(
+                                                                """
+                                                                SELECT ma20_trigger_count, ma60_trigger_count, reduced_target_count_days,
+                                                                       blocked_new_buy_days, cash_mode_days, entry_gate_enabled,
+                                                                       min_entry_score, require_positive_momentum20, require_positive_momentum60,
+                                                                       require_above_sma20, require_above_sma60, entry_gate_rejected_count,
+                                                                       entry_gate_cash_days, average_actual_position_count,
+                                                                       min_actual_position_count, max_actual_position_count,
+                                                                       enable_position_stop_loss, position_stop_loss_pct,
+                                                                       enable_trailing_stop, trailing_stop_pct,
+                                                                       enable_portfolio_dd_cut, portfolio_dd_cut_pct, portfolio_dd_cooldown_days,
+                                                                       position_stop_loss_count, trailing_stop_count, portfolio_dd_cut_count,
+                                                                       portfolio_dd_cooldown_days_count, risk_cut_cash_days
+                                                                FROM backtest_runs
+                                                                WHERE run_id=?
+                                                                """,
+                                                                (run_id,),
+                                                            ).fetchone()
 
-                                        holdings_by_day = _simulate_holdings(
-                                            conn,
-                                            available_dates,
-                                            top_n=top_n,
-                                            min_holding_days=min_holding_days,
-                                            keep_rank_threshold=keep_rank_threshold,
-                                            rebalance_frequency=args.rebalance_frequency,
-                                            entry_gate_enabled=entry_gate_enabled,
-                                            min_entry_score=min_entry_score,
-                                            require_positive_momentum20=require_positive_momentum20,
-                                            require_positive_momentum60=require_positive_momentum60,
-                                            require_above_sma20=require_above_sma20,
-                                            require_above_sma60=require_above_sma60,
-                                        )
-                                        trade_count = _estimate_trade_count(holdings_by_day)
-                                        selected_kospi_count, selected_kosdaq_count, kospi_contribution, kosdaq_contribution = _compute_market_selection_diagnostics(
-                                            conn, available_dates, holdings_by_day, scoped_symbol_to_market
-                                        )
+                                                            holdings_by_day = _simulate_holdings(
+                                                                conn,
+                                                                available_dates,
+                                                                top_n=top_n,
+                                                                min_holding_days=min_holding_days,
+                                                                keep_rank_threshold=keep_rank_threshold,
+                                                                rebalance_frequency=args.rebalance_frequency,
+                                                                entry_gate_enabled=entry_gate_enabled,
+                                                                min_entry_score=min_entry_score,
+                                                                require_positive_momentum20=require_positive_momentum20,
+                                                                require_positive_momentum60=require_positive_momentum60,
+                                                                require_above_sma20=require_above_sma20,
+                                                                require_above_sma60=require_above_sma60,
+                                                            )
+                                                            trade_count = _estimate_trade_count(holdings_by_day)
+                                                            selected_kospi_count, selected_kosdaq_count, kospi_contribution, kosdaq_contribution = _compute_market_selection_diagnostics(
+                                                                conn, available_dates, holdings_by_day, scoped_symbol_to_market
+                                                            )
 
-                                        candidate_avg_return = _compute_candidate_avg_return(conn, available_dates)
-                                        excess_return = total_return - candidate_avg_return
-                                        robust_score = _compute_robustness_score(
-                                            total_return=total_return,
-                                            mdd=mdd,
-                                            sharpe=sharpe,
-                                            trade_count=trade_count,
-                                            excess=excess_return,
-                                        )
+                                                            candidate_avg_return = _compute_candidate_avg_return(conn, available_dates)
+                                                            excess_return = total_return - candidate_avg_return
+                                                            robust_score = _compute_robustness_score(
+                                                                total_return=total_return,
+                                                                mdd=mdd,
+                                                                sharpe=sharpe,
+                                                                trade_count=trade_count,
+                                                                excess=excess_return,
+                                                            )
 
-                                        result = ExperimentResult(
-                                batch_id=batch_id,
-                                run_id=run_id,
-                                start_date=start_date,
-                                end_date=end_date,
-                                period_months=period_m,
-                                top_n=top_n,
-                                min_holding_days=min_holding_days,
-                                keep_rank_threshold=keep_rank_threshold,
-                                keep_rank_offset=keep_offset,
-                                scoring_version=scoring_version,
-                                rebalance_frequency=args.rebalance_frequency,
-                                universe_mode=args.universe_mode,
-                                universe_size=(args.universe_size if args.universe_mode == "rolling_liquidity" else None),
-                                universe_lookback_days=(args.universe_lookback_days if args.universe_mode == "rolling_liquidity" else None),
-                                market_filter_enabled=int(market_filter_enabled),
-                                market_filter_ma20_reduce_by=int(max(0, args.market_filter_ma20_reduce_by)),
-                                market_filter_ma60_mode=args.market_filter_ma60_mode,
-                                ma20_trigger_count=int(market_diag["ma20_trigger_count"]) if market_diag else 0,
-                                ma60_trigger_count=int(market_diag["ma60_trigger_count"]) if market_diag else 0,
-                                reduced_target_count_days=int(market_diag["reduced_target_count_days"]) if market_diag else 0,
-                                blocked_new_buy_days=int(market_diag["blocked_new_buy_days"]) if market_diag else 0,
-                                cash_mode_days=int(market_diag["cash_mode_days"]) if market_diag else 0,
-                                entry_gate_enabled=int(market_diag["entry_gate_enabled"]) if market_diag else 0,
-                                min_entry_score=float(market_diag["min_entry_score"]) if market_diag else float(min_entry_score),
-                                require_positive_momentum20=int(market_diag["require_positive_momentum20"]) if market_diag else int(require_positive_momentum20),
-                                require_positive_momentum60=int(market_diag["require_positive_momentum60"]) if market_diag else int(require_positive_momentum60),
-                                require_above_sma20=int(market_diag["require_above_sma20"]) if market_diag else int(require_above_sma20),
-                                require_above_sma60=int(market_diag["require_above_sma60"]) if market_diag else int(require_above_sma60),
-                                entry_gate_rejected_count=int(market_diag["entry_gate_rejected_count"]) if market_diag else 0,
-                                entry_gate_cash_days=int(market_diag["entry_gate_cash_days"]) if market_diag else 0,
-                                average_actual_position_count=float(market_diag["average_actual_position_count"]) if market_diag else 0.0,
-                                min_actual_position_count=int(market_diag["min_actual_position_count"]) if market_diag else 0,
-                                max_actual_position_count=int(market_diag["max_actual_position_count"]) if market_diag else 0,
-                                market_scope=market_scope,
-                                source_symbol_count=len(scoped_symbols),
-                                average_daily_universe_count=(sum(len(h) for h in holdings_by_day) / len(holdings_by_day)) if holdings_by_day else 0.0,
-                                selected_kospi_count=selected_kospi_count,
-                                selected_kosdaq_count=selected_kosdaq_count,
-                                kospi_contribution_return=kospi_contribution,
-                                kosdaq_contribution_return=kosdaq_contribution,
-                                total_return=total_return,
-                                max_drawdown=mdd,
-                                sharpe=sharpe,
-                                trade_count=trade_count,
-                                candidate_avg_return=candidate_avg_return,
-                                excess_return_vs_universe=excess_return,
-                                robustness_score=robust_score,
-                                        )
-                                        detailed_results.append(result)
+                                                            result = ExperimentResult(
+                                                                batch_id=batch_id,
+                                                                run_id=run_id,
+                                                                start_date=start_date,
+                                                                end_date=end_date,
+                                                                period_months=period_m,
+                                                                top_n=top_n,
+                                                                min_holding_days=min_holding_days,
+                                                                keep_rank_threshold=keep_rank_threshold,
+                                                                keep_rank_offset=keep_offset,
+                                                                scoring_version=scoring_version,
+                                                                rebalance_frequency=args.rebalance_frequency,
+                                                                universe_mode=args.universe_mode,
+                                                                universe_size=(args.universe_size if args.universe_mode == "rolling_liquidity" else None),
+                                                                universe_lookback_days=(args.universe_lookback_days if args.universe_mode == "rolling_liquidity" else None),
+                                                                market_filter_enabled=int(market_filter_enabled),
+                                                                market_filter_ma20_reduce_by=int(max(0, args.market_filter_ma20_reduce_by)),
+                                                                market_filter_ma60_mode=args.market_filter_ma60_mode,
+                                                                ma20_trigger_count=int(market_diag["ma20_trigger_count"]) if market_diag else 0,
+                                                                ma60_trigger_count=int(market_diag["ma60_trigger_count"]) if market_diag else 0,
+                                                                reduced_target_count_days=int(market_diag["reduced_target_count_days"]) if market_diag else 0,
+                                                                blocked_new_buy_days=int(market_diag["blocked_new_buy_days"]) if market_diag else 0,
+                                                                cash_mode_days=int(market_diag["cash_mode_days"]) if market_diag else 0,
+                                                                entry_gate_enabled=int(market_diag["entry_gate_enabled"]) if market_diag else 0,
+                                                                min_entry_score=float(market_diag["min_entry_score"]) if market_diag else float(min_entry_score),
+                                                                require_positive_momentum20=int(market_diag["require_positive_momentum20"]) if market_diag else int(require_positive_momentum20),
+                                                                require_positive_momentum60=int(market_diag["require_positive_momentum60"]) if market_diag else int(require_positive_momentum60),
+                                                                require_above_sma20=int(market_diag["require_above_sma20"]) if market_diag else int(require_above_sma20),
+                                                                require_above_sma60=int(market_diag["require_above_sma60"]) if market_diag else int(require_above_sma60),
+                                                                entry_gate_rejected_count=int(market_diag["entry_gate_rejected_count"]) if market_diag else 0,
+                                                                entry_gate_cash_days=int(market_diag["entry_gate_cash_days"]) if market_diag else 0,
+                                                                average_actual_position_count=float(market_diag["average_actual_position_count"]) if market_diag else 0.0,
+                                                                min_actual_position_count=int(market_diag["min_actual_position_count"]) if market_diag else 0,
+                                                                max_actual_position_count=int(market_diag["max_actual_position_count"]) if market_diag else 0,
+                                                                enable_position_stop_loss=int(market_diag["enable_position_stop_loss"]) if market_diag else int(enable_position_stop_loss),
+                                                                position_stop_loss_pct=float(market_diag["position_stop_loss_pct"]) if market_diag else float(pos_sl_pct),
+                                                                enable_trailing_stop=int(market_diag["enable_trailing_stop"]) if market_diag else 0,
+                                                                trailing_stop_pct=float(market_diag["trailing_stop_pct"]) if market_diag else 0.10,
+                                                                enable_portfolio_dd_cut=int(market_diag["enable_portfolio_dd_cut"]) if market_diag else int(enable_portfolio_dd_cut),
+                                                                portfolio_dd_cut_pct=float(market_diag["portfolio_dd_cut_pct"]) if market_diag else float(port_dd_cut_pct),
+                                                                portfolio_dd_cooldown_days=int(market_diag["portfolio_dd_cooldown_days"]) if market_diag else int(port_dd_cd_days),
+                                                                position_stop_loss_count=int(market_diag["position_stop_loss_count"]) if market_diag else 0,
+                                                                trailing_stop_count=int(market_diag["trailing_stop_count"]) if market_diag else 0,
+                                                                portfolio_dd_cut_count=int(market_diag["portfolio_dd_cut_count"]) if market_diag else 0,
+                                                                portfolio_dd_cooldown_days_count=int(market_diag["portfolio_dd_cooldown_days_count"]) if market_diag else 0,
+                                                                risk_cut_cash_days=int(market_diag["risk_cut_cash_days"]) if market_diag else 0,
+                                                                market_scope=market_scope,
+                                                                source_symbol_count=len(scoped_symbols),
+                                                                average_daily_universe_count=(sum(len(h) for h in holdings_by_day) / len(holdings_by_day)) if holdings_by_day else 0.0,
+                                                                selected_kospi_count=selected_kospi_count,
+                                                                selected_kosdaq_count=selected_kosdaq_count,
+                                                                kospi_contribution_return=kospi_contribution,
+                                                                kosdaq_contribution_return=kosdaq_contribution,
+                                                                total_return=total_return,
+                                                                max_drawdown=mdd,
+                                                                sharpe=sharpe,
+                                                                trade_count=trade_count,
+                                                                candidate_avg_return=candidate_avg_return,
+                                                                excess_return_vs_universe=excess_return,
+                                                                robustness_score=robust_score,
+                                                            )
+                                                            detailed_results.append(result)
 
-                                        conn.execute(
-                            """
+                                                            insert_values = (
+                                                                result.batch_id,
+                                                                result.run_id,
+                                                                result.start_date,
+                                                                result.end_date,
+                                                                result.period_months,
+                                                                result.top_n,
+                                                                result.min_holding_days,
+                                                                result.keep_rank_threshold,
+                                                                result.keep_rank_offset,
+                                                                result.scoring_version,
+                                                                result.rebalance_frequency,
+                                                                result.universe_mode,
+                                                                result.universe_size,
+                                                                result.universe_lookback_days,
+                                                                result.market_filter_enabled,
+                                                                result.market_filter_ma20_reduce_by,
+                                                                result.market_filter_ma60_mode,
+                                                                result.ma20_trigger_count,
+                                                                result.ma60_trigger_count,
+                                                                result.reduced_target_count_days,
+                                                                result.blocked_new_buy_days,
+                                                                result.cash_mode_days,
+                                                                result.entry_gate_enabled,
+                                                                result.min_entry_score,
+                                                                result.require_positive_momentum20,
+                                                                result.require_positive_momentum60,
+                                                                result.require_above_sma20,
+                                                                result.require_above_sma60,
+                                                                result.entry_gate_rejected_count,
+                                                                result.entry_gate_cash_days,
+                                                                result.average_actual_position_count,
+                                                                result.min_actual_position_count,
+                                                                result.max_actual_position_count,
+                                                                result.enable_position_stop_loss,
+                                                                result.position_stop_loss_pct,
+                                                                result.enable_trailing_stop,
+                                                                result.trailing_stop_pct,
+                                                                result.enable_portfolio_dd_cut,
+                                                                result.portfolio_dd_cut_pct,
+                                                                result.portfolio_dd_cooldown_days,
+                                                                result.position_stop_loss_count,
+                                                                result.trailing_stop_count,
+                                                                result.portfolio_dd_cut_count,
+                                                                result.portfolio_dd_cooldown_days_count,
+                                                                result.risk_cut_cash_days,
+                                                                result.market_scope,
+                                                                result.source_symbol_count,
+                                                                result.average_daily_universe_count,
+                                                                result.selected_kospi_count,
+                                                                result.selected_kosdaq_count,
+                                                                result.kospi_contribution_return,
+                                                                result.kosdaq_contribution_return,
+                                                                result.total_return,
+                                                                result.max_drawdown,
+                                                                result.sharpe,
+                                                                result.trade_count,
+                                                                result.candidate_avg_return,
+                                                                result.excess_return_vs_universe,
+                                                                result.robustness_score,
+                                                            )
+                                                            placeholders = ",".join(["?"] * len(insert_values))
+                                                            conn.execute(
+                            f"""
                             INSERT INTO robustness_experiment_results(
                                 batch_id, run_id, start_date, end_date, period_months,
                                 top_n, min_holding_days, keep_rank_threshold, keep_rank_offset,
@@ -674,68 +793,24 @@ def main() -> None:
                                 entry_gate_enabled, min_entry_score, require_positive_momentum20, require_positive_momentum60,
                                 require_above_sma20, require_above_sma60, entry_gate_rejected_count, entry_gate_cash_days,
                                 average_actual_position_count, min_actual_position_count, max_actual_position_count,
+                                enable_position_stop_loss, position_stop_loss_pct, enable_trailing_stop, trailing_stop_pct,
+                                enable_portfolio_dd_cut, portfolio_dd_cut_pct, portfolio_dd_cooldown_days,
+                                position_stop_loss_count, trailing_stop_count, portfolio_dd_cut_count,
+                                portfolio_dd_cooldown_days_count, risk_cut_cash_days,
                                 market_scope, source_symbol_count, average_daily_universe_count,
                                 selected_kospi_count, selected_kosdaq_count, kospi_contribution_return, kosdaq_contribution_return,
                                 total_return, max_drawdown, sharpe, trade_count,
                                 candidate_avg_return, excess_return_vs_universe, robustness_score
-                            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                            ) VALUES({placeholders})
                             """,
-                            (
-                                result.batch_id,
-                                result.run_id,
-                                result.start_date,
-                                result.end_date,
-                                result.period_months,
-                                result.top_n,
-                                result.min_holding_days,
-                                result.keep_rank_threshold,
-                                result.keep_rank_offset,
-                                result.scoring_version,
-                                result.rebalance_frequency,
-                                result.universe_mode,
-                                result.universe_size,
-                                result.universe_lookback_days,
-                                result.market_filter_enabled,
-                                result.market_filter_ma20_reduce_by,
-                                result.market_filter_ma60_mode,
-                                result.ma20_trigger_count,
-                                result.ma60_trigger_count,
-                                result.reduced_target_count_days,
-                                result.blocked_new_buy_days,
-                                result.cash_mode_days,
-                                result.entry_gate_enabled,
-                                result.min_entry_score,
-                                result.require_positive_momentum20,
-                                result.require_positive_momentum60,
-                                result.require_above_sma20,
-                                result.require_above_sma60,
-                                result.entry_gate_rejected_count,
-                                result.entry_gate_cash_days,
-                                result.average_actual_position_count,
-                                result.min_actual_position_count,
-                                result.max_actual_position_count,
-                                result.market_scope,
-                                result.source_symbol_count,
-                                result.average_daily_universe_count,
-                                result.selected_kospi_count,
-                                result.selected_kosdaq_count,
-                                result.kospi_contribution_return,
-                                result.kosdaq_contribution_return,
-                                result.total_return,
-                                result.max_drawdown,
-                                result.sharpe,
-                                result.trade_count,
-                                result.candidate_avg_return,
-                                result.excess_return_vs_universe,
-                                result.robustness_score,
-                            ),
-                        )
-                                        conn.commit()
-                                        print(
-                                "[ok]",
-                                f"period={period_m}m top_n={top_n} hold={min_holding_days} keep={keep_rank_threshold} score={scoring_version} mfilter={market_mode} gate={entry_mode} market_scope={market_scope}",
-                                f"run_id={run_id[:8]} total={total_return:.2%} sharpe={sharpe:.2f} excess={excess_return:.2%}",
-                            )
+                            insert_values,
+                                                            )
+                                                            conn.commit()
+                                                            print(
+                                                                "[ok]",
+                                                                f"period={period_m}m top_n={top_n} hold={min_holding_days} keep={keep_rank_threshold} score={scoring_version} mfilter={market_mode} gate={entry_mode} pos_sl={pos_sl_mode}:{pos_sl_pct:.2f} dd_cut={port_dd_mode}:{port_dd_cut_pct:.2f}/{port_dd_cd_days} market_scope={market_scope}",
+                                                                f"run_id={run_id[:8]} total={total_return:.2%} sharpe={sharpe:.2f} excess={excess_return:.2%}",
+                                                            )
 
     if not detailed_results:
         raise ValueError("실험 결과가 없습니다. 입력 기간/데이터를 확인하세요.")
@@ -747,7 +822,9 @@ def main() -> None:
         key = (
             f"top_n={r.top_n}|hold={r.min_holding_days}|keep_offset={r.keep_rank_offset}|scoring={r.scoring_version}|"
             f"mfilter={r.market_filter_enabled}|ma20cut={r.market_filter_ma20_reduce_by}|ma60={r.market_filter_ma60_mode}|"
-            f"entry_gate={r.entry_gate_enabled}|min_entry_score={r.min_entry_score}|market_scope={r.market_scope}"
+            f"entry_gate={r.entry_gate_enabled}|min_entry_score={r.min_entry_score}|"
+            f"pos_sl={r.enable_position_stop_loss}:{r.position_stop_loss_pct:.2f}|"
+            f"dd_cut={r.enable_portfolio_dd_cut}:{r.portfolio_dd_cut_pct:.2f}/{r.portfolio_dd_cooldown_days}|market_scope={r.market_scope}"
         )
         stable_groups[key].append(r)
 
@@ -837,6 +914,8 @@ def main() -> None:
         f"- Scoring versions: `{scoring_versions}`",
         f"- Market filter modes: `{market_filter_modes}` (ma20_reduce_by={args.market_filter_ma20_reduce_by}, ma60_mode={args.market_filter_ma60_mode})",
         f"- Entry gate modes: `{entry_gate_modes}` (min_entry_scores={min_entry_scores}, rule_set={args.entry_gate_rule_set})",
+        f"- Position stop loss modes: `{position_stop_loss_modes}` (pct_values={position_stop_loss_pct_values})",
+        f"- Portfolio DD cut modes: `{portfolio_dd_cut_modes}` (pct_values={portfolio_dd_cut_pct_values}, cooldown_days={portfolio_dd_cooldown_days_values})",
         f"- Market scopes: `{market_scopes}`",
         f"- Rebalance frequency: `{args.rebalance_frequency}`",
         f"- Universe mode: `{args.universe_mode}`",
@@ -852,15 +931,17 @@ def main() -> None:
         "",
         "## 상위 10개 개별 실험(robustness_score 기준)",
         "",
-        "|rank|period|top_n|min_hold|keep_threshold|scoring|market_scope|entry_gate|min_entry|market_filter|gate_reject|gate_cash_days|avg_pos|KOSPI_sel|KOSDAQ_sel|total_return|MDD|sharpe|trades|excess_vs_universe|score|",
-        "|---:|---:|---:|---:|---:|---|---|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "|rank|period|top_n|min_hold|keep_threshold|scoring|market_scope|entry_gate|min_entry|pos_sl|dd_cut|market_filter|risk_cash_days|gate_reject|gate_cash_days|avg_pos|KOSPI_sel|KOSDAQ_sel|total_return|MDD|sharpe|trades|excess_vs_universe|score|",
+        "|---:|---:|---:|---:|---:|---|---|---|---:|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for idx, r in enumerate(top_details, start=1):
         lines.append(
             f"|{idx}|{r.period_months}m|{r.top_n}|{r.min_holding_days}|{r.keep_rank_threshold}|{r.scoring_version}|{r.market_scope}|"
             f"{'ON' if r.entry_gate_enabled else 'OFF'}|{r.min_entry_score:.2f}|"
+            f"{'ON' if r.enable_position_stop_loss else 'OFF'}({r.position_stop_loss_pct:.2f})|"
+            f"{'ON' if r.enable_portfolio_dd_cut else 'OFF'}({r.portfolio_dd_cut_pct:.2f}/{r.portfolio_dd_cooldown_days})|"
             f"{'ON' if r.market_filter_enabled else 'OFF'}({r.market_filter_ma60_mode})|"
-            f"{r.entry_gate_rejected_count}|{r.entry_gate_cash_days}|{r.average_actual_position_count:.2f}|{r.selected_kospi_count}|{r.selected_kosdaq_count}|"
+            f"{r.risk_cut_cash_days}|{r.entry_gate_rejected_count}|{r.entry_gate_cash_days}|{r.average_actual_position_count:.2f}|{r.selected_kospi_count}|{r.selected_kosdaq_count}|"
             f"{r.total_return:.2%}|{r.max_drawdown:.2%}|{r.sharpe:.2f}|{r.trade_count}|{r.excess_return_vs_universe:.2%}|{r.robustness_score:.4f}|"
         )
 

@@ -32,6 +32,8 @@ def run_paper_trading_cycle(
     require_positive_momentum60: bool = False,
     require_above_sma20: bool = False,
     require_above_sma60: bool = False,
+    enable_position_stop_loss: bool = False,
+    position_stop_loss_pct: float = 0.08,
 ) -> dict:
     """Rebalance paper portfolio to top-ranked symbols for a date."""
     if rebalance_frequency not in {"daily", "weekly"}:
@@ -80,6 +82,23 @@ def run_paper_trading_cycle(
 
     current_rows = conn.execute("SELECT symbol, qty, entry_date FROM paper_positions").fetchall()
     current_syms = {r["symbol"] for r in current_rows}
+    stop_loss_exits: set[str] = set()
+    if enable_position_stop_loss:
+        for row in current_rows:
+            sym = row["symbol"]
+            entry_px = conn.execute(
+                "SELECT entry_price FROM paper_positions WHERE symbol=?",
+                (sym,),
+            ).fetchone()
+            now_px = conn.execute(
+                "SELECT close FROM daily_prices WHERE symbol=? AND date=?",
+                (sym, as_of_date),
+            ).fetchone()
+            if not entry_px or not now_px or not entry_px["entry_price"]:
+                continue
+            ret = (now_px["close"] - entry_px["entry_price"]) / entry_px["entry_price"]
+            if ret <= -float(position_stop_loss_pct):
+                stop_loss_exits.add(sym)
 
     protected: set[str] = set()
     for row in current_rows:
@@ -88,6 +107,7 @@ def run_paper_trading_cycle(
         holding_days = _trading_days_between(conn, row["entry_date"], as_of_date) if row["entry_date"] else 0
         if rank <= int(keep_rank_threshold) or holding_days <= int(min_holding_days):
             protected.add(sym)
+    protected -= stop_loss_exits
 
     target_list = list(protected)
     entry_gate_rejected = 0
@@ -134,7 +154,7 @@ def run_paper_trading_cycle(
         if pos and px:
             conn.execute(
                 "INSERT INTO paper_orders(created_at,symbol,side,qty,price,reason) VALUES(?,?,?,?,?,?)",
-                (ts, sym, "SELL", pos["qty"], px["close"], "rebalance_out"),
+                (ts, sym, "SELL", pos["qty"], px["close"], "position_stop_loss" if sym in stop_loss_exits else "rebalance_out"),
             )
             conn.execute("DELETE FROM paper_positions WHERE symbol=?", (sym,))
             sold += 1
@@ -182,4 +202,7 @@ def run_paper_trading_cycle(
         "entry_gate_enabled": bool(entry_gate_enabled),
         "entry_gate_rejected_count": int(entry_gate_rejected),
         "actual_position_count": len(target_syms),
+        "position_stop_loss_enabled": bool(enable_position_stop_loss),
+        "position_stop_loss_pct": float(position_stop_loss_pct),
+        "position_stop_loss_sell_count": len(stop_loss_exits),
     }
