@@ -62,7 +62,7 @@ def _build_proxy_market_close_by_date(conn: sqlite3.Connection, dates: list[str]
 def _build_market_regime_by_date(
     conn: sqlite3.Connection,
     dates: list[str],
-) -> dict[str, dict[str, bool]]:
+) -> dict[str, dict[str, float | bool | None]]:
     if not dates:
         return {}
 
@@ -70,12 +70,15 @@ def _build_market_regime_by_date(
     ordered_dates = [d for d in dates if d in close_by_date]
     closes = [close_by_date[d] for d in ordered_dates]
 
-    regime_by_date: dict[str, dict[str, bool]] = {}
+    regime_by_date: dict[str, dict[str, float | bool | None]] = {}
     for idx, d in enumerate(ordered_dates):
         ma20 = (sum(closes[idx - 19 : idx + 1]) / 20.0) if idx >= 19 else None
         ma60 = (sum(closes[idx - 59 : idx + 1]) / 60.0) if idx >= 59 else None
         c = closes[idx]
         regime_by_date[d] = {
+            "market_proxy_value": c,
+            "market_proxy_ma20": ma20,
+            "market_proxy_ma60": ma60,
             "below_ma20": (ma20 is not None and c < ma20),
             "below_ma60": (ma60 is not None and c < ma60),
         }
@@ -131,8 +134,9 @@ def run_backtest(
         INSERT INTO backtest_runs(
             run_id,created_at,top_n,start_date,end_date,initial_equity,
             rebalance_frequency,min_holding_days,keep_rank_threshold,scoring_profile,
-            market_filter_enabled,market_filter_ma20_reduce_by,market_filter_ma60_mode
-        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+            market_filter_enabled,market_filter_ma20_reduce_by,market_filter_ma60_mode,
+            ma20_trigger_count,ma60_trigger_count,reduced_target_count_days,blocked_new_buy_days,cash_mode_days
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """,
         (
             run_id,
@@ -148,6 +152,11 @@ def run_backtest(
             int(bool(market_filter_enabled)),
             int(max(0, market_filter_ma20_reduce_by)),
             market_filter_ma60_mode,
+            0,
+            0,
+            0,
+            0,
+            0,
         ),
     )
 
@@ -156,6 +165,12 @@ def run_backtest(
 
     current_holdings: set[str] = set()
     entry_index_by_symbol: dict[str, int] = {}
+    market_filter_event_rows: list[tuple] = []
+    ma20_trigger_count = 0
+    ma60_trigger_count = 0
+    reduced_target_count_days = 0
+    blocked_new_buy_days = 0
+    cash_mode_days = 0
 
     for i in range(len(all_dates) - 1):
         d0 = all_dates[i]
@@ -177,15 +192,31 @@ def run_backtest(
 
             effective_top_n = int(top_n)
             block_new_buys = False
+            action = "none"
+            regime = {
+                "market_proxy_value": None,
+                "market_proxy_ma20": None,
+                "market_proxy_ma60": None,
+                "below_ma20": False,
+                "below_ma60": False,
+            }
             if market_filter_enabled:
-                regime = regime_by_date.get(d0, {"below_ma20": False, "below_ma60": False})
+                regime = regime_by_date.get(d0, regime)
                 if regime["below_ma20"]:
                     effective_top_n = max(0, effective_top_n - int(max(0, market_filter_ma20_reduce_by)))
+                    ma20_trigger_count += 1
+                    reduced_target_count_days += 1
+                    action = "reduce_holdings"
                 if regime["below_ma60"]:
+                    ma60_trigger_count += 1
                     if market_filter_ma60_mode == "cash":
                         effective_top_n = 0
+                        cash_mode_days += 1
+                        action = "cash"
                     elif market_filter_ma60_mode == "block_new_buys":
                         block_new_buys = True
+                        blocked_new_buy_days += 1
+                        action = "block_new_buys"
 
             target_holdings = _build_target_holdings(
                 ranked_symbols=ranked_symbols,
@@ -199,6 +230,23 @@ def run_backtest(
             )
             if block_new_buys:
                 target_holdings = target_holdings & current_holdings
+
+            if market_filter_enabled and (regime["below_ma20"] or regime["below_ma60"]):
+                market_filter_event_rows.append(
+                    (
+                        run_id,
+                        d0,
+                        regime["market_proxy_value"],
+                        regime["market_proxy_ma20"],
+                        regime["market_proxy_ma60"],
+                        int(bool(regime["below_ma20"])),
+                        int(bool(regime["below_ma60"])),
+                        int(top_n),
+                        len(target_holdings),
+                        market_filter_ma60_mode,
+                        action,
+                    )
+                )
 
             for sym in (target_holdings - current_holdings):
                 entry_index_by_symbol[sym] = i
@@ -232,6 +280,35 @@ def run_backtest(
         VALUES(?,?,?,?,?)
         """,
         result_rows,
+    )
+    if market_filter_event_rows:
+        conn.executemany(
+            """
+            INSERT INTO backtest_market_filter_events(
+                run_id,date,market_proxy_value,market_proxy_ma20,market_proxy_ma60,
+                below_ma20,below_ma60,original_target_count,adjusted_target_count,ma60_mode,action
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            market_filter_event_rows,
+        )
+    conn.execute(
+        """
+        UPDATE backtest_runs
+        SET ma20_trigger_count=?,
+            ma60_trigger_count=?,
+            reduced_target_count_days=?,
+            blocked_new_buy_days=?,
+            cash_mode_days=?
+        WHERE run_id=?
+        """,
+        (
+            int(ma20_trigger_count),
+            int(ma60_trigger_count),
+            int(reduced_target_count_days),
+            int(blocked_new_buy_days),
+            int(cash_mode_days),
+            run_id,
+        ),
     )
     conn.commit()
     return run_id

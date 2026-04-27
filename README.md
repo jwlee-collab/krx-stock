@@ -294,7 +294,32 @@ python scripts/run_pipeline.py \
   --keep-rank-threshold 7
 ```
 
-`run_pipeline.py` 출력 JSON의 `market_filter` 필드에서 ON/OFF 및 파라미터를 바로 확인할 수 있습니다.
+`run_pipeline.py` 출력 JSON의 `market_filter` 필드에서 ON/OFF, 파라미터, 그리고 진단 요약(`diagnostics`)을 확인할 수 있습니다.
+
+시장 필터가 실제로 작동한 일자를 확인하려면 아래 SQL을 사용하세요.
+
+```sql
+SELECT
+  date,
+  market_proxy_value,
+  market_proxy_ma20,
+  market_proxy_ma60,
+  below_ma20,
+  below_ma60,
+  original_target_count,
+  adjusted_target_count,
+  ma60_mode,
+  action
+FROM backtest_market_filter_events
+WHERE run_id = '<backtest_run_id>'
+ORDER BY date;
+```
+
+`action` 해석:
+- `reduce_holdings`: MA20 하회로 목표 보유 수 축소가 적용됨
+- `block_new_buys`: MA60 하회 + `ma60_mode=block_new_buys`로 신규 매수 차단이 적용됨
+- `cash`: MA60 하회 + `ma60_mode=cash`로 현금 대기(목표 보유 0) 적용됨
+- `none`: 트리거는 있었지만(예: MA60 + mode=none) 포지션 제약이 추가로 걸리지 않음
 
 ### 3-6) robustness에서 필터 ON/OFF 비교
 
@@ -315,7 +340,14 @@ python scripts/run_robustness_experiments.py \
   --market-filter-ma60-mode block_new_buys
 ```
 
-생성되는 요약 Markdown/CSV에서 `market_filter_enabled`, `market_filter_ma20_reduce_by`, `market_filter_ma60_mode` 컬럼으로 비교할 수 있습니다.
+생성되는 요약 Markdown/CSV에서 `market_filter_enabled`, `market_filter_ma20_reduce_by`, `market_filter_ma60_mode`와 함께
+`ma20_trigger_count`, `ma60_trigger_count`, `reduced_target_count_days`, `blocked_new_buy_days`, `cash_mode_days` 컬럼으로 실제 작동 빈도를 비교할 수 있습니다.
+
+`block_new_buys`와 `cash` 결과가 거의 같게 보일 때는 아래를 먼저 확인하세요.
+1. `ma60_trigger_count`가 0인지 (애초에 MA60 하회가 거의 없으면 두 모드 차이가 작습니다)
+2. `blocked_new_buy_days` 대비 `cash_mode_days` 차이
+3. `backtest_market_filter_events.adjusted_target_count`가 이미 낮은지(예: MA20 축소 + 기존 보유 적음)
+4. 리밸런싱 빈도(weekly에서는 신호가 있어도 반영 횟수가 줄어듦)
 
 ### 4) 검증 실행
 
@@ -457,7 +489,8 @@ python scripts/generate_performance_report.py \
 - `daily_prices(symbol, date, open, high, low, close, volume)`
 - `daily_features(symbol, date, ret_1d, ret_5d, momentum_20d, momentum_60d, sma_20_gap, sma_60_gap, range_pct, volatility_20d, volume_z20)`
 - `daily_scores(symbol, date, score, rank)`
-- `backtest_runs(run_id, created_at, top_n, start_date, end_date, initial_equity, rebalance_frequency, min_holding_days, keep_rank_threshold, scoring_profile)`
+- `backtest_runs(run_id, created_at, top_n, start_date, end_date, initial_equity, rebalance_frequency, min_holding_days, keep_rank_threshold, scoring_profile, market_filter_enabled, market_filter_ma20_reduce_by, market_filter_ma60_mode, ma20_trigger_count, ma60_trigger_count, reduced_target_count_days, blocked_new_buy_days, cash_mode_days)`
+- `backtest_market_filter_events(run_id, date, market_proxy_value, market_proxy_ma20, market_proxy_ma60, below_ma20, below_ma60, original_target_count, adjusted_target_count, ma60_mode, action)`
 - `backtest_results(run_id, date, equity, daily_return, position_count)`
 - `performance_report_runs(report_id, base_run_id, benchmark_name, benchmark_source, start_date, end_date, ...)`
 - `performance_report_summary(report_id, strategy_key, actual_initial_capital, first_recorded_equity, ending_equity, ... )`

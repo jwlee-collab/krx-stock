@@ -70,7 +70,28 @@ def init_db(conn: sqlite3.Connection) -> None:
             scoring_profile TEXT NOT NULL DEFAULT 'improved_v1',
             market_filter_enabled INTEGER NOT NULL DEFAULT 0,
             market_filter_ma20_reduce_by INTEGER NOT NULL DEFAULT 1,
-            market_filter_ma60_mode TEXT NOT NULL DEFAULT 'block_new_buys'
+            market_filter_ma60_mode TEXT NOT NULL DEFAULT 'block_new_buys',
+            ma20_trigger_count INTEGER NOT NULL DEFAULT 0,
+            ma60_trigger_count INTEGER NOT NULL DEFAULT 0,
+            reduced_target_count_days INTEGER NOT NULL DEFAULT 0,
+            blocked_new_buy_days INTEGER NOT NULL DEFAULT 0,
+            cash_mode_days INTEGER NOT NULL DEFAULT 0
+        );
+
+        CREATE TABLE IF NOT EXISTS backtest_market_filter_events (
+            run_id TEXT NOT NULL,
+            date TEXT NOT NULL,
+            market_proxy_value REAL,
+            market_proxy_ma20 REAL,
+            market_proxy_ma60 REAL,
+            below_ma20 INTEGER NOT NULL,
+            below_ma60 INTEGER NOT NULL,
+            original_target_count INTEGER NOT NULL,
+            adjusted_target_count INTEGER NOT NULL,
+            ma60_mode TEXT NOT NULL,
+            action TEXT NOT NULL,
+            PRIMARY KEY (run_id, date),
+            FOREIGN KEY (run_id) REFERENCES backtest_runs(run_id)
         );
 
         CREATE TABLE IF NOT EXISTS backtest_results (
@@ -159,6 +180,11 @@ def init_db(conn: sqlite3.Connection) -> None:
             market_filter_enabled INTEGER NOT NULL DEFAULT 0,
             market_filter_ma20_reduce_by INTEGER NOT NULL DEFAULT 1,
             market_filter_ma60_mode TEXT NOT NULL DEFAULT 'block_new_buys',
+            ma20_trigger_count INTEGER NOT NULL DEFAULT 0,
+            ma60_trigger_count INTEGER NOT NULL DEFAULT 0,
+            reduced_target_count_days INTEGER NOT NULL DEFAULT 0,
+            blocked_new_buy_days INTEGER NOT NULL DEFAULT 0,
+            cash_mode_days INTEGER NOT NULL DEFAULT 0,
             total_return REAL NOT NULL,
             max_drawdown REAL NOT NULL,
             sharpe REAL NOT NULL,
@@ -225,6 +251,11 @@ def init_db(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "backtest_runs", "market_filter_enabled", "market_filter_enabled INTEGER NOT NULL DEFAULT 0")
     _ensure_column(conn, "backtest_runs", "market_filter_ma20_reduce_by", "market_filter_ma20_reduce_by INTEGER NOT NULL DEFAULT 1")
     _ensure_column(conn, "backtest_runs", "market_filter_ma60_mode", "market_filter_ma60_mode TEXT NOT NULL DEFAULT 'block_new_buys'")
+    _ensure_column(conn, "backtest_runs", "ma20_trigger_count", "ma20_trigger_count INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "backtest_runs", "ma60_trigger_count", "ma60_trigger_count INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "backtest_runs", "reduced_target_count_days", "reduced_target_count_days INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "backtest_runs", "blocked_new_buy_days", "blocked_new_buy_days INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "backtest_runs", "cash_mode_days", "cash_mode_days INTEGER NOT NULL DEFAULT 0")
     _ensure_column(conn, "paper_positions", "entry_date", "entry_date TEXT")
     _ensure_column(conn, "daily_features", "momentum_60d", "momentum_60d REAL")
     _ensure_column(conn, "daily_features", "sma_20_gap", "sma_20_gap REAL")
@@ -233,5 +264,10 @@ def init_db(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "robustness_experiment_results", "market_filter_enabled", "market_filter_enabled INTEGER NOT NULL DEFAULT 0")
     _ensure_column(conn, "robustness_experiment_results", "market_filter_ma20_reduce_by", "market_filter_ma20_reduce_by INTEGER NOT NULL DEFAULT 1")
     _ensure_column(conn, "robustness_experiment_results", "market_filter_ma60_mode", "market_filter_ma60_mode TEXT NOT NULL DEFAULT 'block_new_buys'")
+    _ensure_column(conn, "robustness_experiment_results", "ma20_trigger_count", "ma20_trigger_count INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "robustness_experiment_results", "ma60_trigger_count", "ma60_trigger_count INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "robustness_experiment_results", "reduced_target_count_days", "reduced_target_count_days INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "robustness_experiment_results", "blocked_new_buy_days", "blocked_new_buy_days INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "robustness_experiment_results", "cash_mode_days", "cash_mode_days INTEGER NOT NULL DEFAULT 0")
 
     conn.commit()
