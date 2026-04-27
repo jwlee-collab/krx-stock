@@ -719,3 +719,92 @@ python scripts/generate_performance_report.py \
 - Colab 런타임 네트워크 상태 확인
 - 날짜 범위(`--start-date`, `--end-date`)가 모두 휴장일/미래일이 아닌지 확인
 - 필터가 너무 강하면(`after=0`) 임계값을 완화해서 재실행
+
+## 후보군 민감도 / 종목 편향 진단 리포트
+
+후보군(유니버스) 변경에 따른 전략 민감도와 종목 집중 리스크를 자동으로 진단하려면 아래 스크립트를 사용합니다.
+
+- 스크립트: `scripts/analyze_universe_sensitivity.py`
+- 핵심 보장:
+  - **스코어링 수식은 변경하지 않고** 기존 `generate_daily_scores`를 재사용
+  - **백테스트 핵심 로직은 유지**하고 기존 `run_backtest`를 재사용
+  - 진단/리포트 산출물(CSV + SQLite + JSON)에 집중
+
+### 진단 기능
+
+1. Universe 비교
+- old/new 후보군 종목 수
+- 공통 종목 수
+- old-only / new-only 종목 리스트
+- overlap ratio
+
+2. Universe 민감도 백테스트 (`--universe-top-n` 기준)
+- old universe 전체
+- new universe 전체
+- overlap universe only
+- removed symbols only
+- added symbols only
+
+각 후보군별 비교 지표:
+- 총 수익률
+- MDD
+- Sharpe
+- 후보군 평균 대비 초과수익
+- 거래 횟수
+- 평균 보유 종목 수
+
+3. top_n 민감도 비교 (`--top-n-values`, 기본 `3,5,10`)
+- top_n 증가 시 수익률 변화량
+- top_n 증가 시 MDD 변화량
+- 후보군 대비 초과수익 유지 여부
+
+4. 종목별 기여도 분석
+- 종목별 보유 일수
+- 종목별 선택 횟수
+- 종목별 추정 기여수익률
+- 상위 기여 10개 / 하위 기여 10개
+- 상위 3개 종목 기여 비중
+
+5. Concentration risk 요약
+- 성과가 소수 종목에 과도하게 집중되었는지
+- top_n=3이 과집중인지
+- top_n=5/10이 drawdown 측면에서 상대적으로 안정적인지
+
+### 실행 예시
+
+```bash
+python scripts/analyze_universe_sensitivity.py \
+  --db data/market_pipeline.db \
+  --old-universe-file data/kospi100_manual_old.csv \
+  --new-universe-file data/kospi100_manual.csv \
+  --start-date 2025-01-01 \
+  --end-date 2025-12-31 \
+  --universe-top-n 3 \
+  --top-n-values 3,5,10 \
+  --topn-universe-scope new \
+  --scoring-version hybrid_v4 \
+  --output-dir data/reports/universe_sensitivity
+```
+
+### 산출물
+
+- `universe_comparison.csv`
+- `universe_sensitivity_metrics.csv`
+- `topn_sensitivity_metrics.csv`
+- `symbol_contribution_top10.csv`
+- `symbol_contribution_bottom10.csv`
+- `summary.json`
+
+추가로 SQLite DB에도 아래 테이블로 적재됩니다.
+- `universe_sensitivity_reports`
+- `universe_sensitivity_metrics`
+- `topn_sensitivity_metrics`
+- `symbol_contribution_metrics`
+
+### 실전 운영 팁 (후보군 고정/관리)
+
+- 후보군 CSV를 날짜/버전으로 **파일명 고정**해서 보관하세요.
+  - 예: `kospi100_manual_2025Q1.csv`, `kospi100_manual_2025Q2.csv`
+- 실전/리서치 모두에서 **실행 시 사용한 universe 파일 경로를 로그로 남기고**, 리포트와 함께 아카이브하세요.
+- 전략 변경 없이 후보군만 바꾼 A/B 실험을 정기 실행해, 민감도(수익/MDD/초과수익)를 모니터링하세요.
+- top_n=3 성과가 높더라도 상위 3종목 기여 비중이 과도하면, top_n=5 또는 10으로 완화한 대안을 병행 검증하세요.
