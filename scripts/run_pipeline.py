@@ -85,6 +85,12 @@ def main() -> None:
         if args.universe_file:
             symbols = load_symbols_from_universe_csv(args.universe_file)
             print(f"[universe] loaded symbols={len(symbols)} from file={args.universe_file}")
+            if Path(args.universe_file).name == "kospi100_manual.csv":
+                if len(symbols) != 100:
+                    raise ValueError(
+                        f"[universe] expected 100 symbols for {args.universe_file}, got {len(symbols)}"
+                    )
+                print("[universe] verified symbols=100 for kospi100_manual.csv")
         explicit_symbols = symbols
         if not symbols:
             symbols = resolve_krx_symbols(markets=markets, as_of_date=args.end_date)

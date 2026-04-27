@@ -125,7 +125,7 @@ python scripts/run_pipeline.py \
 
 #### (c) 후보군 CSV 파일 직접 지정 (`--universe-file`)
 
-`symbol` 컬럼만 있으면 됩니다. `name`, `market`, `note` 등 다른 컬럼은 자동으로 무시하고 `symbol`만 사용합니다.
+`symbol` 컬럼만 있으면 됩니다. `data/kospi100_manual.csv`는 **KRX 100개 종목 코드 후보군**을 담는 예시 파일이며, 현재는 단일 컬럼(`symbol`) 100행으로 유지합니다.
 
 ```bash
 python scripts/run_pipeline.py \
@@ -208,6 +208,11 @@ python scripts/run_pipeline.py \
   --top-n 10
 ```
 
+실행 로그에서 아래 두 줄이 보이면 정상입니다.
+
+- `[universe] loaded symbols=100 from file=data/kospi100_manual.csv`
+- `[universe] verified symbols=100 for kospi100_manual.csv`
+
 ### 3-3) `--symbols` vs `--universe-file` 차이
 
 - `--symbols`: CLI에 직접 콤마 구분으로 입력 (`--symbols 005930,000660,...`)
@@ -216,7 +221,7 @@ python scripts/run_pipeline.py \
 
 ### 3-4) 가장 안전한 검증 경로
 
-1. CSV 형식 점검 (`symbol` 컬럼 필수):
+1. CSV 형식/행 수 점검 (`symbol` 컬럼 + 100개 행):
 
 ```bash
 python - <<'PY'
@@ -224,7 +229,9 @@ import csv
 with open("data/kospi100_manual.csv", newline="", encoding="utf-8") as f:
     r = csv.DictReader(f)
     assert "symbol" in (r.fieldnames or []), "symbol 컬럼이 필요합니다."
-print("ok: symbol column exists")
+    rows = list(r)
+assert len(rows) == 100, f"expected 100 rows, got {len(rows)}"
+print("ok: symbol column exists / rows=100")
 PY
 ```
 
@@ -394,6 +401,7 @@ python scripts/run_robustness_experiments.py \
 ```
 
 `--universe-file`이 주어지면 `--symbols`보다 우선합니다.
+`data/kospi100_manual.csv`를 전달하면 로그에서 `loaded symbols=100` 및 `verified symbols=100`을 함께 확인할 수 있습니다.
 
 `trend_v2`를 보조 실험군으로 함께 포함하려면:
 

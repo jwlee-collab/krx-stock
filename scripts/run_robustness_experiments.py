@@ -296,6 +296,12 @@ def main() -> None:
     if args.universe_file:
         selected_symbols = load_symbols_from_universe_csv(args.universe_file)
         print(f"[universe] loaded symbols={len(selected_symbols)} from file={args.universe_file}")
+        if Path(args.universe_file).name == "kospi100_manual.csv":
+            if len(selected_symbols) != 100:
+                raise ValueError(
+                    f"[universe] expected 100 symbols for {args.universe_file}, got {len(selected_symbols)}"
+                )
+            print("[universe] verified symbols=100 for kospi100_manual.csv")
 
     batch_id = str(uuid.uuid4())
     created_at = datetime.now(timezone.utc).isoformat()
