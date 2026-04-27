@@ -42,6 +42,11 @@ class ExperimentResult:
     market_filter_enabled: int
     market_filter_ma20_reduce_by: int
     market_filter_ma60_mode: str
+    ma20_trigger_count: int
+    ma60_trigger_count: int
+    reduced_target_count_days: int
+    blocked_new_buy_days: int
+    cash_mode_days: int
     total_return: float
     max_drawdown: float
     sharpe: float
@@ -362,6 +367,15 @@ def main() -> None:
                             total_return = _safe_div(equities[-1] - args.initial_equity, args.initial_equity)
                             mdd = _max_drawdown(equities)
                             sharpe = _sharpe(returns)
+                            market_diag = conn.execute(
+                                """
+                                SELECT ma20_trigger_count, ma60_trigger_count, reduced_target_count_days,
+                                       blocked_new_buy_days, cash_mode_days
+                                FROM backtest_runs
+                                WHERE run_id=?
+                                """,
+                                (run_id,),
+                            ).fetchone()
 
                             holdings_by_day = _simulate_holdings(
                                 conn,
@@ -398,6 +412,11 @@ def main() -> None:
                                 market_filter_enabled=int(market_filter_enabled),
                                 market_filter_ma20_reduce_by=int(max(0, args.market_filter_ma20_reduce_by)),
                                 market_filter_ma60_mode=args.market_filter_ma60_mode,
+                                ma20_trigger_count=int(market_diag["ma20_trigger_count"]) if market_diag else 0,
+                                ma60_trigger_count=int(market_diag["ma60_trigger_count"]) if market_diag else 0,
+                                reduced_target_count_days=int(market_diag["reduced_target_count_days"]) if market_diag else 0,
+                                blocked_new_buy_days=int(market_diag["blocked_new_buy_days"]) if market_diag else 0,
+                                cash_mode_days=int(market_diag["cash_mode_days"]) if market_diag else 0,
                                 total_return=total_return,
                                 max_drawdown=mdd,
                                 sharpe=sharpe,
@@ -415,9 +434,10 @@ def main() -> None:
                                 top_n, min_holding_days, keep_rank_threshold, keep_rank_offset,
                                 scoring_version, rebalance_frequency,
                                 market_filter_enabled, market_filter_ma20_reduce_by, market_filter_ma60_mode,
+                                ma20_trigger_count, ma60_trigger_count, reduced_target_count_days, blocked_new_buy_days, cash_mode_days,
                                 total_return, max_drawdown, sharpe, trade_count,
                                 candidate_avg_return, excess_return_vs_universe, robustness_score
-                            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                             """,
                             (
                                 result.batch_id,
@@ -434,6 +454,11 @@ def main() -> None:
                                 result.market_filter_enabled,
                                 result.market_filter_ma20_reduce_by,
                                 result.market_filter_ma60_mode,
+                                result.ma20_trigger_count,
+                                result.ma60_trigger_count,
+                                result.reduced_target_count_days,
+                                result.blocked_new_buy_days,
+                                result.cash_mode_days,
                                 result.total_return,
                                 result.max_drawdown,
                                 result.sharpe,
@@ -556,13 +581,14 @@ def main() -> None:
         "",
         "## 상위 10개 개별 실험(robustness_score 기준)",
         "",
-        "|rank|period|top_n|min_hold|keep_threshold|scoring|market_filter|total_return|MDD|sharpe|trades|excess_vs_universe|score|",
-        "|---:|---:|---:|---:|---:|---|---|---:|---:|---:|---:|---:|---:|",
+        "|rank|period|top_n|min_hold|keep_threshold|scoring|market_filter|ma20_hit|ma60_hit|reduce_days|block_days|cash_days|total_return|MDD|sharpe|trades|excess_vs_universe|score|",
+        "|---:|---:|---:|---:|---:|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for idx, r in enumerate(top_details, start=1):
         lines.append(
             f"|{idx}|{r.period_months}m|{r.top_n}|{r.min_holding_days}|{r.keep_rank_threshold}|{r.scoring_version}|"
             f"{'ON' if r.market_filter_enabled else 'OFF'}({r.market_filter_ma60_mode})|"
+            f"{r.ma20_trigger_count}|{r.ma60_trigger_count}|{r.reduced_target_count_days}|{r.blocked_new_buy_days}|{r.cash_mode_days}|"
             f"{r.total_return:.2%}|{r.max_drawdown:.2%}|{r.sharpe:.2f}|{r.trade_count}|{r.excess_return_vs_universe:.2%}|{r.robustness_score:.4f}|"
         )
 

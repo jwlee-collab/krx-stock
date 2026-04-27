@@ -161,6 +161,18 @@ def main() -> None:
         market_filter_ma20_reduce_by=args.market_filter_ma20_reduce_by,
         market_filter_ma60_mode=args.market_filter_ma60_mode,
     )
+    market_filter_summary_row = conn.execute(
+        """
+        SELECT ma20_trigger_count,
+               ma60_trigger_count,
+               reduced_target_count_days,
+               blocked_new_buy_days,
+               cash_mode_days
+        FROM backtest_runs
+        WHERE run_id=?
+        """,
+        (run_id,),
+    ).fetchone()
     paper = run_paper_trading_cycle(
         conn,
         target_positions=args.top_n,
@@ -183,6 +195,13 @@ def main() -> None:
             "enabled": args.enable_market_filter,
             "ma20_reduce_by": args.market_filter_ma20_reduce_by,
             "ma60_mode": args.market_filter_ma60_mode,
+            "diagnostics": {
+                "ma20_trigger_count": int(market_filter_summary_row["ma20_trigger_count"]) if market_filter_summary_row else 0,
+                "ma60_trigger_count": int(market_filter_summary_row["ma60_trigger_count"]) if market_filter_summary_row else 0,
+                "reduced_target_count_days": int(market_filter_summary_row["reduced_target_count_days"]) if market_filter_summary_row else 0,
+                "blocked_new_buy_days": int(market_filter_summary_row["blocked_new_buy_days"]) if market_filter_summary_row else 0,
+                "cash_mode_days": int(market_filter_summary_row["cash_mode_days"]) if market_filter_summary_row else 0,
+            },
         },
     }
     print(json.dumps(summary, indent=2, ensure_ascii=False))
