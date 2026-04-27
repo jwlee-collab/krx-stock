@@ -1122,6 +1122,9 @@ python scripts/validate_universe_csv.py \
   --require-kospi-only
 ```
 
+> `validate_universe_csv.py`는 CSV 구조/형식(row 수, symbol 중복/형식, market 값)만 검사합니다.  
+> **실제 OHLCV 조회 가능 여부(가격 데이터 존재)는 별도 검증**이 필요합니다.
+
 500개를 강제 검증하려면:
 
 ```bash
@@ -1131,13 +1134,28 @@ python scripts/validate_universe_csv.py \
   --require-kospi-only
 ```
 
-검증 항목:
+CSV 구조 검증 항목:
 - row 수
 - unique symbol 수
 - 중복 여부
 - 6자리 코드 여부
 - `market` 컬럼 KOSPI-only 여부
 - UTF-8 BOM 여부
+
+가격 데이터 검증(실제 OHLCV 조회 가능 여부):
+
+```bash
+python scripts/validate_universe_price_data.py \
+  --file data/kospi_source_universe_500.csv \
+  --start-date 2025-03-03 \
+  --end-date 2025-03-31 \
+  --min-price-rows 5 \
+  --output-valid data/kospi_source_universe_valid_price.csv \
+  --output-invalid data/kospi_source_universe_invalid_price.csv
+```
+
+- `output-valid`: validation 기간에 `min-price-rows` 이상 OHLCV가 조회되는 symbol
+- `output-invalid`: 조회 실패 또는 row 부족 symbol
 
 ### KOSPI-only dynamic universe 실행 예시
 
@@ -1289,7 +1307,12 @@ python scripts/build_kospi_universe.py \
   --output data/kospi_source_universe_500.csv \
   --target-size 500 \
   --min-size 300 \
-  --allow-partial
+  --allow-partial \
+  --validate-price-data \
+  --validation-start-date 2025-03-03 \
+  --validation-end-date 2025-03-31 \
+  --min-price-rows 5 \
+  --excluded-output data/kospi_source_universe_excluded_no_price.csv
 ```
 
 검증:
@@ -1300,7 +1323,8 @@ python scripts/validate_universe_csv.py \
   --require-kospi-only
 ```
 
-`validate_universe_csv.py`는 row 수, unique/duplicate, 6자리 symbol, `market=KOSPI`, UTF-8 BOM 여부를 함께 점검합니다.
+`validate_universe_csv.py`는 row 수, unique/duplicate, 6자리 symbol, `market=KOSPI`, UTF-8 BOM 여부를 점검합니다(구조 검증).  
+실제 가격 데이터 검증은 `validate_universe_price_data.py` 또는 `build_kospi_universe.py --validate-price-data`를 사용하세요.
 
 ### 2) Colab 실행 예시
 
