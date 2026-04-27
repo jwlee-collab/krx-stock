@@ -659,6 +659,58 @@ main
 - 기간 축을 묶은 안정성 요약은 `stability_score` 기준으로 정렬
 - 요약 Markdown에서 “가장 안정적인 설정”을 쉬운 문장으로 확인 가능
 
+### 5-2) 시작일 기준 Rolling-window Robustness 평가 (신규)
+
+단일 종료일 기반 평가(`run_robustness_experiments.py`)는 빠르게 비교할 때 유용하지만, **마지막 날짜 하나만 기준으로 보면 특정 구간에 과적합될 수 있습니다**.  
+그래서 `scripts/run_start_window_robustness.py`는 **시작일을 여러 개로 바꿔야 전략의 기간 강건성을 확인할 수 있다**는 원칙으로, 각 시작일마다 1/3/6/12개월 forward 성과를 반복 측정합니다.
+
+핵심 해석 포인트:
+- **1개월 수익률은 노이즈가 크고, 3/6/12개월과 함께 봐야 한다**.
+- `monthly` 시작일은 창(window)들이 서로 겹치므로 완전 독립 표본은 아니지만,  
+  **rolling monthly windows는 서로 겹치므로 완전히 독립 샘플은 아니지만, 단일 종료일 평가보다 훨씬 낫다**.
+
+예시(KOSPI-only, rolling liquidity universe):
+
+```bash
+python scripts/run_start_window_robustness.py \
+  --db data/kospi_risk_3y.db \
+  --universe-file data/kospi_source_universe_500.csv \
+  --universe-mode rolling_liquidity \
+  --universe-size 100 \
+  --universe-lookback-days 20 \
+  --start-date-frequency quarterly \
+  --min-start-date 2022-01-01 \
+  --max-start-date 2025-03-31 \
+  --period-months 1,3,6,12 \
+  --top-n-values 3,5 \
+  --min-holding-days-values 3,5,10 \
+  --keep-rank-offsets 2,4 \
+  --scoring-versions old \
+  --rebalance-frequency weekly \
+  --market-filter-modes off \
+  --entry-gate-modes off \
+  --market-scopes KOSPI \
+  --position-stop-loss-modes off,on \
+  --position-stop-loss-pct-values 0.10 \
+  --portfolio-dd-cut-modes off
+```
+
+산출물:
+- CSV
+  - `start_window_robustness_results_<batch_id>.csv`
+  - `start_window_robustness_strategy_summary_<batch_id>.csv`
+  - `start_window_robustness_period_summary_<batch_id>.csv`
+- SQLite
+  - `start_window_robustness_batches`
+  - `start_window_robustness_results`
+  - `start_window_robustness_strategy_summary`
+  - `start_window_robustness_period_summary`
+- Markdown
+  - `start_window_robustness_summary_<batch_id>.md`
+
+`rolling_liquidity` 사용 시에는 기존과 동일하게 `validate_rolling_universe_no_lookahead(...)`를 실행해  
+`t`일 유니버스에 `t` 이후 데이터가 섞이지 않았는지(violations) 함께 기록합니다.
+
 ### 5) 백테스트 성과 비교 리포트 생성
 
 ```bash
@@ -1368,4 +1420,3 @@ python scripts/run_robustness_experiments.py \
 --portfolio-dd-cut-pct-values 0.10,0.15 \
 --portfolio-dd-cooldown-days-values 20
 ```
-
