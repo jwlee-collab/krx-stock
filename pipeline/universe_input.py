@@ -43,3 +43,41 @@ def load_symbols_from_universe_csv(path: str | Path) -> list[str]:
     if not unique_symbols:
         raise ValueError(f"no valid symbols found in universe file: {csv_path}")
     return unique_symbols
+
+
+def load_symbols_with_market_scope(path: str | Path, market_scope: str = "ALL") -> tuple[list[str], dict[str, str]]:
+    """Load symbols from universe csv and apply market scope (KOSPI/KOSDAQ/ALL)."""
+    csv_path = Path(path)
+    if not csv_path.exists():
+        raise FileNotFoundError(f"universe file not found: {csv_path}")
+
+    scope = market_scope.strip().upper()
+    if scope not in {"ALL", "KOSPI", "KOSDAQ"}:
+        raise ValueError(f"invalid market_scope: {market_scope} (allowed: ALL,KOSPI,KOSDAQ)")
+
+    with csv_path.open(newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        fieldnames = reader.fieldnames or []
+        if "symbol" not in fieldnames:
+            raise ValueError(f"CSV missing required column: symbol (columns={fieldnames})")
+        if "market" not in fieldnames and scope != "ALL":
+            raise ValueError(f"CSV missing required column for market scope filter: market (columns={fieldnames})")
+
+        symbol_to_market: dict[str, str] = {}
+        for idx, row in enumerate(reader, start=2):
+            raw_symbol = (row.get("symbol") or "").strip()
+            if not raw_symbol:
+                continue
+            try:
+                symbol = normalize_krx_symbol(raw_symbol)
+            except ValueError as exc:
+                raise ValueError(f"invalid symbol at {csv_path}:{idx}: {raw_symbol}") from exc
+            market = (row.get("market") or "").strip().upper() or "UNKNOWN"
+            if scope in {"KOSPI", "KOSDAQ"} and market != scope:
+                continue
+            symbol_to_market[symbol] = market
+
+    symbols = sorted(symbol_to_market.keys())
+    if not symbols:
+        raise ValueError(f"no valid symbols found in universe file after market scope filter: {csv_path} scope={scope}")
+    return symbols, symbol_to_market

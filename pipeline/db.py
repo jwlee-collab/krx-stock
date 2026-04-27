@@ -88,7 +88,18 @@ def init_db(conn: sqlite3.Connection) -> None:
             ma60_trigger_count INTEGER NOT NULL DEFAULT 0,
             reduced_target_count_days INTEGER NOT NULL DEFAULT 0,
             blocked_new_buy_days INTEGER NOT NULL DEFAULT 0,
-            cash_mode_days INTEGER NOT NULL DEFAULT 0
+            cash_mode_days INTEGER NOT NULL DEFAULT 0,
+            entry_gate_enabled INTEGER NOT NULL DEFAULT 0,
+            min_entry_score REAL NOT NULL DEFAULT 0.0,
+            require_positive_momentum20 INTEGER NOT NULL DEFAULT 0,
+            require_positive_momentum60 INTEGER NOT NULL DEFAULT 0,
+            require_above_sma20 INTEGER NOT NULL DEFAULT 0,
+            require_above_sma60 INTEGER NOT NULL DEFAULT 0,
+            entry_gate_rejected_count INTEGER NOT NULL DEFAULT 0,
+            entry_gate_cash_days INTEGER NOT NULL DEFAULT 0,
+            average_actual_position_count REAL NOT NULL DEFAULT 0.0,
+            min_actual_position_count INTEGER NOT NULL DEFAULT 0,
+            max_actual_position_count INTEGER NOT NULL DEFAULT 0
         );
 
         CREATE TABLE IF NOT EXISTS backtest_market_filter_events (
@@ -201,6 +212,24 @@ def init_db(conn: sqlite3.Connection) -> None:
             reduced_target_count_days INTEGER NOT NULL DEFAULT 0,
             blocked_new_buy_days INTEGER NOT NULL DEFAULT 0,
             cash_mode_days INTEGER NOT NULL DEFAULT 0,
+            entry_gate_enabled INTEGER NOT NULL DEFAULT 0,
+            min_entry_score REAL NOT NULL DEFAULT 0.0,
+            require_positive_momentum20 INTEGER NOT NULL DEFAULT 0,
+            require_positive_momentum60 INTEGER NOT NULL DEFAULT 0,
+            require_above_sma20 INTEGER NOT NULL DEFAULT 0,
+            require_above_sma60 INTEGER NOT NULL DEFAULT 0,
+            entry_gate_rejected_count INTEGER NOT NULL DEFAULT 0,
+            entry_gate_cash_days INTEGER NOT NULL DEFAULT 0,
+            average_actual_position_count REAL NOT NULL DEFAULT 0.0,
+            min_actual_position_count INTEGER NOT NULL DEFAULT 0,
+            max_actual_position_count INTEGER NOT NULL DEFAULT 0,
+            market_scope TEXT NOT NULL DEFAULT 'ALL',
+            source_symbol_count INTEGER NOT NULL DEFAULT 0,
+            average_daily_universe_count REAL NOT NULL DEFAULT 0.0,
+            selected_kospi_count INTEGER NOT NULL DEFAULT 0,
+            selected_kosdaq_count INTEGER NOT NULL DEFAULT 0,
+            kospi_contribution_return REAL NOT NULL DEFAULT 0.0,
+            kosdaq_contribution_return REAL NOT NULL DEFAULT 0.0,
             total_return REAL NOT NULL,
             max_drawdown REAL NOT NULL,
             sharpe REAL NOT NULL,
@@ -273,6 +302,17 @@ def init_db(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "backtest_runs", "reduced_target_count_days", "reduced_target_count_days INTEGER NOT NULL DEFAULT 0")
     _ensure_column(conn, "backtest_runs", "blocked_new_buy_days", "blocked_new_buy_days INTEGER NOT NULL DEFAULT 0")
     _ensure_column(conn, "backtest_runs", "cash_mode_days", "cash_mode_days INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "backtest_runs", "entry_gate_enabled", "entry_gate_enabled INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "backtest_runs", "min_entry_score", "min_entry_score REAL NOT NULL DEFAULT 0.0")
+    _ensure_column(conn, "backtest_runs", "require_positive_momentum20", "require_positive_momentum20 INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "backtest_runs", "require_positive_momentum60", "require_positive_momentum60 INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "backtest_runs", "require_above_sma20", "require_above_sma20 INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "backtest_runs", "require_above_sma60", "require_above_sma60 INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "backtest_runs", "entry_gate_rejected_count", "entry_gate_rejected_count INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "backtest_runs", "entry_gate_cash_days", "entry_gate_cash_days INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "backtest_runs", "average_actual_position_count", "average_actual_position_count REAL NOT NULL DEFAULT 0.0")
+    _ensure_column(conn, "backtest_runs", "min_actual_position_count", "min_actual_position_count INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "backtest_runs", "max_actual_position_count", "max_actual_position_count INTEGER NOT NULL DEFAULT 0")
     _ensure_column(conn, "paper_positions", "entry_date", "entry_date TEXT")
     _ensure_column(conn, "daily_features", "momentum_60d", "momentum_60d REAL")
     _ensure_column(conn, "daily_features", "sma_20_gap", "sma_20_gap REAL")
@@ -289,5 +329,23 @@ def init_db(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "robustness_experiment_results", "reduced_target_count_days", "reduced_target_count_days INTEGER NOT NULL DEFAULT 0")
     _ensure_column(conn, "robustness_experiment_results", "blocked_new_buy_days", "blocked_new_buy_days INTEGER NOT NULL DEFAULT 0")
     _ensure_column(conn, "robustness_experiment_results", "cash_mode_days", "cash_mode_days INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "robustness_experiment_results", "entry_gate_enabled", "entry_gate_enabled INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "robustness_experiment_results", "min_entry_score", "min_entry_score REAL NOT NULL DEFAULT 0.0")
+    _ensure_column(conn, "robustness_experiment_results", "require_positive_momentum20", "require_positive_momentum20 INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "robustness_experiment_results", "require_positive_momentum60", "require_positive_momentum60 INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "robustness_experiment_results", "require_above_sma20", "require_above_sma20 INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "robustness_experiment_results", "require_above_sma60", "require_above_sma60 INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "robustness_experiment_results", "entry_gate_rejected_count", "entry_gate_rejected_count INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "robustness_experiment_results", "entry_gate_cash_days", "entry_gate_cash_days INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "robustness_experiment_results", "average_actual_position_count", "average_actual_position_count REAL NOT NULL DEFAULT 0.0")
+    _ensure_column(conn, "robustness_experiment_results", "min_actual_position_count", "min_actual_position_count INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "robustness_experiment_results", "max_actual_position_count", "max_actual_position_count INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "robustness_experiment_results", "market_scope", "market_scope TEXT NOT NULL DEFAULT 'ALL'")
+    _ensure_column(conn, "robustness_experiment_results", "source_symbol_count", "source_symbol_count INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "robustness_experiment_results", "average_daily_universe_count", "average_daily_universe_count REAL NOT NULL DEFAULT 0.0")
+    _ensure_column(conn, "robustness_experiment_results", "selected_kospi_count", "selected_kospi_count INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "robustness_experiment_results", "selected_kosdaq_count", "selected_kosdaq_count INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "robustness_experiment_results", "kospi_contribution_return", "kospi_contribution_return REAL NOT NULL DEFAULT 0.0")
+    _ensure_column(conn, "robustness_experiment_results", "kosdaq_contribution_return", "kosdaq_contribution_return REAL NOT NULL DEFAULT 0.0")
 
     conn.commit()

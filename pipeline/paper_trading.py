@@ -26,6 +26,12 @@ def run_paper_trading_cycle(
     rebalance_frequency: str = "daily",
     min_holding_days: int = 0,
     keep_rank_threshold: int | None = None,
+    entry_gate_enabled: bool = False,
+    min_entry_score: float = 0.0,
+    require_positive_momentum20: bool = False,
+    require_positive_momentum60: bool = False,
+    require_above_sma20: bool = False,
+    require_above_sma60: bool = False,
 ) -> dict:
     """Rebalance paper portfolio to top-ranked symbols for a date."""
     if rebalance_frequency not in {"daily", "weekly"}:
@@ -59,7 +65,15 @@ def run_paper_trading_cycle(
             }
 
     ranked_rows = conn.execute(
-        "SELECT symbol, rank FROM daily_scores WHERE date=? ORDER BY rank ASC, symbol ASC",
+        """
+        SELECT s.symbol, s.rank, s.score,
+               f.momentum_20d, f.momentum_60d, f.sma_20_gap, f.sma_60_gap
+        FROM daily_scores s
+        LEFT JOIN daily_features f
+          ON f.symbol = s.symbol AND f.date = s.date
+        WHERE s.date=?
+        ORDER BY s.rank ASC, s.symbol ASC
+        """,
         (as_of_date,),
     ).fetchall()
     rank_by_symbol = {r["symbol"]: int(r["rank"]) for r in ranked_rows}
@@ -76,12 +90,34 @@ def run_paper_trading_cycle(
             protected.add(sym)
 
     target_list = list(protected)
+    entry_gate_rejected = 0
     for row in ranked_rows:
         sym = row["symbol"]
         if sym in target_list:
             continue
         if len(target_list) >= target_positions:
             break
+        if entry_gate_enabled:
+            score = float(row["score"]) if row["score"] is not None else 0.0
+            m20 = row["momentum_20d"]
+            m60 = row["momentum_60d"]
+            g20 = row["sma_20_gap"]
+            g60 = row["sma_60_gap"]
+            if score < float(min_entry_score):
+                entry_gate_rejected += 1
+                continue
+            if require_positive_momentum20 and (m20 is None or float(m20) <= 0.0):
+                entry_gate_rejected += 1
+                continue
+            if require_positive_momentum60 and (m60 is None or float(m60) <= 0.0):
+                entry_gate_rejected += 1
+                continue
+            if require_above_sma20 and (g20 is None or float(g20) <= 0.0):
+                entry_gate_rejected += 1
+                continue
+            if require_above_sma60 and (g60 is None or float(g60) <= 0.0):
+                entry_gate_rejected += 1
+                continue
         target_list.append(sym)
 
     target_syms = set(target_list)
@@ -143,4 +179,7 @@ def run_paper_trading_cycle(
         "rebalance_frequency": rebalance_frequency,
         "min_holding_days": int(min_holding_days),
         "keep_rank_threshold": int(keep_rank_threshold),
+        "entry_gate_enabled": bool(entry_gate_enabled),
+        "entry_gate_rejected_count": int(entry_gate_rejected),
+        "actual_position_count": len(target_syms),
     }

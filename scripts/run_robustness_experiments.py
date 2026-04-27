@@ -25,7 +25,11 @@ from pipeline.dynamic_universe import (
     validate_rolling_universe_no_lookahead,
 )
 from pipeline.scoring import generate_daily_scores, normalize_scoring_profile
-from pipeline.universe_input import load_symbols_from_universe_csv, parse_symbols_arg
+from pipeline.universe_input import (
+    load_symbols_from_universe_csv,
+    load_symbols_with_market_scope,
+    parse_symbols_arg,
+)
 
 TRADING_DAYS = 252
 
@@ -54,6 +58,24 @@ class ExperimentResult:
     reduced_target_count_days: int
     blocked_new_buy_days: int
     cash_mode_days: int
+    entry_gate_enabled: int
+    min_entry_score: float
+    require_positive_momentum20: int
+    require_positive_momentum60: int
+    require_above_sma20: int
+    require_above_sma60: int
+    entry_gate_rejected_count: int
+    entry_gate_cash_days: int
+    average_actual_position_count: float
+    min_actual_position_count: int
+    max_actual_position_count: int
+    market_scope: str
+    source_symbol_count: int
+    average_daily_universe_count: float
+    selected_kospi_count: int
+    selected_kosdaq_count: int
+    kospi_contribution_return: float
+    kosdaq_contribution_return: float
     total_return: float
     max_drawdown: float
     sharpe: float
@@ -70,6 +92,10 @@ def _parse_int_list(value: str) -> list[int]:
 
 def _parse_str_list(value: str) -> list[str]:
     return [x.strip() for x in value.split(",") if x.strip()]
+
+
+def _parse_float_list(value: str) -> list[float]:
+    return [float(x.strip()) for x in value.split(",") if x.strip()]
 
 
 def _subtract_months(d: date, months: int) -> date:
@@ -120,7 +146,7 @@ def _get_dates(conn: sqlite3.Connection) -> list[str]:
 
 
 def _build_target_holdings(
-    ranked_symbols: list[str],
+    ranked_rows: list[sqlite3.Row],
     rank_by_symbol: dict[str, int],
     current_symbols: set[str],
     entry_index_by_symbol: dict[str, int],
@@ -128,6 +154,12 @@ def _build_target_holdings(
     top_n: int,
     min_holding_days: int,
     keep_rank_threshold: int,
+    entry_gate_enabled: bool = False,
+    min_entry_score: float = 0.0,
+    require_positive_momentum20: bool = False,
+    require_positive_momentum60: bool = False,
+    require_above_sma20: bool = False,
+    require_above_sma60: bool = False,
 ) -> set[str]:
     keep_due_rank = {sym for sym in current_symbols if rank_by_symbol.get(sym, 10**9) <= keep_rank_threshold}
     keep_due_holding = {
@@ -137,11 +169,28 @@ def _build_target_holdings(
     }
     kept = keep_due_rank | keep_due_holding
     target = list(kept)
-    for sym in ranked_symbols:
+    for row in ranked_rows:
+        sym = row["symbol"]
         if sym in kept:
             continue
         if len(target) >= top_n:
             break
+        if entry_gate_enabled:
+            score = float(row["score"]) if row["score"] is not None else 0.0
+            m20 = row["momentum_20d"]
+            m60 = row["momentum_60d"]
+            g20 = row["sma_20_gap"]
+            g60 = row["sma_60_gap"]
+            if score < float(min_entry_score):
+                continue
+            if require_positive_momentum20 and (m20 is None or float(m20) <= 0.0):
+                continue
+            if require_positive_momentum60 and (m60 is None or float(m60) <= 0.0):
+                continue
+            if require_above_sma20 and (g20 is None or float(g20) <= 0.0):
+                continue
+            if require_above_sma60 and (g60 is None or float(g60) <= 0.0):
+                continue
         target.append(sym)
     return set(target)
 
@@ -153,6 +202,12 @@ def _simulate_holdings(
     min_holding_days: int,
     keep_rank_threshold: int,
     rebalance_frequency: str,
+    entry_gate_enabled: bool = False,
+    min_entry_score: float = 0.0,
+    require_positive_momentum20: bool = False,
+    require_positive_momentum60: bool = False,
+    require_above_sma20: bool = False,
+    require_above_sma60: bool = False,
 ) -> list[set[str]]:
     current_holdings: set[str] = set()
     entry_index_by_symbol: dict[str, int] = {}
@@ -168,13 +223,20 @@ def _simulate_holdings(
 
         if should_rebalance:
             ranked_rows = conn.execute(
-                "SELECT symbol, rank FROM daily_scores WHERE date=? ORDER BY rank ASC, symbol ASC",
+                """
+                SELECT s.symbol, s.rank, s.score,
+                       f.momentum_20d, f.momentum_60d, f.sma_20_gap, f.sma_60_gap
+                FROM daily_scores s
+                LEFT JOIN daily_features f
+                  ON f.symbol = s.symbol AND f.date = s.date
+                WHERE s.date=?
+                ORDER BY s.rank ASC, s.symbol ASC
+                """,
                 (d0,),
             ).fetchall()
-            ranked_symbols = [r["symbol"] for r in ranked_rows]
             rank_by_symbol = {r["symbol"]: int(r["rank"]) for r in ranked_rows}
             target = _build_target_holdings(
-                ranked_symbols,
+                ranked_rows,
                 rank_by_symbol,
                 current_holdings,
                 entry_index_by_symbol,
@@ -182,6 +244,12 @@ def _simulate_holdings(
                 top_n,
                 min_holding_days,
                 keep_rank_threshold,
+                entry_gate_enabled=entry_gate_enabled,
+                min_entry_score=min_entry_score,
+                require_positive_momentum20=require_positive_momentum20,
+                require_positive_momentum60=require_positive_momentum60,
+                require_above_sma20=require_above_sma20,
+                require_above_sma60=require_above_sma60,
             )
             for sym in target - current_holdings:
                 entry_index_by_symbol[sym] = i
@@ -227,6 +295,43 @@ def _compute_candidate_avg_return(conn: sqlite3.Connection, eval_dates: list[str
         r = sum(rets) / len(rets) if rets else 0.0
         equity *= (1.0 + r)
     return equity - 1.0
+
+
+def _compute_market_selection_diagnostics(
+    conn: sqlite3.Connection,
+    dates: list[str],
+    holdings_by_day: list[set[str]],
+    symbol_to_market: dict[str, str],
+) -> tuple[int, int, float, float]:
+    selected_kospi = 0
+    selected_kosdaq = 0
+    kospi_sum = 0.0
+    kosdaq_sum = 0.0
+    day_count = 0
+    for i, holdings in enumerate(holdings_by_day):
+        if i + 1 >= len(dates):
+            break
+        d0 = dates[i]
+        d1 = dates[i + 1]
+        if not holdings:
+            continue
+        day_count += 1
+        for sym in sorted(holdings):
+            market = symbol_to_market.get(sym, "UNKNOWN")
+            row0 = conn.execute("SELECT close FROM daily_prices WHERE symbol=? AND date=?", (sym, d0)).fetchone()
+            row1 = conn.execute("SELECT close FROM daily_prices WHERE symbol=? AND date=?", (sym, d1)).fetchone()
+            ret = 0.0
+            if row0 and row1 and row0["close"]:
+                ret = (row1["close"] - row0["close"]) / row0["close"]
+            if market == "KOSPI":
+                selected_kospi += 1
+                kospi_sum += ret
+            elif market == "KOSDAQ":
+                selected_kosdaq += 1
+                kosdaq_sum += ret
+    kospi_contrib = (kospi_sum / day_count) if day_count else 0.0
+    kosdaq_contrib = (kosdaq_sum / day_count) if day_count else 0.0
+    return selected_kospi, selected_kosdaq, kospi_contrib, kosdaq_contrib
 
 
 def _compute_robustness_score(total_return: float, mdd: float, sharpe: float, trade_count: int, excess: float) -> float:
@@ -275,6 +380,17 @@ def main() -> None:
     p.add_argument("--universe-mode", choices=["static", "rolling_liquidity"], default="static")
     p.add_argument("--universe-size", type=int, default=100)
     p.add_argument("--universe-lookback-days", type=int, default=20)
+    p.add_argument("--market-scopes", default="ALL", help="Comma-separated: KOSPI,KOSDAQ,ALL")
+    p.add_argument("--market-scope", choices=["KOSPI", "KOSDAQ", "ALL"], help="Single market scope alias")
+    p.add_argument("--entry-gate-modes", default="off,on", help="Comma-separated experiment modes: off,on")
+    p.add_argument("--enable-entry-gate", action="store_true", help="Alias to force entry-gate on mode")
+    p.add_argument("--min-entry-score", type=float, default=None, help="Alias for single min entry score")
+    p.add_argument("--min-entry-score-values", default="0.0", help="Comma-separated entry gate thresholds")
+    p.add_argument("--entry-gate-rule-set", choices=["none", "basic_trend"], default="none")
+    p.add_argument("--require-positive-momentum20", action="store_true")
+    p.add_argument("--require-positive-momentum60", action="store_true")
+    p.add_argument("--require-above-sma20", action="store_true")
+    p.add_argument("--require-above-sma60", action="store_true")
     args = p.parse_args()
 
     conn = get_connection(args.db)
@@ -301,10 +417,30 @@ def main() -> None:
     invalid_market_modes = [m for m in market_filter_modes if m not in {"off", "on"}]
     if invalid_market_modes:
         raise ValueError(f"invalid --market-filter-modes: {invalid_market_modes}")
+    market_scopes = [x.strip().upper() for x in args.market_scopes.split(",") if x.strip()]
+    if args.market_scope:
+        market_scopes = [args.market_scope.upper()]
+    market_scopes = list(dict.fromkeys(market_scopes))
+    invalid_scopes = [m for m in market_scopes if m not in {"ALL", "KOSPI", "KOSDAQ"}]
+    if invalid_scopes:
+        raise ValueError(f"invalid --market-scopes: {invalid_scopes}")
+    entry_gate_modes = [x.strip().lower() for x in args.entry_gate_modes.split(",") if x.strip()]
+    if args.enable_entry_gate and args.entry_gate_modes == "off,on":
+        entry_gate_modes = ["on"]
+    entry_gate_modes = list(dict.fromkeys(entry_gate_modes))
+    invalid_entry_modes = [m for m in entry_gate_modes if m not in {"off", "on"}]
+    if invalid_entry_modes:
+        raise ValueError(f"invalid --entry-gate-modes: {invalid_entry_modes}")
+    min_entry_scores = _parse_float_list(args.min_entry_score_values)
+    if args.min_entry_score is not None and args.min_entry_score_values == "0.0":
+        min_entry_scores = [float(args.min_entry_score)]
 
     selected_symbols = parse_symbols_arg(args.symbols)
+    selected_symbol_to_market: dict[str, str] = {s: "UNKNOWN" for s in selected_symbols}
     if args.universe_file:
         selected_symbols = load_symbols_from_universe_csv(args.universe_file)
+        all_symbols, selected_symbol_to_market = load_symbols_with_market_scope(args.universe_file, "ALL")
+        selected_symbols = all_symbols
         print(f"[universe] loaded symbols={len(selected_symbols)} from file={args.universe_file}")
         if Path(args.universe_file).name == "kospi100_manual.csv":
             if len(selected_symbols) != 100:
@@ -368,73 +504,114 @@ def main() -> None:
                     for scoring_version in scoring_versions:
                         for market_mode in market_filter_modes:
                             market_filter_enabled = market_mode == "on"
-                            generate_daily_scores(
-                                conn,
-                                include_history=True,
-                                allowed_symbols=selected_symbols or None,
-                                scoring_profile=scoring_version,
-                                universe_mode=args.universe_mode,
-                                universe_size=args.universe_size,
-                                universe_lookback_days=args.universe_lookback_days,
-                            )
-                            run_id = run_backtest(
-                                conn,
-                                top_n=top_n,
-                                start_date=start_date,
-                                end_date=end_date,
-                                initial_equity=args.initial_equity,
-                                rebalance_frequency=args.rebalance_frequency,
-                                min_holding_days=min_holding_days,
-                                keep_rank_threshold=keep_rank_threshold,
-                                scoring_profile=scoring_version,
-                                market_filter_enabled=market_filter_enabled,
-                                market_filter_ma20_reduce_by=args.market_filter_ma20_reduce_by,
-                                market_filter_ma60_mode=args.market_filter_ma60_mode,
-                            )
+                            for market_scope in market_scopes:
+                                if args.universe_file:
+                                    scoped_symbols, scoped_symbol_to_market = load_symbols_with_market_scope(
+                                        args.universe_file, market_scope
+                                    )
+                                elif selected_symbols:
+                                    scoped_symbols = selected_symbols
+                                    scoped_symbol_to_market = selected_symbol_to_market
+                                else:
+                                    scoped_symbols = []
+                                    scoped_symbol_to_market = {}
+                                for entry_mode in entry_gate_modes:
+                                    entry_gate_enabled = entry_mode == "on"
+                                    for min_entry_score in min_entry_scores:
+                                        require_positive_momentum20 = args.require_positive_momentum20
+                                        require_positive_momentum60 = args.require_positive_momentum60
+                                        require_above_sma20 = args.require_above_sma20
+                                        require_above_sma60 = args.require_above_sma60
+                                        if args.entry_gate_rule_set == "basic_trend":
+                                            require_positive_momentum20 = True
+                                            require_above_sma20 = True
 
-                            bt_rows = conn.execute(
+                                        generate_daily_scores(
+                                            conn,
+                                            include_history=True,
+                                            allowed_symbols=scoped_symbols or None,
+                                            scoring_profile=scoring_version,
+                                            universe_mode=args.universe_mode,
+                                            universe_size=args.universe_size,
+                                            universe_lookback_days=args.universe_lookback_days,
+                                        )
+                                        run_id = run_backtest(
+                                            conn,
+                                            top_n=top_n,
+                                            start_date=start_date,
+                                            end_date=end_date,
+                                            initial_equity=args.initial_equity,
+                                            rebalance_frequency=args.rebalance_frequency,
+                                            min_holding_days=min_holding_days,
+                                            keep_rank_threshold=keep_rank_threshold,
+                                            scoring_profile=scoring_version,
+                                            market_filter_enabled=market_filter_enabled,
+                                            market_filter_ma20_reduce_by=args.market_filter_ma20_reduce_by,
+                                            market_filter_ma60_mode=args.market_filter_ma60_mode,
+                                            entry_gate_enabled=entry_gate_enabled,
+                                            min_entry_score=min_entry_score,
+                                            require_positive_momentum20=require_positive_momentum20,
+                                            require_positive_momentum60=require_positive_momentum60,
+                                            require_above_sma20=require_above_sma20,
+                                            require_above_sma60=require_above_sma60,
+                                        )
+
+                                        bt_rows = conn.execute(
                                 "SELECT date,equity,daily_return FROM backtest_results WHERE run_id=? ORDER BY date",
                                 (run_id,),
                             ).fetchall()
-                            if not bt_rows:
-                                continue
+                                        if not bt_rows:
+                                            continue
 
-                            returns = [float(r["daily_return"]) for r in bt_rows]
-                            equities = [float(r["equity"]) for r in bt_rows]
-                            total_return = _safe_div(equities[-1] - args.initial_equity, args.initial_equity)
-                            mdd = _max_drawdown(equities)
-                            sharpe = _sharpe(returns)
-                            market_diag = conn.execute(
+                                        returns = [float(r["daily_return"]) for r in bt_rows]
+                                        equities = [float(r["equity"]) for r in bt_rows]
+                                        total_return = _safe_div(equities[-1] - args.initial_equity, args.initial_equity)
+                                        mdd = _max_drawdown(equities)
+                                        sharpe = _sharpe(returns)
+                                        market_diag = conn.execute(
                                 """
                                 SELECT ma20_trigger_count, ma60_trigger_count, reduced_target_count_days,
-                                       blocked_new_buy_days, cash_mode_days
+                                       blocked_new_buy_days, cash_mode_days, entry_gate_enabled,
+                                       min_entry_score, require_positive_momentum20, require_positive_momentum60,
+                                       require_above_sma20, require_above_sma60, entry_gate_rejected_count,
+                                       entry_gate_cash_days, average_actual_position_count,
+                                       min_actual_position_count, max_actual_position_count
                                 FROM backtest_runs
                                 WHERE run_id=?
                                 """,
                                 (run_id,),
                             ).fetchone()
 
-                            holdings_by_day = _simulate_holdings(
-                                conn,
-                                available_dates,
-                                top_n=top_n,
-                                min_holding_days=min_holding_days,
-                                keep_rank_threshold=keep_rank_threshold,
-                                rebalance_frequency=args.rebalance_frequency,
-                            )
-                            trade_count = _estimate_trade_count(holdings_by_day)
+                                        holdings_by_day = _simulate_holdings(
+                                            conn,
+                                            available_dates,
+                                            top_n=top_n,
+                                            min_holding_days=min_holding_days,
+                                            keep_rank_threshold=keep_rank_threshold,
+                                            rebalance_frequency=args.rebalance_frequency,
+                                            entry_gate_enabled=entry_gate_enabled,
+                                            min_entry_score=min_entry_score,
+                                            require_positive_momentum20=require_positive_momentum20,
+                                            require_positive_momentum60=require_positive_momentum60,
+                                            require_above_sma20=require_above_sma20,
+                                            require_above_sma60=require_above_sma60,
+                                        )
+                                        trade_count = _estimate_trade_count(holdings_by_day)
+                                        selected_kospi_count, selected_kosdaq_count, kospi_contribution, kosdaq_contribution = _compute_market_selection_diagnostics(
+                                            conn, available_dates, holdings_by_day, scoped_symbol_to_market
+                                        )
 
-                            candidate_avg_return = _compute_candidate_avg_return(conn, available_dates)
-                            excess_return = total_return - candidate_avg_return
-                            robust_score = _compute_robustness_score(
-                                total_return=total_return,
-                                mdd=mdd,
-                                sharpe=sharpe,
-                                trade_count=trade_count,
-                                excess=excess_return,
-                            )
+                                        candidate_avg_return = _compute_candidate_avg_return(conn, available_dates)
+                                        excess_return = total_return - candidate_avg_return
+                                        robust_score = _compute_robustness_score(
+                                            total_return=total_return,
+                                            mdd=mdd,
+                                            sharpe=sharpe,
+                                            trade_count=trade_count,
+                                            excess=excess_return,
+                                        )
 
-                            result = ExperimentResult(
+                                        result = ExperimentResult(
                                 batch_id=batch_id,
                                 run_id=run_id,
                                 start_date=start_date,
@@ -457,6 +634,24 @@ def main() -> None:
                                 reduced_target_count_days=int(market_diag["reduced_target_count_days"]) if market_diag else 0,
                                 blocked_new_buy_days=int(market_diag["blocked_new_buy_days"]) if market_diag else 0,
                                 cash_mode_days=int(market_diag["cash_mode_days"]) if market_diag else 0,
+                                entry_gate_enabled=int(market_diag["entry_gate_enabled"]) if market_diag else 0,
+                                min_entry_score=float(market_diag["min_entry_score"]) if market_diag else float(min_entry_score),
+                                require_positive_momentum20=int(market_diag["require_positive_momentum20"]) if market_diag else int(require_positive_momentum20),
+                                require_positive_momentum60=int(market_diag["require_positive_momentum60"]) if market_diag else int(require_positive_momentum60),
+                                require_above_sma20=int(market_diag["require_above_sma20"]) if market_diag else int(require_above_sma20),
+                                require_above_sma60=int(market_diag["require_above_sma60"]) if market_diag else int(require_above_sma60),
+                                entry_gate_rejected_count=int(market_diag["entry_gate_rejected_count"]) if market_diag else 0,
+                                entry_gate_cash_days=int(market_diag["entry_gate_cash_days"]) if market_diag else 0,
+                                average_actual_position_count=float(market_diag["average_actual_position_count"]) if market_diag else 0.0,
+                                min_actual_position_count=int(market_diag["min_actual_position_count"]) if market_diag else 0,
+                                max_actual_position_count=int(market_diag["max_actual_position_count"]) if market_diag else 0,
+                                market_scope=market_scope,
+                                source_symbol_count=len(scoped_symbols),
+                                average_daily_universe_count=(sum(len(h) for h in holdings_by_day) / len(holdings_by_day)) if holdings_by_day else 0.0,
+                                selected_kospi_count=selected_kospi_count,
+                                selected_kosdaq_count=selected_kosdaq_count,
+                                kospi_contribution_return=kospi_contribution,
+                                kosdaq_contribution_return=kosdaq_contribution,
                                 total_return=total_return,
                                 max_drawdown=mdd,
                                 sharpe=sharpe,
@@ -464,10 +659,10 @@ def main() -> None:
                                 candidate_avg_return=candidate_avg_return,
                                 excess_return_vs_universe=excess_return,
                                 robustness_score=robust_score,
-                            )
-                            detailed_results.append(result)
+                                        )
+                                        detailed_results.append(result)
 
-                            conn.execute(
+                                        conn.execute(
                             """
                             INSERT INTO robustness_experiment_results(
                                 batch_id, run_id, start_date, end_date, period_months,
@@ -476,9 +671,14 @@ def main() -> None:
                                 universe_mode, universe_size, universe_lookback_days,
                                 market_filter_enabled, market_filter_ma20_reduce_by, market_filter_ma60_mode,
                                 ma20_trigger_count, ma60_trigger_count, reduced_target_count_days, blocked_new_buy_days, cash_mode_days,
+                                entry_gate_enabled, min_entry_score, require_positive_momentum20, require_positive_momentum60,
+                                require_above_sma20, require_above_sma60, entry_gate_rejected_count, entry_gate_cash_days,
+                                average_actual_position_count, min_actual_position_count, max_actual_position_count,
+                                market_scope, source_symbol_count, average_daily_universe_count,
+                                selected_kospi_count, selected_kosdaq_count, kospi_contribution_return, kosdaq_contribution_return,
                                 total_return, max_drawdown, sharpe, trade_count,
                                 candidate_avg_return, excess_return_vs_universe, robustness_score
-                            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                             """,
                             (
                                 result.batch_id,
@@ -503,6 +703,24 @@ def main() -> None:
                                 result.reduced_target_count_days,
                                 result.blocked_new_buy_days,
                                 result.cash_mode_days,
+                                result.entry_gate_enabled,
+                                result.min_entry_score,
+                                result.require_positive_momentum20,
+                                result.require_positive_momentum60,
+                                result.require_above_sma20,
+                                result.require_above_sma60,
+                                result.entry_gate_rejected_count,
+                                result.entry_gate_cash_days,
+                                result.average_actual_position_count,
+                                result.min_actual_position_count,
+                                result.max_actual_position_count,
+                                result.market_scope,
+                                result.source_symbol_count,
+                                result.average_daily_universe_count,
+                                result.selected_kospi_count,
+                                result.selected_kosdaq_count,
+                                result.kospi_contribution_return,
+                                result.kosdaq_contribution_return,
                                 result.total_return,
                                 result.max_drawdown,
                                 result.sharpe,
@@ -512,10 +730,10 @@ def main() -> None:
                                 result.robustness_score,
                             ),
                         )
-                            conn.commit()
-                            print(
+                                        conn.commit()
+                                        print(
                                 "[ok]",
-                                f"period={period_m}m top_n={top_n} hold={min_holding_days} keep={keep_rank_threshold} score={scoring_version} mfilter={market_mode}",
+                                f"period={period_m}m top_n={top_n} hold={min_holding_days} keep={keep_rank_threshold} score={scoring_version} mfilter={market_mode} gate={entry_mode} market_scope={market_scope}",
                                 f"run_id={run_id[:8]} total={total_return:.2%} sharpe={sharpe:.2f} excess={excess_return:.2%}",
                             )
 
@@ -526,7 +744,11 @@ def main() -> None:
 
     stable_groups: dict[str, list[ExperimentResult]] = defaultdict(list)
     for r in detailed_results:
-        key = f"top_n={r.top_n}|hold={r.min_holding_days}|keep_offset={r.keep_rank_offset}|scoring={r.scoring_version}|mfilter={r.market_filter_enabled}|ma20cut={r.market_filter_ma20_reduce_by}|ma60={r.market_filter_ma60_mode}"
+        key = (
+            f"top_n={r.top_n}|hold={r.min_holding_days}|keep_offset={r.keep_rank_offset}|scoring={r.scoring_version}|"
+            f"mfilter={r.market_filter_enabled}|ma20cut={r.market_filter_ma20_reduce_by}|ma60={r.market_filter_ma60_mode}|"
+            f"entry_gate={r.entry_gate_enabled}|min_entry_score={r.min_entry_score}|market_scope={r.market_scope}"
+        )
         stable_groups[key].append(r)
 
     stability_rows: list[dict[str, float | int | str]] = []
@@ -614,6 +836,8 @@ def main() -> None:
         f"- Keep-rank offsets: `{keep_offsets}` (keep_rank_threshold = top_n + offset)",
         f"- Scoring versions: `{scoring_versions}`",
         f"- Market filter modes: `{market_filter_modes}` (ma20_reduce_by={args.market_filter_ma20_reduce_by}, ma60_mode={args.market_filter_ma60_mode})",
+        f"- Entry gate modes: `{entry_gate_modes}` (min_entry_scores={min_entry_scores}, rule_set={args.entry_gate_rule_set})",
+        f"- Market scopes: `{market_scopes}`",
         f"- Rebalance frequency: `{args.rebalance_frequency}`",
         f"- Universe mode: `{args.universe_mode}`",
         f"- Universe size: `{args.universe_size if args.universe_mode == 'rolling_liquidity' else 'N/A(static)'}`",
@@ -628,14 +852,15 @@ def main() -> None:
         "",
         "## 상위 10개 개별 실험(robustness_score 기준)",
         "",
-        "|rank|period|top_n|min_hold|keep_threshold|scoring|market_filter|ma20_hit|ma60_hit|reduce_days|block_days|cash_days|total_return|MDD|sharpe|trades|excess_vs_universe|score|",
-        "|---:|---:|---:|---:|---:|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "|rank|period|top_n|min_hold|keep_threshold|scoring|market_scope|entry_gate|min_entry|market_filter|gate_reject|gate_cash_days|avg_pos|KOSPI_sel|KOSDAQ_sel|total_return|MDD|sharpe|trades|excess_vs_universe|score|",
+        "|---:|---:|---:|---:|---:|---|---|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for idx, r in enumerate(top_details, start=1):
         lines.append(
-            f"|{idx}|{r.period_months}m|{r.top_n}|{r.min_holding_days}|{r.keep_rank_threshold}|{r.scoring_version}|"
+            f"|{idx}|{r.period_months}m|{r.top_n}|{r.min_holding_days}|{r.keep_rank_threshold}|{r.scoring_version}|{r.market_scope}|"
+            f"{'ON' if r.entry_gate_enabled else 'OFF'}|{r.min_entry_score:.2f}|"
             f"{'ON' if r.market_filter_enabled else 'OFF'}({r.market_filter_ma60_mode})|"
-            f"{r.ma20_trigger_count}|{r.ma60_trigger_count}|{r.reduced_target_count_days}|{r.blocked_new_buy_days}|{r.cash_mode_days}|"
+            f"{r.entry_gate_rejected_count}|{r.entry_gate_cash_days}|{r.average_actual_position_count:.2f}|{r.selected_kospi_count}|{r.selected_kosdaq_count}|"
             f"{r.total_return:.2%}|{r.max_drawdown:.2%}|{r.sharpe:.2f}|{r.trade_count}|{r.excess_return_vs_universe:.2%}|{r.robustness_score:.4f}|"
         )
 

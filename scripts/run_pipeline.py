@@ -71,6 +71,12 @@ def main() -> None:
     p.add_argument("--universe-mode", choices=["static", "rolling_liquidity"], default="static")
     p.add_argument("--universe-size", type=int, default=100)
     p.add_argument("--universe-lookback-days", type=int, default=20)
+    p.add_argument("--enable-entry-gate", action="store_true")
+    p.add_argument("--min-entry-score", type=float, default=0.0)
+    p.add_argument("--require-positive-momentum20", action="store_true")
+    p.add_argument("--require-positive-momentum60", action="store_true")
+    p.add_argument("--require-above-sma20", action="store_true")
+    p.add_argument("--require-above-sma60", action="store_true")
     args = p.parse_args()
 
     if args.scoring_profile and args.scoring_version != DEFAULT_SCORING_PROFILE:
@@ -197,6 +203,12 @@ def main() -> None:
         market_filter_enabled=args.enable_market_filter,
         market_filter_ma20_reduce_by=args.market_filter_ma20_reduce_by,
         market_filter_ma60_mode=args.market_filter_ma60_mode,
+        entry_gate_enabled=args.enable_entry_gate,
+        min_entry_score=args.min_entry_score,
+        require_positive_momentum20=args.require_positive_momentum20,
+        require_positive_momentum60=args.require_positive_momentum60,
+        require_above_sma20=args.require_above_sma20,
+        require_above_sma60=args.require_above_sma60,
     )
     market_filter_summary_row = conn.execute(
         """
@@ -204,7 +216,13 @@ def main() -> None:
                ma60_trigger_count,
                reduced_target_count_days,
                blocked_new_buy_days,
-               cash_mode_days
+               cash_mode_days,
+               entry_gate_enabled,
+               entry_gate_rejected_count,
+               entry_gate_cash_days,
+               average_actual_position_count,
+               min_actual_position_count,
+               max_actual_position_count
         FROM backtest_runs
         WHERE run_id=?
         """,
@@ -216,6 +234,12 @@ def main() -> None:
         rebalance_frequency=args.rebalance_frequency,
         min_holding_days=args.min_holding_days,
         keep_rank_threshold=args.keep_rank_threshold,
+        entry_gate_enabled=args.enable_entry_gate,
+        min_entry_score=args.min_entry_score,
+        require_positive_momentum20=args.require_positive_momentum20,
+        require_positive_momentum60=args.require_positive_momentum60,
+        require_above_sma20=args.require_above_sma20,
+        require_above_sma60=args.require_above_sma60,
     )
 
     summary = {
@@ -243,6 +267,22 @@ def main() -> None:
                 "reduced_target_count_days": int(market_filter_summary_row["reduced_target_count_days"]) if market_filter_summary_row else 0,
                 "blocked_new_buy_days": int(market_filter_summary_row["blocked_new_buy_days"]) if market_filter_summary_row else 0,
                 "cash_mode_days": int(market_filter_summary_row["cash_mode_days"]) if market_filter_summary_row else 0,
+            },
+        },
+        "entry_gate": {
+            "enabled": args.enable_entry_gate,
+            "min_entry_score": args.min_entry_score,
+            "require_positive_momentum20": args.require_positive_momentum20,
+            "require_positive_momentum60": args.require_positive_momentum60,
+            "require_above_sma20": args.require_above_sma20,
+            "require_above_sma60": args.require_above_sma60,
+            "diagnostics": {
+                "entry_gate_enabled": int(market_filter_summary_row["entry_gate_enabled"]) if market_filter_summary_row else 0,
+                "entry_gate_rejected_count": int(market_filter_summary_row["entry_gate_rejected_count"]) if market_filter_summary_row else 0,
+                "entry_gate_cash_days": int(market_filter_summary_row["entry_gate_cash_days"]) if market_filter_summary_row else 0,
+                "average_actual_position_count": float(market_filter_summary_row["average_actual_position_count"]) if market_filter_summary_row else 0.0,
+                "min_actual_position_count": int(market_filter_summary_row["min_actual_position_count"]) if market_filter_summary_row else 0,
+                "max_actual_position_count": int(market_filter_summary_row["max_actual_position_count"]) if market_filter_summary_row else 0,
             },
         },
     }
