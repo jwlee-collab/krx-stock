@@ -64,7 +64,7 @@ def main() -> None:
     p.add_argument("--shock-abs-return-threshold", type=float, default=0.18)
     p.add_argument("--shock-max-hits", type=int, default=1)
     p.add_argument("--scoring-profile", choices=sorted(SUPPORTED_SCORING_PROFILES), default=None, help="Deprecated alias for --scoring-version")
-    p.add_argument("--scoring-version", choices=["old", "trend_v2", "hybrid_v3"], default=DEFAULT_SCORING_PROFILE)
+    p.add_argument("--scoring-version", choices=["old", "trend_v2", "hybrid_v3", "hybrid_v4"], default=DEFAULT_SCORING_PROFILE)
     args = p.parse_args()
 
     if args.scoring_profile and args.scoring_version != DEFAULT_SCORING_PROFILE:

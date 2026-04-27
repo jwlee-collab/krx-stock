@@ -11,6 +11,8 @@ SCORING_VERSION_ALIASES = {
     "improved_v2": "trend_v2",
     "hybrid_v3": "hybrid_v3",
     "improved_v3": "hybrid_v3",
+    "hybrid_v4": "hybrid_v4",
+    "improved_v4": "hybrid_v4",
 }
 DEFAULT_SCORING_PROFILE = "old"
 SUPPORTED_SCORING_PROFILES = set(SCORING_VERSION_ALIASES)
@@ -105,6 +107,38 @@ def score_formula_v3(
     )
 
 
+def score_formula_v4(
+    ret_1d: float | None,
+    ret_5d: float | None,
+    momentum_20d: float | None,
+    momentum_60d: float | None,
+    sma_20_gap: float | None,
+    range_pct: float | None,
+    volatility_20d: float | None,
+    volume_z20: float | None,
+) -> float:
+    """Conservative hybrid formula: old stability + very light mid-term trend."""
+    r1 = ret_1d or 0.0
+    r5 = ret_5d or 0.0
+    m20 = momentum_20d or 0.0
+    m60 = momentum_60d or 0.0
+    gap20 = sma_20_gap or 0.0
+    rng = range_pct or 0.0
+    vol20 = volatility_20d or 0.0
+    vol_z = volume_z20 or 0.0
+
+    return (
+        (0.16 * r1)
+        + (0.35 * r5)
+        + (0.33 * m20)
+        + (0.04 * m60)
+        + (0.03 * gap20)
+        + (0.10 * vol_z)
+        - (0.02 * rng)
+        - (0.01 * vol20)
+    )
+
+
 def _rank_desc(values: list[tuple[str, float]]) -> list[tuple[str, float, int]]:
     sorted_vals = sorted(values, key=lambda t: t[1], reverse=True)
     ranked: list[tuple[str, float, int]] = []
@@ -180,8 +214,19 @@ def generate_daily_scores(
                 r["volatility_20d"],
                 r["volume_z20"],
             )
-        else:
+        elif scoring_version == "hybrid_v3":
             s = score_formula_v3(
+                r["ret_1d"],
+                r["ret_5d"],
+                r["momentum_20d"],
+                r["momentum_60d"],
+                r["sma_20_gap"],
+                r["range_pct"],
+                r["volatility_20d"],
+                r["volume_z20"],
+            )
+        else:
+            s = score_formula_v4(
                 r["ret_1d"],
                 r["ret_5d"],
                 r["momentum_20d"],
