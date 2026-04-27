@@ -8,9 +8,11 @@ import csv
 from collections import defaultdict
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 
 DEFAULT_FALLBACK_CSV = Path("data/kospi_source_universe_500.csv")
+DEFAULT_EXCLUDED_CSV = Path("data/kospi_source_universe_excluded_no_price.csv")
 
 
 def parse_args() -> argparse.Namespace:
@@ -22,6 +24,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--lookback-days", type=int, default=20)
     p.add_argument("--as-of-date", default=None, help="YYYY-MM-DD (default: yesterday)")
     p.add_argument("--fallback-csv", default=str(DEFAULT_FALLBACK_CSV))
+    p.add_argument("--validate-price-data", action="store_true", help="Keep only symbols that have OHLCV rows in validation period")
+    p.add_argument("--validation-start-date", default=None, help="YYYY-MM-DD (default: as_of_date - 30 days)")
+    p.add_argument("--validation-end-date", default=None, help="YYYY-MM-DD (default: as_of_date)")
+    p.add_argument("--min-price-rows", type=int, default=1, help="Minimum OHLCV row count in validation period")
+    p.add_argument("--excluded-output", default=str(DEFAULT_EXCLUDED_CSV), help="CSV path for symbols excluded by price validation")
     return p.parse_args()
 
 
@@ -123,15 +130,75 @@ def _fetch_with_fdr() -> tuple[list[dict[str, str]], str]:
     return sorted(uniq.values(), key=lambda x: x["symbol"]), "fdr"
 
 
-def _finalize_rows(rows: list[dict[str, str]], target_size: int) -> list[dict[str, str]]:
+def _finalize_rows(rows: list[dict[str, str]]) -> list[dict[str, str]]:
     uniq = {r["symbol"]: r for r in rows if str(r.get("market", "")).upper() == "KOSPI"}
-    ordered = sorted(uniq.values(), key=lambda x: x["symbol"])
-    return ordered[: min(target_size, len(ordered))]
+    return sorted(uniq.values(), key=lambda x: x["symbol"])
+
+
+def _count_price_rows(symbol: str, start_yyyymmdd: str, end_yyyymmdd: str) -> int:
+    from pykrx import stock
+
+    df = stock.get_market_ohlcv_by_date(start_yyyymmdd, end_yyyymmdd, symbol)
+    if df is None or df.empty:
+        return 0
+    return int(len(df))
+
+
+def _validate_price_data(
+    rows: list[dict[str, str]],
+    start_date: date,
+    end_date: date,
+    min_price_rows: int,
+) -> tuple[list[dict[str, str]], list[dict[str, Any]]]:
+    start_yyyymmdd = start_date.strftime("%Y%m%d")
+    end_yyyymmdd = end_date.strftime("%Y%m%d")
+    valid_rows: list[dict[str, str]] = []
+    invalid_rows: list[dict[str, Any]] = []
+
+    for row in rows:
+        symbol = str(row.get("symbol", "")).zfill(6)
+        price_rows = _count_price_rows(symbol=symbol, start_yyyymmdd=start_yyyymmdd, end_yyyymmdd=end_yyyymmdd)
+        if price_rows >= min_price_rows:
+            valid_rows.append(row)
+            continue
+        invalid_rows.append(
+            {
+                "symbol": symbol,
+                "name": str(row.get("name", "")),
+                "market": str(row.get("market", "KOSPI")),
+                "note": str(row.get("note", "")),
+                "price_rows": str(price_rows),
+                "validation_start_date": start_date.isoformat(),
+                "validation_end_date": end_date.isoformat(),
+            }
+        )
+    return valid_rows, invalid_rows
+
+
+def _write_csv(path: Path, fieldnames: list[str], rows: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=fieldnames)
+        w.writeheader()
+        for row in rows:
+            w.writerow(row)
 
 
 def main() -> None:
     args = parse_args()
     as_of = datetime.strptime(args.as_of_date, "%Y-%m-%d").date() if args.as_of_date else (date.today() - timedelta(days=1))
+    validation_start_date = (
+        datetime.strptime(args.validation_start_date, "%Y-%m-%d").date()
+        if args.validation_start_date
+        else (as_of - timedelta(days=30))
+    )
+    validation_end_date = datetime.strptime(args.validation_end_date, "%Y-%m-%d").date() if args.validation_end_date else as_of
+    if validation_start_date > validation_end_date:
+        raise SystemExit(
+            f"validation date range is invalid: start={validation_start_date.isoformat()} end={validation_end_date.isoformat()}"
+        )
+    if int(args.min_price_rows) < 1:
+        raise SystemExit(f"--min-price-rows must be >= 1 (got {args.min_price_rows})")
 
     errors: list[str] = []
     source = ""
@@ -163,12 +230,34 @@ def main() -> None:
             + "\n".join(f"- {x}" for x in errors)
         )
 
-    selected = _finalize_rows(rows, args.target_size)
+    candidates = _finalize_rows(rows)
+    selected = candidates[: min(args.target_size, len(candidates))]
+    excluded_rows: list[dict[str, Any]] = []
 
-    if len(selected) < int(args.min_size):
+    if args.validate_price_data:
+        valid_rows, excluded_rows = _validate_price_data(
+            rows=candidates,
+            start_date=validation_start_date,
+            end_date=validation_end_date,
+            min_price_rows=int(args.min_price_rows),
+        )
+        candidates = valid_rows
+        selected = candidates[: min(args.target_size, len(candidates))]
+        excluded_path = Path(args.excluded_output)
+        _write_csv(
+            path=excluded_path,
+            fieldnames=["symbol", "name", "market", "note", "price_rows", "validation_start_date", "validation_end_date"],
+            rows=excluded_rows,
+        )
+        print(f"[done] candidate_symbols_before_price_validation={len(valid_rows) + len(excluded_rows)}")
+        print(f"[done] symbols_with_price_data={len(valid_rows)}")
+        print(f"[done] symbols_without_price_data={len(excluded_rows)}")
+        print(f"[done] excluded_output path={excluded_path}")
+
+    if len(candidates) < int(args.min_size):
         raise SystemExit(
-            f"확보 종목 수({len(selected)})가 --min-size({args.min_size}) 미만이라 실패합니다. "
-            f"source={source} target_size={args.target_size}"
+            f"확보 종목 수({len(candidates)})가 --min-size({args.min_size}) 미만이라 실패합니다. "
+            f"source={source} target_size={args.target_size} validate_price_data={'on' if args.validate_price_data else 'off'}"
         )
 
     if len(selected) < int(args.target_size) and not args.allow_partial:
@@ -178,16 +267,12 @@ def main() -> None:
         )
 
     out_path = Path(args.output)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    with out_path.open("w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=["symbol", "name", "market", "note"])
-        w.writeheader()
-        for row in selected:
-            w.writerow(row)
+    _write_csv(path=out_path, fieldnames=["symbol", "name", "market", "note"], rows=selected)
 
     is_partial = len(selected) < int(args.target_size)
     print(f"[done] output={out_path}")
     print(f"[done] source={source}")
+    print(f"[done] output_rows={len(selected)}")
     print(f"[done] selected_rows={len(selected)} target_size={args.target_size} min_size={args.min_size}")
     print(f"[done] partial_mode={'on' if args.allow_partial else 'off'} partial_result={'yes' if is_partial else 'no'}")
     if errors:
