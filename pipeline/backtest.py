@@ -230,6 +230,7 @@ def run_backtest(
 
     equity = initial_equity
     result_rows: list[tuple] = []
+    holdings_rows: list[tuple] = []
 
     current_holdings: set[str] = set()
     entry_index_by_symbol: dict[str, int] = {}
@@ -440,6 +441,46 @@ def run_backtest(
             daily_ret = 0.0
             pos_count = 0
         else:
+            score_rows = conn.execute(
+                f"""
+                SELECT symbol, rank, score
+                FROM daily_scores
+                WHERE date=? AND symbol IN ({",".join("?" for _ in current_holdings)})
+                """,
+                (d0, *sorted(current_holdings)),
+            ).fetchall()
+            score_by_symbol = {
+                r["symbol"]: (
+                    int(r["rank"]) if r["rank"] is not None else None,
+                    float(r["score"]) if r["score"] is not None else None,
+                )
+                for r in score_rows
+            }
+            weight = 1.0 / float(len(current_holdings))
+            for sym in sorted(current_holdings):
+                close_px = close_by_symbol.get(sym)
+                entry_px = entry_price_by_symbol.get(sym)
+                entry_idx = entry_index_by_symbol.get(sym)
+                entry_date = all_dates[entry_idx] if entry_idx is not None and 0 <= entry_idx < len(all_dates) else None
+                unrealized_return = None
+                if close_px is not None and entry_px is not None and entry_px > 0:
+                    unrealized_return = (close_px - entry_px) / entry_px
+                rank_score = score_by_symbol.get(sym, (None, None))
+                holdings_rows.append(
+                    (
+                        run_id,
+                        d0,
+                        sym,
+                        weight,
+                        entry_date,
+                        entry_px,
+                        close_px,
+                        unrealized_return,
+                        rank_score[0],
+                        rank_score[1],
+                    )
+                )
+
             returns = []
             for sym in sorted(current_holdings):
                 row0 = conn.execute(
@@ -491,6 +532,16 @@ def run_backtest(
         """,
         result_rows,
     )
+    conn.execute("DELETE FROM backtest_holdings WHERE run_id=?", (run_id,))
+    if holdings_rows:
+        conn.executemany(
+            """
+            INSERT INTO backtest_holdings(
+                run_id,date,symbol,weight,entry_date,entry_price,close,unrealized_return,rank,score
+            ) VALUES(?,?,?,?,?,?,?,?,?,?)
+            """,
+            holdings_rows,
+        )
     if market_filter_event_rows:
         conn.executemany(
             """

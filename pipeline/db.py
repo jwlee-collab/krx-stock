@@ -140,6 +140,21 @@ def init_db(conn: sqlite3.Connection) -> None:
             FOREIGN KEY (run_id) REFERENCES backtest_runs(run_id)
         );
 
+        CREATE TABLE IF NOT EXISTS backtest_holdings (
+            run_id TEXT NOT NULL,
+            date TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            weight REAL NOT NULL,
+            entry_date TEXT,
+            entry_price REAL,
+            close REAL,
+            unrealized_return REAL,
+            rank INTEGER,
+            score REAL,
+            PRIMARY KEY (run_id, date, symbol),
+            FOREIGN KEY (run_id) REFERENCES backtest_runs(run_id)
+        );
+
         CREATE TABLE IF NOT EXISTS backtest_risk_events (
             event_id INTEGER PRIMARY KEY AUTOINCREMENT,
             run_id TEXT NOT NULL,
@@ -323,6 +338,7 @@ def init_db(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_scores_date_rank ON daily_scores(date, rank);
         CREATE INDEX IF NOT EXISTS idx_daily_universe_date_rank ON daily_universe(date, universe_mode, universe_rank);
         CREATE INDEX IF NOT EXISTS idx_backtest_risk_events_run_date ON backtest_risk_events(run_id, date);
+        CREATE INDEX IF NOT EXISTS idx_backtest_holdings_run_date ON backtest_holdings(run_id, date);
         CREATE INDEX IF NOT EXISTS idx_robustness_results_batch_score ON robustness_experiment_results(batch_id, robustness_score DESC);
         CREATE INDEX IF NOT EXISTS idx_robustness_stability_batch_score ON robustness_experiment_stability(batch_id, stability_score DESC);
         """
@@ -369,6 +385,12 @@ def init_db(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "daily_features", "sma_20_gap", "sma_20_gap REAL")
     _ensure_column(conn, "daily_features", "sma_60_gap", "sma_60_gap REAL")
     _ensure_column(conn, "daily_features", "volatility_20d", "volatility_20d REAL")
+    _ensure_column(conn, "backtest_holdings", "entry_date", "entry_date TEXT")
+    _ensure_column(conn, "backtest_holdings", "entry_price", "entry_price REAL")
+    _ensure_column(conn, "backtest_holdings", "close", "close REAL")
+    _ensure_column(conn, "backtest_holdings", "unrealized_return", "unrealized_return REAL")
+    _ensure_column(conn, "backtest_holdings", "rank", "rank INTEGER")
+    _ensure_column(conn, "backtest_holdings", "score", "score REAL")
 
     _ensure_column(conn, "robustness_experiment_results", "enable_position_stop_loss", "enable_position_stop_loss INTEGER NOT NULL DEFAULT 0")
     _ensure_column(conn, "robustness_experiment_results", "position_stop_loss_pct", "position_stop_loss_pct REAL NOT NULL DEFAULT 0.08")
