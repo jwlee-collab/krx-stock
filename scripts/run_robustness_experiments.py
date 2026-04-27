@@ -39,6 +39,9 @@ class ExperimentResult:
     keep_rank_offset: int
     scoring_version: str
     rebalance_frequency: str
+    market_filter_enabled: int
+    market_filter_ma20_reduce_by: int
+    market_filter_ma60_mode: str
     total_return: float
     max_drawdown: float
     sharpe: float
@@ -254,6 +257,9 @@ def main() -> None:
     p.add_argument("--symbols", default="", help="Comma-separated KRX 6-digit symbols")
     p.add_argument("--universe-file", help="CSV path containing at least a symbol column")
     p.add_argument("--initial-equity", type=float, default=100000.0)
+    p.add_argument("--market-filter-modes", default="off,on", help="Comma-separated experiment modes: off,on")
+    p.add_argument("--market-filter-ma20-reduce-by", type=int, default=1)
+    p.add_argument("--market-filter-ma60-mode", choices=["none", "block_new_buys", "cash"], default="block_new_buys")
     args = p.parse_args()
 
     conn = get_connection(args.db)
@@ -274,6 +280,12 @@ def main() -> None:
     if args.include_trend_v2:
         scoring_versions.append(normalize_scoring_profile("trend_v2"))
     scoring_versions = list(dict.fromkeys(scoring_versions))
+
+    market_filter_modes = [x.strip().lower() for x in args.market_filter_modes.split(",") if x.strip()]
+    market_filter_modes = list(dict.fromkeys(market_filter_modes))
+    invalid_market_modes = [m for m in market_filter_modes if m not in {"off", "on"}]
+    if invalid_market_modes:
+        raise ValueError(f"invalid --market-filter-modes: {invalid_market_modes}")
 
     selected_symbols = parse_symbols_arg(args.symbols)
     if args.universe_file:
@@ -315,88 +327,97 @@ def main() -> None:
                 for keep_offset in keep_offsets:
                     keep_rank_threshold = top_n + keep_offset
                     for scoring_version in scoring_versions:
-                        generate_daily_scores(
-                            conn,
-                            include_history=True,
-                            allowed_symbols=selected_symbols or None,
-                            scoring_profile=scoring_version,
-                        )
-                        run_id = run_backtest(
-                            conn,
-                            top_n=top_n,
-                            start_date=start_date,
-                            end_date=end_date,
-                            initial_equity=args.initial_equity,
-                            rebalance_frequency=args.rebalance_frequency,
-                            min_holding_days=min_holding_days,
-                            keep_rank_threshold=keep_rank_threshold,
-                            scoring_profile=scoring_version,
-                        )
+                        for market_mode in market_filter_modes:
+                            market_filter_enabled = market_mode == "on"
+                            generate_daily_scores(
+                                conn,
+                                include_history=True,
+                                allowed_symbols=selected_symbols or None,
+                                scoring_profile=scoring_version,
+                            )
+                            run_id = run_backtest(
+                                conn,
+                                top_n=top_n,
+                                start_date=start_date,
+                                end_date=end_date,
+                                initial_equity=args.initial_equity,
+                                rebalance_frequency=args.rebalance_frequency,
+                                min_holding_days=min_holding_days,
+                                keep_rank_threshold=keep_rank_threshold,
+                                scoring_profile=scoring_version,
+                                market_filter_enabled=market_filter_enabled,
+                                market_filter_ma20_reduce_by=args.market_filter_ma20_reduce_by,
+                                market_filter_ma60_mode=args.market_filter_ma60_mode,
+                            )
 
-                        bt_rows = conn.execute(
-                            "SELECT date,equity,daily_return FROM backtest_results WHERE run_id=? ORDER BY date",
-                            (run_id,),
-                        ).fetchall()
-                        if not bt_rows:
-                            continue
+                            bt_rows = conn.execute(
+                                "SELECT date,equity,daily_return FROM backtest_results WHERE run_id=? ORDER BY date",
+                                (run_id,),
+                            ).fetchall()
+                            if not bt_rows:
+                                continue
 
-                        returns = [float(r["daily_return"]) for r in bt_rows]
-                        equities = [float(r["equity"]) for r in bt_rows]
-                        total_return = _safe_div(equities[-1] - args.initial_equity, args.initial_equity)
-                        mdd = _max_drawdown(equities)
-                        sharpe = _sharpe(returns)
+                            returns = [float(r["daily_return"]) for r in bt_rows]
+                            equities = [float(r["equity"]) for r in bt_rows]
+                            total_return = _safe_div(equities[-1] - args.initial_equity, args.initial_equity)
+                            mdd = _max_drawdown(equities)
+                            sharpe = _sharpe(returns)
 
-                        holdings_by_day = _simulate_holdings(
-                            conn,
-                            available_dates,
-                            top_n=top_n,
-                            min_holding_days=min_holding_days,
-                            keep_rank_threshold=keep_rank_threshold,
-                            rebalance_frequency=args.rebalance_frequency,
-                        )
-                        trade_count = _estimate_trade_count(holdings_by_day)
+                            holdings_by_day = _simulate_holdings(
+                                conn,
+                                available_dates,
+                                top_n=top_n,
+                                min_holding_days=min_holding_days,
+                                keep_rank_threshold=keep_rank_threshold,
+                                rebalance_frequency=args.rebalance_frequency,
+                            )
+                            trade_count = _estimate_trade_count(holdings_by_day)
 
-                        candidate_avg_return = _compute_candidate_avg_return(conn, available_dates)
-                        excess_return = total_return - candidate_avg_return
-                        robust_score = _compute_robustness_score(
-                            total_return=total_return,
-                            mdd=mdd,
-                            sharpe=sharpe,
-                            trade_count=trade_count,
-                            excess=excess_return,
-                        )
+                            candidate_avg_return = _compute_candidate_avg_return(conn, available_dates)
+                            excess_return = total_return - candidate_avg_return
+                            robust_score = _compute_robustness_score(
+                                total_return=total_return,
+                                mdd=mdd,
+                                sharpe=sharpe,
+                                trade_count=trade_count,
+                                excess=excess_return,
+                            )
 
-                        result = ExperimentResult(
-                            batch_id=batch_id,
-                            run_id=run_id,
-                            start_date=start_date,
-                            end_date=end_date,
-                            period_months=period_m,
-                            top_n=top_n,
-                            min_holding_days=min_holding_days,
-                            keep_rank_threshold=keep_rank_threshold,
-                            keep_rank_offset=keep_offset,
-                            scoring_version=scoring_version,
-                            rebalance_frequency=args.rebalance_frequency,
-                            total_return=total_return,
-                            max_drawdown=mdd,
-                            sharpe=sharpe,
-                            trade_count=trade_count,
-                            candidate_avg_return=candidate_avg_return,
-                            excess_return_vs_universe=excess_return,
-                            robustness_score=robust_score,
-                        )
-                        detailed_results.append(result)
+                            result = ExperimentResult(
+                                batch_id=batch_id,
+                                run_id=run_id,
+                                start_date=start_date,
+                                end_date=end_date,
+                                period_months=period_m,
+                                top_n=top_n,
+                                min_holding_days=min_holding_days,
+                                keep_rank_threshold=keep_rank_threshold,
+                                keep_rank_offset=keep_offset,
+                                scoring_version=scoring_version,
+                                rebalance_frequency=args.rebalance_frequency,
+                                market_filter_enabled=int(market_filter_enabled),
+                                market_filter_ma20_reduce_by=int(max(0, args.market_filter_ma20_reduce_by)),
+                                market_filter_ma60_mode=args.market_filter_ma60_mode,
+                                total_return=total_return,
+                                max_drawdown=mdd,
+                                sharpe=sharpe,
+                                trade_count=trade_count,
+                                candidate_avg_return=candidate_avg_return,
+                                excess_return_vs_universe=excess_return,
+                                robustness_score=robust_score,
+                            )
+                            detailed_results.append(result)
 
-                        conn.execute(
+                            conn.execute(
                             """
                             INSERT INTO robustness_experiment_results(
                                 batch_id, run_id, start_date, end_date, period_months,
                                 top_n, min_holding_days, keep_rank_threshold, keep_rank_offset,
                                 scoring_version, rebalance_frequency,
+                                market_filter_enabled, market_filter_ma20_reduce_by, market_filter_ma60_mode,
                                 total_return, max_drawdown, sharpe, trade_count,
                                 candidate_avg_return, excess_return_vs_universe, robustness_score
-                            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                             """,
                             (
                                 result.batch_id,
@@ -410,6 +431,9 @@ def main() -> None:
                                 result.keep_rank_offset,
                                 result.scoring_version,
                                 result.rebalance_frequency,
+                                result.market_filter_enabled,
+                                result.market_filter_ma20_reduce_by,
+                                result.market_filter_ma60_mode,
                                 result.total_return,
                                 result.max_drawdown,
                                 result.sharpe,
@@ -419,12 +443,12 @@ def main() -> None:
                                 result.robustness_score,
                             ),
                         )
-                        conn.commit()
-                        print(
-                            "[ok]",
-                            f"period={period_m}m top_n={top_n} hold={min_holding_days} keep={keep_rank_threshold} score={scoring_version}",
-                            f"run_id={run_id[:8]} total={total_return:.2%} sharpe={sharpe:.2f} excess={excess_return:.2%}",
-                        )
+                            conn.commit()
+                            print(
+                                "[ok]",
+                                f"period={period_m}m top_n={top_n} hold={min_holding_days} keep={keep_rank_threshold} score={scoring_version} mfilter={market_mode}",
+                                f"run_id={run_id[:8]} total={total_return:.2%} sharpe={sharpe:.2f} excess={excess_return:.2%}",
+                            )
 
     if not detailed_results:
         raise ValueError("실험 결과가 없습니다. 입력 기간/데이터를 확인하세요.")
@@ -433,7 +457,7 @@ def main() -> None:
 
     stable_groups: dict[str, list[ExperimentResult]] = defaultdict(list)
     for r in detailed_results:
-        key = f"top_n={r.top_n}|hold={r.min_holding_days}|keep_offset={r.keep_rank_offset}|scoring={r.scoring_version}"
+        key = f"top_n={r.top_n}|hold={r.min_holding_days}|keep_offset={r.keep_rank_offset}|scoring={r.scoring_version}|mfilter={r.market_filter_enabled}|ma20cut={r.market_filter_ma20_reduce_by}|ma60={r.market_filter_ma60_mode}"
         stable_groups[key].append(r)
 
     stability_rows: list[dict[str, float | int | str]] = []
@@ -520,6 +544,7 @@ def main() -> None:
         f"- Min holding days: `{min_holding_days_values}`",
         f"- Keep-rank offsets: `{keep_offsets}` (keep_rank_threshold = top_n + offset)",
         f"- Scoring versions: `{scoring_versions}`",
+        f"- Market filter modes: `{market_filter_modes}` (ma20_reduce_by={args.market_filter_ma20_reduce_by}, ma60_mode={args.market_filter_ma60_mode})",
         f"- Rebalance frequency: `{args.rebalance_frequency}`",
         f"- Universe filter input: `{'--universe-file' if args.universe_file else '--symbols' if selected_symbols else 'all symbols in DB'}`",
         f"- Universe size: `{len(selected_symbols) if selected_symbols else 'ALL'}`",
@@ -531,12 +556,13 @@ def main() -> None:
         "",
         "## 상위 10개 개별 실험(robustness_score 기준)",
         "",
-        "|rank|period|top_n|min_hold|keep_threshold|scoring|total_return|MDD|sharpe|trades|excess_vs_universe|score|",
-        "|---:|---:|---:|---:|---:|---|---:|---:|---:|---:|---:|---:|",
+        "|rank|period|top_n|min_hold|keep_threshold|scoring|market_filter|total_return|MDD|sharpe|trades|excess_vs_universe|score|",
+        "|---:|---:|---:|---:|---:|---|---|---:|---:|---:|---:|---:|---:|",
     ]
     for idx, r in enumerate(top_details, start=1):
         lines.append(
             f"|{idx}|{r.period_months}m|{r.top_n}|{r.min_holding_days}|{r.keep_rank_threshold}|{r.scoring_version}|"
+            f"{'ON' if r.market_filter_enabled else 'OFF'}({r.market_filter_ma60_mode})|"
             f"{r.total_return:.2%}|{r.max_drawdown:.2%}|{r.sharpe:.2f}|{r.trade_count}|{r.excess_return_vs_universe:.2%}|{r.robustness_score:.4f}|"
         )
 

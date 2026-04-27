@@ -45,6 +45,44 @@ def _build_target_holdings(
     return set(target)
 
 
+def _build_proxy_market_close_by_date(conn: sqlite3.Connection, dates: list[str]) -> dict[str, float]:
+    rows = conn.execute(
+        """
+        SELECT date, AVG(close) AS market_close
+        FROM daily_prices
+        WHERE date BETWEEN ? AND ?
+        GROUP BY date
+        ORDER BY date
+        """,
+        (dates[0], dates[-1]),
+    ).fetchall()
+    return {r["date"]: float(r["market_close"]) for r in rows if r["market_close"] is not None}
+
+
+def _build_market_regime_by_date(
+    conn: sqlite3.Connection,
+    dates: list[str],
+) -> dict[str, dict[str, bool]]:
+    if not dates:
+        return {}
+
+    close_by_date = _build_proxy_market_close_by_date(conn, dates)
+    ordered_dates = [d for d in dates if d in close_by_date]
+    closes = [close_by_date[d] for d in ordered_dates]
+
+    regime_by_date: dict[str, dict[str, bool]] = {}
+    for idx, d in enumerate(ordered_dates):
+        ma20 = (sum(closes[idx - 19 : idx + 1]) / 20.0) if idx >= 19 else None
+        ma60 = (sum(closes[idx - 59 : idx + 1]) / 60.0) if idx >= 59 else None
+        c = closes[idx]
+        regime_by_date[d] = {
+            "below_ma20": (ma20 is not None and c < ma20),
+            "below_ma60": (ma60 is not None and c < ma60),
+        }
+
+    return regime_by_date
+
+
 def run_backtest(
     conn: sqlite3.Connection,
     top_n: int = 5,
@@ -55,10 +93,15 @@ def run_backtest(
     min_holding_days: int = 0,
     keep_rank_threshold: int | None = None,
     scoring_profile: str = "improved_v1",
+    market_filter_enabled: bool = False,
+    market_filter_ma20_reduce_by: int = 1,
+    market_filter_ma60_mode: str = "block_new_buys",
 ) -> str:
     """Equal-weight long backtest using daily_scores and next-day close returns."""
     if rebalance_frequency not in {"daily", "weekly"}:
         raise ValueError("rebalance_frequency must be one of: daily, weekly")
+    if market_filter_ma60_mode not in {"none", "block_new_buys", "cash"}:
+        raise ValueError("market_filter_ma60_mode must be one of: none, block_new_buys, cash")
 
     if keep_rank_threshold is None:
         keep_rank_threshold = top_n
@@ -81,12 +124,15 @@ def run_backtest(
     if len(all_dates) < 2:
         raise ValueError("Need at least 2 dates for backtest")
 
+    regime_by_date = _build_market_regime_by_date(conn, all_dates)
+
     conn.execute(
         """
         INSERT INTO backtest_runs(
             run_id,created_at,top_n,start_date,end_date,initial_equity,
-            rebalance_frequency,min_holding_days,keep_rank_threshold,scoring_profile
-        ) VALUES(?,?,?,?,?,?,?,?,?,?)
+            rebalance_frequency,min_holding_days,keep_rank_threshold,scoring_profile,
+            market_filter_enabled,market_filter_ma20_reduce_by,market_filter_ma60_mode
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
         """,
         (
             run_id,
@@ -99,6 +145,9 @@ def run_backtest(
             int(min_holding_days),
             int(keep_rank_threshold),
             scoring_profile,
+            int(bool(market_filter_enabled)),
+            int(max(0, market_filter_ma20_reduce_by)),
+            market_filter_ma60_mode,
         ),
     )
 
@@ -126,16 +175,30 @@ def run_backtest(
             ranked_symbols = [r["symbol"] for r in ranked_rows]
             rank_by_symbol = {r["symbol"]: int(r["rank"]) for r in ranked_rows}
 
+            effective_top_n = int(top_n)
+            block_new_buys = False
+            if market_filter_enabled:
+                regime = regime_by_date.get(d0, {"below_ma20": False, "below_ma60": False})
+                if regime["below_ma20"]:
+                    effective_top_n = max(0, effective_top_n - int(max(0, market_filter_ma20_reduce_by)))
+                if regime["below_ma60"]:
+                    if market_filter_ma60_mode == "cash":
+                        effective_top_n = 0
+                    elif market_filter_ma60_mode == "block_new_buys":
+                        block_new_buys = True
+
             target_holdings = _build_target_holdings(
                 ranked_symbols=ranked_symbols,
                 rank_by_symbol=rank_by_symbol,
                 current_symbols=current_holdings,
                 entry_index_by_symbol=entry_index_by_symbol,
                 current_day_index=i,
-                top_n=top_n,
+                top_n=effective_top_n,
                 min_holding_days=int(min_holding_days),
                 keep_rank_threshold=int(keep_rank_threshold),
             )
+            if block_new_buys:
+                target_holdings = target_holdings & current_holdings
 
             for sym in (target_holdings - current_holdings):
                 entry_index_by_symbol[sym] = i

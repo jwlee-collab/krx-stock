@@ -60,6 +60,9 @@ def main() -> None:
     p.add_argument("--shock-abs-return-threshold", type=float, default=0.18)
     p.add_argument("--shock-max-hits", type=int, default=1)
     p.add_argument("--scoring-profile", choices=sorted(SUPPORTED_SCORING_PROFILES), default=None, help="Deprecated alias for --scoring-version")
+    p.add_argument("--enable-market-filter", action="store_true", help="Enable KOSPI proxy market regime filter")
+    p.add_argument("--market-filter-ma20-reduce-by", type=int, default=1, help="If market close is below 20D MA, reduce target holdings by this count")
+    p.add_argument("--market-filter-ma60-mode", choices=["none", "block_new_buys", "cash"], default="block_new_buys", help="If market close is below 60D MA: none, block new buys, or move to cash")
     p.add_argument("--scoring-version", choices=["old", "trend_v2", "hybrid_v3", "hybrid_v4"], default=DEFAULT_SCORING_PROFILE)
     args = p.parse_args()
 
@@ -154,6 +157,9 @@ def main() -> None:
         min_holding_days=args.min_holding_days,
         keep_rank_threshold=args.keep_rank_threshold,
         scoring_profile=selected_scoring,
+        market_filter_enabled=args.enable_market_filter,
+        market_filter_ma20_reduce_by=args.market_filter_ma20_reduce_by,
+        market_filter_ma60_mode=args.market_filter_ma60_mode,
     )
     paper = run_paper_trading_cycle(
         conn,
@@ -173,6 +179,11 @@ def main() -> None:
         "scoring_profile": selected_scoring,
         "backtest_run_id": run_id,
         "paper": paper,
+        "market_filter": {
+            "enabled": args.enable_market_filter,
+            "ma20_reduce_by": args.market_filter_ma20_reduce_by,
+            "ma60_mode": args.market_filter_ma60_mode,
+        },
     }
     print(json.dumps(summary, indent=2, ensure_ascii=False))
 
