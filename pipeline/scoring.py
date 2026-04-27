@@ -9,6 +9,8 @@ SCORING_VERSION_ALIASES = {
     "improved_v1": "old",
     "trend_v2": "trend_v2",
     "improved_v2": "trend_v2",
+    "hybrid_v3": "hybrid_v3",
+    "improved_v3": "hybrid_v3",
 }
 DEFAULT_SCORING_PROFILE = "old"
 SUPPORTED_SCORING_PROFILES = set(SCORING_VERSION_ALIASES)
@@ -68,6 +70,38 @@ def score_formula_v2(
         + (0.05 * vol_z)
         - (0.03 * rng)
         - (0.04 * vol20)
+    )
+
+
+def score_formula_v3(
+    ret_1d: float | None,
+    ret_5d: float | None,
+    momentum_20d: float | None,
+    momentum_60d: float | None,
+    sma_20_gap: float | None,
+    range_pct: float | None,
+    volatility_20d: float | None,
+    volume_z20: float | None,
+) -> float:
+    """Hybrid formula: keep old base while adding mild trend/noise controls."""
+    r1 = ret_1d or 0.0
+    r5 = ret_5d or 0.0
+    m20 = momentum_20d or 0.0
+    m60 = momentum_60d or 0.0
+    gap20 = sma_20_gap or 0.0
+    rng = range_pct or 0.0
+    vol20 = volatility_20d or 0.0
+    vol_z = volume_z20 or 0.0
+
+    return (
+        (0.10 * r1)
+        + (0.36 * r5)
+        + (0.30 * m20)
+        + (0.08 * m60)
+        + (0.06 * gap20)
+        + (0.10 * vol_z)
+        - (0.035 * rng)
+        - (0.02 * vol20)
     )
 
 
@@ -135,13 +169,24 @@ def generate_daily_scores(
     for r in rows:
         if scoring_version == "old":
             s = score_formula_v1(r["ret_1d"], r["ret_5d"], r["momentum_20d"], r["range_pct"], r["volume_z20"])
-        else:
+        elif scoring_version == "trend_v2":
             s = score_formula_v2(
                 r["ret_5d"],
                 r["momentum_20d"],
                 r["momentum_60d"],
                 r["sma_20_gap"],
                 r["sma_60_gap"],
+                r["range_pct"],
+                r["volatility_20d"],
+                r["volume_z20"],
+            )
+        else:
+            s = score_formula_v3(
+                r["ret_1d"],
+                r["ret_5d"],
+                r["momentum_20d"],
+                r["momentum_60d"],
+                r["sma_20_gap"],
                 r["range_pct"],
                 r["volatility_20d"],
                 r["volume_z20"],
