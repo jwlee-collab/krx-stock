@@ -188,7 +188,7 @@ python scripts/validate_pipeline.py --db data/market_pipeline.db --top-n 3
 
 ### 5-1) 전략 강건성(robustness) 실험 자동화
 
-`trend_v2`가 특정 구간에서만 우연히 좋았는지 확인하기 위해, 동일 후보군/데이터에서 여러 파라미터 조합을 반복 실행해 비교 리포트를 생성할 수 있습니다.
+`old / trend_v2 / hybrid_v3`가 특정 구간에서만 우연히 좋았는지 확인하기 위해, 동일 후보군/데이터에서 여러 파라미터 조합을 반복 실행해 비교 리포트를 생성할 수 있습니다.
 
 ```bash
 python scripts/run_robustness_experiments.py \
@@ -198,7 +198,7 @@ python scripts/run_robustness_experiments.py \
   --top-n-values 3,5,10 \
   --min-holding-days-values 5,10 \
   --keep-rank-offsets 2,4 \
-  --scoring-versions old,trend_v2 \
+  --scoring-versions old,trend_v2,hybrid_v3 \
   --rebalance-frequency daily
 ```
 
@@ -208,7 +208,7 @@ python scripts/run_robustness_experiments.py \
   - `top_n`: 3/5/10
   - `min_holding_days`: 5/10
   - `keep_rank_threshold`: `top_n+2`, `top_n+4`
-  - `scoring_version`: `old`, `trend_v2`
+  - `scoring_version`: `old`, `trend_v2`, `hybrid_v3`
 - 각 조합마다 `daily_scores` 재계산 + `run_backtest(...)` 실행
 - 결과 저장:
   - SQLite
@@ -303,7 +303,8 @@ python scripts/generate_performance_report.py \
 
 `run_pipeline.py --scoring-version`으로 점수식을 선택할 수 있습니다.
 - `old` (`improved_v1` 별칭): 기존 식(단기 신호 반응이 상대적으로 큼)
-- `trend_v2` (`improved_v2` 별칭): 중기 추세 중심 신호(권장)
+- `trend_v2` (`improved_v2` 별칭): 중기 추세 중심 + 노이즈/변동성 강한 억제
+- `hybrid_v3` (`improved_v3` 별칭): `old` 기반에 추세 필터를 약하게 섞은 절충형
 
 ### 기존 점수식 (`improved_v1`)
 ```text
@@ -314,9 +315,45 @@ score_v1 = 0.20*ret_1d + 0.35*ret_5d + 0.35*momentum_20d + 0.10*volume_z20 - 0.0
 
 
 
+### trend 점수식 (`improved_v2`)
+```text
+score_v2 =
+  0.15*ret_5d
++ 0.35*momentum_20d
++ 0.30*momentum_60d
++ 0.12*sma_20_gap
++ 0.10*sma_60_gap
++ 0.05*volume_z20
+- 0.03*range_pct
+- 0.04*volatility_20d
+```
+
+해석:
+- `ret_1d`를 제거하고 중기 추세 시그널 비중을 크게 높인 구조입니다.
+- 대신 `volatility_20d`/`range_pct` 페널티가 강해, 변동성이 있는 추세 초입까지 과도하게 깎일 수 있습니다.
+
+### hybrid 점수식 (`improved_v3`)
+```text
+score_v3 =
+  0.10*ret_1d
++ 0.36*ret_5d
++ 0.30*momentum_20d
++ 0.08*momentum_60d
++ 0.06*sma_20_gap
++ 0.10*volume_z20
+- 0.035*range_pct
+- 0.02*volatility_20d
+```
+
+해석:
+- **old 기본 골격(단기+중기 혼합)**을 유지합니다.
+- `ret_1d`를 완전 제거하지 않고 절반 수준으로 축소해 급격한 노이즈 반응만 줄입니다.
+- `momentum_60d`와 `sma_20_gap`은 약한 가중치로만 추가해 추세 확인용으로 사용합니다.
+- `volatility_20d`/`range_pct` 페널티는 `trend_v2`보다 완화해 장기 robustness 저하를 줄이는 목적입니다.
+
 ### scoring 버전 실행 예시 (동일 후보군/동일 기간 비교)
 
-아래처럼 **같은 DB/같은 기간**에서 scoring 버전만 바꿔 2회 실행하면 `improved_strategy_old` vs `improved_strategy_new`를 공정하게 비교할 수 있습니다.
+아래처럼 **같은 DB/같은 기간**에서 scoring 버전만 바꿔 3회 실행하면 공정 비교가 가능합니다.
 
 ```bash
 # 1) old scoring run
@@ -345,39 +382,33 @@ python scripts/run_pipeline.py \
   --keep-rank-threshold 15 \
   --scoring-version trend_v2
 
-# 3) 리포트 비교
+# 3) hybrid_v3 scoring run (동일 조건)
+python scripts/run_pipeline.py \
+  --source krx \
+  --db data/market_pipeline.db \
+  --market KOSPI \
+  --start-date 2025-01-01 \
+  --end-date 2025-12-31 \
+  --top-n 10 \
+  --rebalance-frequency weekly \
+  --min-holding-days 5 \
+  --keep-rank-threshold 15 \
+  --scoring-version hybrid_v3
+
+# 4) 리포트 비교
 python scripts/generate_performance_report.py \
   --db data/market_pipeline.db \
   --baseline-run-id <baseline_run_id> \
   --improved-run-id <old_run_id> \
-  --improved-new-run-id <trend_v2_run_id>
+  --improved-new-run-id <hybrid_v3_run_id>
 ```
-
-### 새 점수식 (`improved_v2`)
-```text
-score_v2 =
-  0.15*ret_5d
-+ 0.35*momentum_20d
-+ 0.30*momentum_60d
-+ 0.12*sma_20_gap
-+ 0.10*sma_60_gap
-+ 0.05*volume_z20
-- 0.03*range_pct
-- 0.04*volatility_20d
-```
-
-해석:
-- `ret_1d`는 제거해 단기 노이즈 반응을 줄였습니다.
-- `momentum_20d`, `momentum_60d` 비중을 높여 중기 추세 지속 가능성에 가중치를 둡니다.
-- `sma_20_gap`, `sma_60_gap`으로 “현재 가격이 이동평균 위에 있는가”를 단순/설명 가능하게 반영합니다.
-- `range_pct`, `volatility_20d`는 penalty 성격으로 유지해 과열/과도 변동 종목을 점수에서 자연스럽게 감점합니다.
 
 - Latest scoring: `generate_daily_scores(..., include_history=False)`
 - Historical scoring: `generate_daily_scores(..., include_history=True)`
 
 ## 새 스코어링 비교 실행 예시
 
-동일 후보군/동일 기간으로 old vs new를 비교하려면:
+동일 후보군/동일 기간으로 old / trend_v2 / hybrid_v3를 비교하려면:
 
 ```bash
 # baseline (daily)
@@ -386,15 +417,18 @@ python scripts/run_pipeline.py --source csv --db data/market_pipeline.db --price
 # improved_old (weekly + 기존 scoring)
 python scripts/run_pipeline.py --source csv --db data/market_pipeline.db --prices-csv data/sample_daily_prices.csv --top-n 5 --rebalance-frequency weekly --min-holding-days 5 --keep-rank-threshold 7 --scoring-version old
 
-# improved_new (weekly + 새 scoring)
+# improved_trend (weekly + trend_v2 scoring)
 python scripts/run_pipeline.py --source csv --db data/market_pipeline.db --prices-csv data/sample_daily_prices.csv --top-n 5 --rebalance-frequency weekly --min-holding-days 5 --keep-rank-threshold 7 --scoring-version trend_v2
+
+# improved_hybrid (weekly + hybrid_v3 scoring)
+python scripts/run_pipeline.py --source csv --db data/market_pipeline.db --prices-csv data/sample_daily_prices.csv --top-n 5 --rebalance-frequency weekly --min-holding-days 5 --keep-rank-threshold 7 --scoring-version hybrid_v3
 
 # 성과 비교 리포트
 python scripts/generate_performance_report.py \
   --db data/market_pipeline.db \
   --baseline-run-id <baseline_run_id> \
   --improved-run-id <improved_old_run_id> \
-  --improved-new-run-id <improved_new_run_id> \
+  --improved-new-run-id <improved_hybrid_run_id> \
   --benchmark KOSPI
 ```
 

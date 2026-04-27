@@ -239,7 +239,7 @@ def main() -> None:
     p.add_argument("--top-n-values", default="3,5,10")
     p.add_argument("--min-holding-days-values", default="5,10")
     p.add_argument("--keep-rank-offsets", default="2,4", help="keep_rank_threshold = top_n + offset")
-    p.add_argument("--scoring-versions", default="old,trend_v2")
+    p.add_argument("--scoring-versions", default="old,trend_v2,hybrid_v3")
     p.add_argument("--rebalance-frequency", choices=["daily", "weekly"], default="daily")
     p.add_argument("--initial-equity", type=float, default=100000.0)
     args = p.parse_args()
