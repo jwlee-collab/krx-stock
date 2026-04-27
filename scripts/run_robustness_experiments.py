@@ -21,6 +21,7 @@ if str(ROOT) not in sys.path:
 from pipeline.backtest import run_backtest
 from pipeline.db import get_connection, init_db
 from pipeline.scoring import generate_daily_scores, normalize_scoring_profile
+from pipeline.universe_input import load_symbols_from_universe_csv, parse_symbols_arg
 
 TRADING_DAYS = 252
 
@@ -241,6 +242,8 @@ def main() -> None:
     p.add_argument("--keep-rank-offsets", default="2,4", help="keep_rank_threshold = top_n + offset")
     p.add_argument("--scoring-versions", default="old,trend_v2,hybrid_v3")
     p.add_argument("--rebalance-frequency", choices=["daily", "weekly"], default="daily")
+    p.add_argument("--symbols", default="", help="Comma-separated KRX 6-digit symbols")
+    p.add_argument("--universe-file", help="CSV path containing at least a symbol column")
     p.add_argument("--initial-equity", type=float, default=100000.0)
     args = p.parse_args()
 
@@ -259,6 +262,11 @@ def main() -> None:
     min_holding_days_values = _parse_int_list(args.min_holding_days_values)
     keep_offsets = _parse_int_list(args.keep_rank_offsets)
     scoring_versions = [normalize_scoring_profile(v) for v in _parse_str_list(args.scoring_versions)]
+
+    selected_symbols = parse_symbols_arg(args.symbols)
+    if args.universe_file:
+        selected_symbols = load_symbols_from_universe_csv(args.universe_file)
+        print(f"[universe] loaded symbols={len(selected_symbols)} from file={args.universe_file}")
 
     batch_id = str(uuid.uuid4())
     created_at = datetime.now(timezone.utc).isoformat()
@@ -298,6 +306,7 @@ def main() -> None:
                         generate_daily_scores(
                             conn,
                             include_history=True,
+                            allowed_symbols=selected_symbols or None,
                             scoring_profile=scoring_version,
                         )
                         run_id = run_backtest(
@@ -500,6 +509,8 @@ def main() -> None:
         f"- Keep-rank offsets: `{keep_offsets}` (keep_rank_threshold = top_n + offset)",
         f"- Scoring versions: `{scoring_versions}`",
         f"- Rebalance frequency: `{args.rebalance_frequency}`",
+        f"- Universe filter input: `{'--universe-file' if args.universe_file else '--symbols' if selected_symbols else 'all symbols in DB'}`",
+        f"- Universe size: `{len(selected_symbols) if selected_symbols else 'ALL'}`",
         "",
         "## 한눈에 해석",
         f"- 가장 안정적인 설정(기간 평균 기준): **{best_stable['stability_group_key']}**",

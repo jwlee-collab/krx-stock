@@ -123,6 +123,27 @@ python scripts/run_pipeline.py \
 
 `--symbols`를 생략하면 `--market` 기준으로 티커를 자동 수집합니다.
 
+#### (c) 후보군 CSV 파일 직접 지정 (`--universe-file`)
+
+`symbol` 컬럼만 있으면 됩니다. `name`, `market`, `note` 등 다른 컬럼은 자동으로 무시하고 `symbol`만 사용합니다.
+
+```bash
+python scripts/run_pipeline.py \
+  --source krx \
+  --db data/market_pipeline.db \
+  --universe-file data/kospi100_manual.csv \
+  --start-date 2025-01-01 \
+  --end-date 2025-12-31 \
+  --top-n 10
+```
+
+우선순위 규칙:
+- `--universe-file` 지정 시: CSV의 `symbol` 후보군 사용 (가장 우선)
+- `--symbols`만 지정 시: 커맨드라인 종목 사용
+- 둘 다 없으면: `--market` 기반 자동 수집
+
+`symbol`은 문자열로 읽고 KRX 6자리 코드로 정규화(`zfill(6)`)합니다.
+
 시장 자동 수집은 아래 순서로 동작합니다.
 
 1. `pykrx.stock.get_market_ticker_list(...)` 시도
@@ -173,6 +194,54 @@ python scripts/run_pipeline.py \
   --shock-max-hits 1
 ```
 
+### 3-2) Colab에서 가장 쉬운 실행 예시
+
+아래 3줄이면 후보군 CSV를 바로 사용해 실행할 수 있습니다.
+
+```bash
+!python scripts/run_pipeline.py \
+  --source krx \
+  --db data/market_pipeline.db \
+  --universe-file data/kospi100_manual.csv \
+  --start-date 2025-01-01 \
+  --end-date 2025-12-31 \
+  --top-n 10
+```
+
+### 3-3) `--symbols` vs `--universe-file` 차이
+
+- `--symbols`: CLI에 직접 콤마 구분으로 입력 (`--symbols 005930,000660,...`)
+- `--universe-file`: CSV 파일 경로만 넘기면 `symbol` 컬럼을 읽어 자동 후보군 구성
+  - 운영/실험에서 후보군 버전 관리가 쉽고, Colab에서 문자열 조립 작업이 사라집니다.
+
+### 3-4) 가장 안전한 검증 경로
+
+1. CSV 형식 점검 (`symbol` 컬럼 필수):
+
+```bash
+python - <<'PY'
+import csv
+with open("data/kospi100_manual.csv", newline="", encoding="utf-8") as f:
+    r = csv.DictReader(f)
+    assert "symbol" in (r.fieldnames or []), "symbol 컬럼이 필요합니다."
+print("ok: symbol column exists")
+PY
+```
+
+2. 파이프라인 실행 (`--universe-file`):
+
+```bash
+python scripts/run_pipeline.py --source krx --universe-file data/kospi100_manual.csv --start-date 2025-01-01 --end-date 2025-01-31
+```
+
+3. 기존 방식과 충돌 없는지 확인 (`--symbols`와 동시 전달):
+
+```bash
+python scripts/run_pipeline.py --source krx --symbols 005930 --universe-file data/kospi100_manual.csv --start-date 2025-01-01 --end-date 2025-01-31
+```
+
+실행 로그에서 `[universe] loaded symbols=... from file=...`가 보이면 `--universe-file` 우선 규칙이 적용된 것입니다.
+
 ### 4) 검증 실행
 
 ```bash
@@ -201,6 +270,22 @@ python scripts/run_robustness_experiments.py \
   --scoring-versions old,trend_v2,hybrid_v3 \
   --rebalance-frequency daily
 ```
+
+후보군 고정 실험이 필요하면 `--universe-file`(또는 `--symbols`)를 추가로 지정하세요.
+
+```bash
+python scripts/run_robustness_experiments.py \
+  --db data/market_pipeline.db \
+  --output-dir data/reports \
+  --period-months 3,6,12 \
+  --top-n-values 3,5,10 \
+  --min-holding-days-values 5,10 \
+  --keep-rank-offsets 2,4 \
+  --scoring-versions old,hybrid_v3 \
+  --universe-file data/kospi100_manual.csv
+```
+
+`--universe-file`이 주어지면 `--symbols`보다 우선합니다.
 
 핵심 동작:
 - 조합 축 자동 반복:
