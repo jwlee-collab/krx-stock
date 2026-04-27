@@ -20,6 +20,10 @@ if str(ROOT) not in sys.path:
 
 from pipeline.backtest import run_backtest
 from pipeline.db import get_connection, init_db
+from pipeline.dynamic_universe import (
+    build_rolling_liquidity_universe,
+    validate_rolling_universe_no_lookahead,
+)
 from pipeline.scoring import generate_daily_scores, normalize_scoring_profile
 from pipeline.universe_input import load_symbols_from_universe_csv, parse_symbols_arg
 
@@ -39,6 +43,9 @@ class ExperimentResult:
     keep_rank_offset: int
     scoring_version: str
     rebalance_frequency: str
+    universe_mode: str
+    universe_size: int | None
+    universe_lookback_days: int | None
     market_filter_enabled: int
     market_filter_ma20_reduce_by: int
     market_filter_ma60_mode: str
@@ -265,6 +272,9 @@ def main() -> None:
     p.add_argument("--market-filter-modes", default="off,on", help="Comma-separated experiment modes: off,on")
     p.add_argument("--market-filter-ma20-reduce-by", type=int, default=1)
     p.add_argument("--market-filter-ma60-mode", choices=["none", "block_new_buys", "cash"], default="block_new_buys")
+    p.add_argument("--universe-mode", choices=["static", "rolling_liquidity"], default="static")
+    p.add_argument("--universe-size", type=int, default=100)
+    p.add_argument("--universe-lookback-days", type=int, default=20)
     args = p.parse_args()
 
     conn = get_connection(args.db)
@@ -302,6 +312,24 @@ def main() -> None:
                     f"[universe] expected 100 symbols for {args.universe_file}, got {len(selected_symbols)}"
                 )
             print("[universe] verified symbols=100 for kospi100_manual.csv")
+
+    if args.universe_mode == "rolling_liquidity":
+        build_summary = build_rolling_liquidity_universe(
+            conn,
+            universe_size=args.universe_size,
+            lookback_days=args.universe_lookback_days,
+        )
+        lookahead = validate_rolling_universe_no_lookahead(
+            conn,
+            universe_size=args.universe_size,
+            lookback_days=args.universe_lookback_days,
+        )
+        print(
+            f"[daily_universe] mode=rolling_liquidity size={args.universe_size} lookback={args.universe_lookback_days} rows_changed={build_summary['row_changes']}"
+        )
+        print(
+            f"[daily_universe] lookahead_validation checked={lookahead['checked_rows']} violations={lookahead['violations']}"
+        )
 
     batch_id = str(uuid.uuid4())
     created_at = datetime.now(timezone.utc).isoformat()
@@ -345,6 +373,9 @@ def main() -> None:
                                 include_history=True,
                                 allowed_symbols=selected_symbols or None,
                                 scoring_profile=scoring_version,
+                                universe_mode=args.universe_mode,
+                                universe_size=args.universe_size,
+                                universe_lookback_days=args.universe_lookback_days,
                             )
                             run_id = run_backtest(
                                 conn,
@@ -415,6 +446,9 @@ def main() -> None:
                                 keep_rank_offset=keep_offset,
                                 scoring_version=scoring_version,
                                 rebalance_frequency=args.rebalance_frequency,
+                                universe_mode=args.universe_mode,
+                                universe_size=(args.universe_size if args.universe_mode == "rolling_liquidity" else None),
+                                universe_lookback_days=(args.universe_lookback_days if args.universe_mode == "rolling_liquidity" else None),
                                 market_filter_enabled=int(market_filter_enabled),
                                 market_filter_ma20_reduce_by=int(max(0, args.market_filter_ma20_reduce_by)),
                                 market_filter_ma60_mode=args.market_filter_ma60_mode,
@@ -439,11 +473,12 @@ def main() -> None:
                                 batch_id, run_id, start_date, end_date, period_months,
                                 top_n, min_holding_days, keep_rank_threshold, keep_rank_offset,
                                 scoring_version, rebalance_frequency,
+                                universe_mode, universe_size, universe_lookback_days,
                                 market_filter_enabled, market_filter_ma20_reduce_by, market_filter_ma60_mode,
                                 ma20_trigger_count, ma60_trigger_count, reduced_target_count_days, blocked_new_buy_days, cash_mode_days,
                                 total_return, max_drawdown, sharpe, trade_count,
                                 candidate_avg_return, excess_return_vs_universe, robustness_score
-                            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                             """,
                             (
                                 result.batch_id,
@@ -457,6 +492,9 @@ def main() -> None:
                                 result.keep_rank_offset,
                                 result.scoring_version,
                                 result.rebalance_frequency,
+                                result.universe_mode,
+                                result.universe_size,
+                                result.universe_lookback_days,
                                 result.market_filter_enabled,
                                 result.market_filter_ma20_reduce_by,
                                 result.market_filter_ma60_mode,
@@ -577,6 +615,9 @@ def main() -> None:
         f"- Scoring versions: `{scoring_versions}`",
         f"- Market filter modes: `{market_filter_modes}` (ma20_reduce_by={args.market_filter_ma20_reduce_by}, ma60_mode={args.market_filter_ma60_mode})",
         f"- Rebalance frequency: `{args.rebalance_frequency}`",
+        f"- Universe mode: `{args.universe_mode}`",
+        f"- Universe size: `{args.universe_size if args.universe_mode == 'rolling_liquidity' else 'N/A(static)'}`",
+        f"- Universe lookback days: `{args.universe_lookback_days if args.universe_mode == 'rolling_liquidity' else 'N/A(static)'}`",
         f"- Universe filter input: `{'--universe-file' if args.universe_file else '--symbols' if selected_symbols else 'all symbols in DB'}`",
         f"- Universe size: `{len(selected_symbols) if selected_symbols else 'ALL'}`",
         "",
