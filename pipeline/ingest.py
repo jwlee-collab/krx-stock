@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import sqlite3
+import time
 from datetime import date, datetime
 from pathlib import Path
 from urllib.request import Request, urlopen
@@ -173,11 +174,35 @@ def ingest_krx_prices(
     start = _to_yyyymmdd(start_date)
     end = _to_yyyymmdd(end_date)
 
+    unique_symbols = sorted({normalize_krx_symbol(s) for s in symbols})
+    print(f"[ingest] requested_symbols={len(unique_symbols)} start={_to_iso_date(start)} end={_to_iso_date(end)}")
+
     upsert_rows: list[tuple] = []
-    for symbol in sorted({normalize_krx_symbol(s) for s in symbols}):
-        df = stock.get_market_ohlcv_by_date(start, end, symbol)
-        if df.empty:
+    symbols_with_data = 0
+    symbols_without_data = 0
+    failed_symbols: list[str] = []
+
+    for idx, symbol in enumerate(unique_symbols, start=1):
+        df = None
+        last_error: Exception | None = None
+        for attempt in range(1, 4):
+            try:
+                df = stock.get_market_ohlcv_by_date(start, end, symbol)
+                last_error = None
+                break
+            except Exception as exc:  # pragma: no cover - network/runtime dependent
+                last_error = exc
+                if attempt < 3:
+                    time.sleep(0.35 * attempt)
+        if last_error is not None:
+            failed_symbols.append(symbol)
+            print(f"[ingest] warning symbol={symbol} idx={idx}/{len(unique_symbols)} error={last_error}")
             continue
+        if df is None or df.empty:
+            symbols_without_data += 1
+            continue
+
+        symbols_with_data += 1
 
         for dt, row in df.iterrows():
             iso_date = dt.strftime("%Y-%m-%d")
@@ -193,4 +218,13 @@ def ingest_krx_prices(
                 )
             )
 
-    return _upsert_price_rows(conn, upsert_rows)
+    changes = _upsert_price_rows(conn, upsert_rows)
+    print(
+        f"[ingest] fetched_symbols_with_data={symbols_with_data} "
+        f"symbols_without_data={symbols_without_data} failed_symbols={len(failed_symbols)} rows_upserted={changes}"
+    )
+    if failed_symbols:
+        preview = ",".join(failed_symbols[:10])
+        suffix = "..." if len(failed_symbols) > 10 else ""
+        print(f"[ingest] failed_symbol_preview={preview}{suffix}")
+    return changes

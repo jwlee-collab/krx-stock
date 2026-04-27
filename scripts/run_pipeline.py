@@ -121,6 +121,7 @@ def main() -> None:
                 )
             print(f"[universe] auto-resolved symbols={len(symbols)} markets={markets}")
         end_date = args.end_date or date.today().isoformat()
+        print(f"[ingest] requested symbol count={len(symbols)}")
         ing = ingest_krx_prices(conn, symbols=symbols, start_date=args.start_date, end_date=end_date)
         if ing == 0:
             raise RuntimeError(
@@ -128,6 +129,21 @@ def main() -> None:
                 "시장 휴장일 범위이거나 네트워크 응답 문제일 수 있습니다. "
                 "입력 값(--start-date, --end-date, --market/--symbols)을 확인하세요."
             )
+        daily_prices_stats = conn.execute(
+            """
+            SELECT COUNT(DISTINCT symbol) AS symbol_count,
+                   MIN(date) AS min_date,
+                   MAX(date) AS max_date,
+                   COUNT(*) AS row_count
+            FROM daily_prices
+            """
+        ).fetchone()
+        print(
+            "[ingest] daily_prices after ingest "
+            f"distinct_symbols={int(daily_prices_stats['symbol_count'])} "
+            f"min_date={daily_prices_stats['min_date']} max_date={daily_prices_stats['max_date']} "
+            f"rows={int(daily_prices_stats['row_count'])}"
+        )
 
     feat = generate_daily_features(conn)
 
@@ -189,6 +205,23 @@ def main() -> None:
         )
         print(
             f"[daily_universe] lookahead_validation checked={lookahead_validation['checked_rows']} violations={lookahead_validation['violations']}"
+        )
+        daily_universe_counts = conn.execute(
+            """
+            SELECT COUNT(*) AS row_count,
+                   COUNT(DISTINCT date) AS date_count
+            FROM daily_universe
+            WHERE universe_mode='rolling_liquidity'
+              AND universe_size=?
+              AND lookback_days=?
+            """,
+            (args.universe_size, args.universe_lookback_days),
+        ).fetchone()
+        print(
+            "[daily_universe] built "
+            f"rows={int(daily_universe_counts['row_count'])} "
+            f"dates={int(daily_universe_counts['date_count'])} "
+            f"mode=rolling_liquidity size={args.universe_size} lookback={args.universe_lookback_days}"
         )
 
     score = generate_daily_scores(
