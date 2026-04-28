@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import inspect
 import json
 import math
 import shutil
@@ -132,6 +133,72 @@ def _build_benchmark_returns(conn: sqlite3.Connection, dates: list[str], symbols
         rets = [(float(r["c1"]) - float(r["c0"])) / float(r["c0"]) for r in rows if r["c0"]]
         out[d1] = sum(rets) / len(rets) if rets else 0.0
     return out
+
+
+def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1",
+        (table_name,),
+    ).fetchone()
+    return row is not None
+
+
+def _rolling_universe_row_count(conn: sqlite3.Connection, universe_size: int, lookback_days: int) -> int:
+    if not _table_exists(conn, "daily_universe"):
+        return 0
+    row = conn.execute(
+        """
+        SELECT COUNT(*) AS cnt
+        FROM daily_universe
+        WHERE universe_mode='rolling_liquidity'
+          AND universe_size=?
+          AND lookback_days=?
+        """,
+        (int(universe_size), int(lookback_days)),
+    ).fetchone()
+    return int(row["cnt"]) if row and row["cnt"] is not None else 0
+
+
+def call_build_rolling_liquidity_universe_compat(
+    conn: sqlite3.Connection,
+    *,
+    symbols: list[str] | None = None,
+    universe_size: int = 100,
+    lookback_days: int = 20,
+    top_n: int | None = None,
+) -> dict[str, object]:
+    sig = inspect.signature(build_rolling_liquidity_universe)
+    kwargs: dict[str, object] = {}
+
+    if "universe_size" in sig.parameters:
+        kwargs["universe_size"] = int(universe_size)
+    if "lookback_days" in sig.parameters:
+        kwargs["lookback_days"] = int(lookback_days)
+    if "top_n" in sig.parameters:
+        kwargs["top_n"] = int(top_n if top_n is not None else universe_size)
+    if "symbols" in sig.parameters and symbols is not None:
+        kwargs["symbols"] = symbols
+
+    call_attempts = [
+        dict(kwargs),
+        {k: v for k, v in kwargs.items() if k != "symbols"},
+        {k: v for k, v in kwargs.items() if k in {"universe_size", "top_n"}},
+        {},
+    ]
+    last_error: TypeError | None = None
+    for attempt in call_attempts:
+        try:
+            result = build_rolling_liquidity_universe(conn, **attempt)
+            if isinstance(result, dict):
+                return dict(result)
+            return {"result": result}
+        except TypeError as e:
+            last_error = e
+            continue
+
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("Unexpected failure while building rolling liquidity universe")
 
 
 def _simulate_candidate(
@@ -301,6 +368,7 @@ def main() -> None:
     p.add_argument("--soft-penalty-list", default="0.05,0.10")
     p.add_argument("--include-no-cap", action=argparse.BooleanOptionalAction, default=True)
     p.add_argument("--scoring-profiles", default="old")
+    p.add_argument("--rebuild-rolling-universe", action="store_true")
     args = p.parse_args()
 
     eval_freqs = _parse_csv_tokens(args.eval_frequencies)
@@ -326,8 +394,43 @@ def main() -> None:
     init_db(conn)
 
     symbols = [normalize_symbol(s) for s in load_symbols_from_universe_csv(args.universe_file)]
-    build_rolling_liquidity_universe(conn, symbols=symbols, top_n=100)
-    validate_rolling_universe_no_lookahead(conn)
+    rolling_universe_size = 100
+    rolling_lookback_days = 20
+    rolling_row_count_before = _rolling_universe_row_count(conn, rolling_universe_size, rolling_lookback_days)
+    rolling_universe_status: dict[str, object] = {
+        "status": "skipped",
+        "row_count": rolling_row_count_before,
+        "rows_changed": 0,
+    }
+    if args.rebuild_rolling_universe or rolling_row_count_before <= 0:
+        build_summary = call_build_rolling_liquidity_universe_compat(
+            conn,
+            symbols=symbols,
+            universe_size=rolling_universe_size,
+            lookback_days=rolling_lookback_days,
+            top_n=rolling_universe_size,
+        )
+        rolling_row_count_after = _rolling_universe_row_count(conn, rolling_universe_size, rolling_lookback_days)
+        rolling_universe_status = {
+            "status": "rebuilt" if rolling_row_count_after > 0 else "unavailable",
+            "row_count": rolling_row_count_after,
+            "rows_changed": int(build_summary.get("row_changes", 0)) if isinstance(build_summary, dict) else 0,
+        }
+    else:
+        rolling_universe_status = {
+            "status": "reused_existing",
+            "row_count": rolling_row_count_before,
+            "rows_changed": 0,
+        }
+
+    if int(rolling_universe_status.get("row_count", 0)) > 0:
+        lookahead = validate_rolling_universe_no_lookahead(
+            conn,
+            universe_size=rolling_universe_size,
+            lookback_days=rolling_lookback_days,
+        )
+        rolling_universe_status["lookahead_checked_rows"] = int(lookahead.get("checked_rows", 0))
+        rolling_universe_status["lookahead_violations"] = int(lookahead.get("violations", 0))
 
     scoring_profiles = [normalize_scoring_profile(s) for s in _parse_csv_tokens(args.scoring_profiles)]
     if args.mode == "quick":
@@ -566,6 +669,7 @@ def main() -> None:
         "created_at": datetime.now(timezone.utc).isoformat(),
         "outdir": str(outdir),
         "warnings": warnings,
+        "rolling_universe_status": rolling_universe_status,
         "candidates": [c.__dict__ for c in candidates],
         "files": {
             "summary_csv": str(summary_csv),
@@ -598,6 +702,7 @@ def main() -> None:
         "plots": plots,
         "candidates": [c.name for c in candidates],
         "warnings": warnings,
+        "rolling_universe_status": rolling_universe_status,
     }
     print(f"BROAD_SECTOR_GUARDRAIL_EXPERIMENT_JSON={json.dumps(payload, ensure_ascii=False)}")
 
