@@ -27,6 +27,11 @@ from pipeline.universe_input import load_symbols_from_universe_csv, load_symbols
 
 STABILITY_WEIGHTS: dict[int, float] = {1: 0.10, 3: 0.20, 6: 0.30, 12: 0.40}
 NONE_TOKENS = {"", "none", "off", "null", "na", "n/a"}
+PRODUCTION_MIN_EVALUATED_WINDOWS = 8
+PRODUCTION_MIN_WIN_RATE_VS_BENCHMARK = 0.45
+PRODUCTION_MAX_WORST_MDD = -0.35
+PRODUCTION_MAX_WORST_TOTAL_RETURN = -0.30
+PRODUCTION_MIN_P25_EXCESS_RETURN = -0.15
 
 
 @dataclass
@@ -192,8 +197,18 @@ class StrategySummary:
     mean_excess_return: float | None
     win_rate_vs_benchmark: float | None
     mean_sharpe: float | None
+    worst_total_return: float | None
+    p25_total_return: float | None
+    p25_excess_return: float | None
+    worst_excess_return: float | None
     worst_mdd: float | None
+    mdd_breach_count_25: int
+    mdd_breach_count_30: int
+    return_breach_count_minus20: int
     stability_score: float | None
+    risk_adjusted_score: float | None
+    production_candidate_score: float | None
+    production_guardrail_pass: int
     evaluated_1m_windows: int
     evaluated_3m_windows: int
     evaluated_6m_windows: int
@@ -227,6 +242,78 @@ def _stddev(values: list[float]) -> float | None:
         return 0.0 if values else None
     avg = mean(values)
     return (sum((x - avg) ** 2 for x in values) / len(values)) ** 0.5
+
+
+def _percentile_linear(values: list[float], q: float) -> float | None:
+    if not values:
+        return None
+    if len(values) == 1:
+        return values[0]
+    ordered = sorted(values)
+    pos = (len(ordered) - 1) * q
+    low = int(pos)
+    high = min(low + 1, len(ordered) - 1)
+    if low == high:
+        return ordered[low]
+    frac = pos - low
+    return ordered[low] + (ordered[high] - ordered[low]) * frac
+
+
+def _compute_risk_adjusted_score(
+    *,
+    mean_total_return: float | None,
+    mean_excess_return: float | None,
+    mean_sharpe: float | None,
+    worst_mdd: float | None,
+    worst_total_return: float | None,
+    p25_excess_return: float | None,
+    std_total_return: float | None,
+    mdd_breach_count_30: int,
+    evaluated_windows: int,
+) -> float | None:
+    if evaluated_windows == 0:
+        return None
+    score = 0.0
+    score += 0.45 * (mean_total_return or 0.0)
+    score += 0.55 * (mean_excess_return or 0.0)
+    score += 0.10 * (mean_sharpe or 0.0)
+    score -= 1.40 * abs(min(0.0, worst_mdd or 0.0))
+    score -= 1.20 * abs(min(0.0, worst_total_return or 0.0))
+    score += 0.85 * (p25_excess_return or 0.0)
+    score -= 0.60 * max(0.0, std_total_return or 0.0)
+    score -= 0.05 * mdd_breach_count_30
+    return score
+
+
+def _compute_production_guardrail_pass(
+    *,
+    evaluated_windows: int,
+    mean_excess_return: float | None,
+    win_rate_vs_benchmark: float | None,
+    worst_mdd: float | None,
+    worst_total_return: float | None,
+    p25_excess_return: float | None,
+) -> int:
+    return int(
+        evaluated_windows >= PRODUCTION_MIN_EVALUATED_WINDOWS
+        and (mean_excess_return or 0.0) > 0.0
+        and (win_rate_vs_benchmark or 0.0) >= PRODUCTION_MIN_WIN_RATE_VS_BENCHMARK
+        and (worst_mdd or 0.0) > PRODUCTION_MAX_WORST_MDD
+        and (worst_total_return or 0.0) > PRODUCTION_MAX_WORST_TOTAL_RETURN
+        and (p25_excess_return or 0.0) > PRODUCTION_MIN_P25_EXCESS_RETURN
+    )
+
+
+def _compute_production_candidate_score(
+    *,
+    production_guardrail_pass: int,
+    risk_adjusted_score: float | None,
+    stability_score: float | None,
+) -> float | None:
+    if risk_adjusted_score is None and stability_score is None:
+        return None
+    base = (risk_adjusted_score or 0.0) + 0.25 * (stability_score or 0.0)
+    return base if production_guardrail_pass == 1 else base - 1000.0
 
 
 def _sharpe(daily_returns: list[float]) -> float:
@@ -478,8 +565,18 @@ def _ensure_tables(conn: sqlite3.Connection, reset: bool = False) -> None:
             mean_excess_return REAL,
             win_rate_vs_benchmark REAL,
             mean_sharpe REAL,
+            worst_total_return REAL,
+            p25_total_return REAL,
+            p25_excess_return REAL,
+            worst_excess_return REAL,
             worst_mdd REAL,
+            mdd_breach_count_25 INTEGER NOT NULL DEFAULT 0,
+            mdd_breach_count_30 INTEGER NOT NULL DEFAULT 0,
+            return_breach_count_minus20 INTEGER NOT NULL DEFAULT 0,
             stability_score REAL,
+            risk_adjusted_score REAL,
+            production_candidate_score REAL,
+            production_guardrail_pass INTEGER NOT NULL DEFAULT 0,
             evaluated_1m_windows INTEGER NOT NULL,
             evaluated_3m_windows INTEGER NOT NULL,
             evaluated_6m_windows INTEGER NOT NULL,
@@ -589,6 +686,16 @@ def _ensure_tables(conn: sqlite3.Connection, reset: bool = False) -> None:
     _ensure_column(conn, "start_window_robustness_strategy_summary", "average_cash_weight_mean", "average_cash_weight_mean REAL")
     _ensure_column(conn, "start_window_robustness_strategy_summary", "average_exposure_mean", "average_exposure_mean REAL")
     _ensure_column(conn, "start_window_robustness_strategy_summary", "max_single_position_weight_mean", "max_single_position_weight_mean REAL")
+    _ensure_column(conn, "start_window_robustness_strategy_summary", "worst_total_return", "worst_total_return REAL")
+    _ensure_column(conn, "start_window_robustness_strategy_summary", "p25_total_return", "p25_total_return REAL")
+    _ensure_column(conn, "start_window_robustness_strategy_summary", "p25_excess_return", "p25_excess_return REAL")
+    _ensure_column(conn, "start_window_robustness_strategy_summary", "worst_excess_return", "worst_excess_return REAL")
+    _ensure_column(conn, "start_window_robustness_strategy_summary", "mdd_breach_count_25", "mdd_breach_count_25 INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "start_window_robustness_strategy_summary", "mdd_breach_count_30", "mdd_breach_count_30 INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "start_window_robustness_strategy_summary", "return_breach_count_minus20", "return_breach_count_minus20 INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "start_window_robustness_strategy_summary", "risk_adjusted_score", "risk_adjusted_score REAL")
+    _ensure_column(conn, "start_window_robustness_strategy_summary", "production_candidate_score", "production_candidate_score REAL")
+    _ensure_column(conn, "start_window_robustness_strategy_summary", "production_guardrail_pass", "production_guardrail_pass INTEGER NOT NULL DEFAULT 0")
     conn.commit()
 
 
@@ -1280,6 +1387,43 @@ def main() -> None:
             for h, w in STABILITY_WEIGHTS.items():
                 vals = [r.total_return for r in valid if r.period_months == h and r.total_return is not None]
                 stability += w * (mean(vals) if vals else 0.0)
+        worst_total_return = min(rets) if rets else None
+        p25_total_return = _percentile_linear(rets, 0.25)
+        p25_excess_return = _percentile_linear(excess, 0.25)
+        worst_excess_return = min(excess) if excess else None
+        worst_mdd = min(mdds) if mdds else None
+        mdd_breach_count_25 = sum(1 for x in mdds if x <= -0.25)
+        mdd_breach_count_30 = sum(1 for x in mdds if x <= -0.30)
+        return_breach_count_minus20 = sum(1 for x in rets if x <= -0.20)
+        mean_total_return = mean(rets) if rets else None
+        std_total_return = _stddev(rets)
+        mean_excess_return = mean(excess) if excess else None
+        win_rate_vs_benchmark = _safe_div(sum(1 for x in excess if x > 0), len(excess)) if excess else None
+        mean_sharpe = mean(sharpes) if sharpes else None
+        risk_adjusted_score = _compute_risk_adjusted_score(
+            mean_total_return=mean_total_return,
+            mean_excess_return=mean_excess_return,
+            mean_sharpe=mean_sharpe,
+            worst_mdd=worst_mdd,
+            worst_total_return=worst_total_return,
+            p25_excess_return=p25_excess_return,
+            std_total_return=std_total_return,
+            mdd_breach_count_30=mdd_breach_count_30,
+            evaluated_windows=len(valid),
+        )
+        production_guardrail_pass = _compute_production_guardrail_pass(
+            evaluated_windows=len(valid),
+            mean_excess_return=mean_excess_return,
+            win_rate_vs_benchmark=win_rate_vs_benchmark,
+            worst_mdd=worst_mdd,
+            worst_total_return=worst_total_return,
+            p25_excess_return=p25_excess_return,
+        )
+        production_candidate_score = _compute_production_candidate_score(
+            production_guardrail_pass=production_guardrail_pass,
+            risk_adjusted_score=risk_adjusted_score,
+            stability_score=stability,
+        )
 
         summaries.append(
             StrategySummary(
@@ -1332,15 +1476,25 @@ def main() -> None:
                 evaluated_windows=len(valid),
                 skipped_windows=len(rows) - len(valid),
                 evaluated_ratio=_safe_div(len(valid), len(rows)),
-                mean_total_return=mean(rets) if rets else None,
+                mean_total_return=mean_total_return,
                 median_total_return=median(rets) if rets else None,
-                std_total_return=_stddev(rets),
+                std_total_return=std_total_return,
                 mean_benchmark_return=mean(bench) if bench else None,
-                mean_excess_return=mean(excess) if excess else None,
-                win_rate_vs_benchmark=(_safe_div(sum(1 for x in excess if x > 0), len(excess)) if excess else None),
-                mean_sharpe=mean(sharpes) if sharpes else None,
-                worst_mdd=min(mdds) if mdds else None,
+                mean_excess_return=mean_excess_return,
+                win_rate_vs_benchmark=win_rate_vs_benchmark,
+                mean_sharpe=mean_sharpe,
+                worst_total_return=worst_total_return,
+                p25_total_return=p25_total_return,
+                p25_excess_return=p25_excess_return,
+                worst_excess_return=worst_excess_return,
+                worst_mdd=worst_mdd,
+                mdd_breach_count_25=mdd_breach_count_25,
+                mdd_breach_count_30=mdd_breach_count_30,
+                return_breach_count_minus20=return_breach_count_minus20,
                 stability_score=stability,
+                risk_adjusted_score=risk_adjusted_score,
+                production_candidate_score=production_candidate_score,
+                production_guardrail_pass=production_guardrail_pass,
                 evaluated_1m_windows=eval_counts[1],
                 evaluated_3m_windows=eval_counts[3],
                 evaluated_6m_windows=eval_counts[6],
@@ -1408,28 +1562,101 @@ def main() -> None:
         f"- benchmark_mode: `{args.benchmark_mode}`",
         f"- min_warmup_days: `{args.min_warmup_days}`",
         "- stability_score uses fixed weights 1/3/6/12m = 0.10/0.20/0.30/0.40 without missing-horizon renormalization.",
+        "- risk_adjusted_score emphasizes downside-risk penalties: worst_mdd, worst_total_return, p25_excess_return, std_total_return, and mdd_breach_count_30.",
+        (
+            "- production_guardrail_pass criteria: "
+            f"evaluated_windows >= {PRODUCTION_MIN_EVALUATED_WINDOWS}, mean_excess_return > 0, "
+            f"win_rate_vs_benchmark >= {PRODUCTION_MIN_WIN_RATE_VS_BENCHMARK:.2f}, worst_mdd > {PRODUCTION_MAX_WORST_MDD:.2f}, "
+            f"worst_total_return > {PRODUCTION_MAX_WORST_TOTAL_RETURN:.2f}, p25_excess_return > {PRODUCTION_MIN_P25_EXCESS_RETURN:.2f}."
+        ),
         "- configs with missing 6m/12m coverage are marked as insufficient horizon coverage.",
-        "",
-        "## Top stable configs",
-        "",
-        "|rank|config|stability|eval|coverage|note|",
-        "|---:|---|---:|---:|---:|---|",
     ]
+    best_stable = next(
+        (
+            row
+            for row in sorted(summary_rows, key=lambda row: (row["stability_score"] is not None, row["stability_score"]), reverse=True)
+            if row["evaluated_6m_windows"] > 0 and row["evaluated_12m_windows"] > 0
+        ),
+        None,
+    )
+    lines.extend(
+        [
+            "",
+            "## Best stable config",
+            (
+                "- N/A (insufficient horizon coverage)"
+                if best_stable is None
+                else (
+                    f"- `{best_stable['config_id']}` "
+                    f"(stability={best_stable['stability_score']:.4f}, "
+                    f"risk_adjusted={best_stable['risk_adjusted_score']:.4f}, "
+                    f"guardrail_pass={best_stable['production_guardrail_pass']})"
+                )
+            ),
+            "",
+            "## Top by stability_score",
+            "",
+            "|rank|config|stability|risk_adj|worst_mdd|eval|coverage|note|",
+            "|---:|---|---:|---:|---:|---:|---:|---|",
+        ]
+    )
     rank = 0
-    for s in summary_rows:
+    for s in sorted(summary_rows, key=lambda row: (row["stability_score"] is not None, row["stability_score"]), reverse=True):
         coverage_ok = s["evaluated_6m_windows"] > 0 and s["evaluated_12m_windows"] > 0
         note = "ok" if coverage_ok else "insufficient horizon coverage"
         if not coverage_ok:
             continue
         rank += 1
         stability_txt = "NA" if s["stability_score"] is None else f"{s['stability_score']:.4f}"
+        risk_adj_txt = "NA" if s["risk_adjusted_score"] is None else f"{s['risk_adjusted_score']:.4f}"
+        worst_mdd_txt = "NA" if s["worst_mdd"] is None else f"{s['worst_mdd']:.2%}"
         lines.append(
-            f"|{rank}|`{s['config_id']}`|{stability_txt}|{s['evaluated_windows']}/{s['num_windows']}|{s['horizon_coverage_ratio']:.2f}|{note}|"
+            f"|{rank}|`{s['config_id']}`|{stability_txt}|{risk_adj_txt}|{worst_mdd_txt}|{s['evaluated_windows']}/{s['num_windows']}|{s['horizon_coverage_ratio']:.2f}|{note}|"
         )
         if rank >= 10:
             break
     if rank == 0:
-        lines.append("|1|N/A|NA|0/0|0.00|insufficient horizon coverage|")
+        lines.append("|1|N/A|NA|NA|NA|0/0|0.00|insufficient horizon coverage|")
+
+    def _append_top_section(title: str, rows: list[dict], score_key: str) -> None:
+        lines.extend(
+            [
+                "",
+                f"## {title}",
+                "",
+                "|rank|config|score|mean_ret|mean_excess|worst_mdd|worst_ret|guardrail|",
+                "|---:|---|---:|---:|---:|---:|---:|---:|",
+            ]
+        )
+        if not rows:
+            lines.append("|1|N/A|NA|NA|NA|NA|NA|0|")
+            return
+        for idx, row in enumerate(rows[:10], start=1):
+            score_txt = "NA" if row[score_key] is None else f"{row[score_key]:.4f}"
+            mean_ret_txt = "NA" if row["mean_total_return"] is None else f"{row['mean_total_return']:.2%}"
+            mean_excess_txt = "NA" if row["mean_excess_return"] is None else f"{row['mean_excess_return']:.2%}"
+            worst_mdd_txt = "NA" if row["worst_mdd"] is None else f"{row['worst_mdd']:.2%}"
+            worst_ret_txt = "NA" if row["worst_total_return"] is None else f"{row['worst_total_return']:.2%}"
+            lines.append(
+                f"|{idx}|`{row['config_id']}`|{score_txt}|{mean_ret_txt}|{mean_excess_txt}|{worst_mdd_txt}|{worst_ret_txt}|{row['production_guardrail_pass']}|"
+            )
+
+    _append_top_section(
+        "Top by risk_adjusted_score",
+        sorted(summary_rows, key=lambda row: (row["risk_adjusted_score"] is not None, row["risk_adjusted_score"]), reverse=True),
+        "risk_adjusted_score",
+    )
+    _append_top_section(
+        "Top production candidates",
+        sorted(summary_rows, key=lambda row: (row["production_candidate_score"] is not None, row["production_candidate_score"]), reverse=True),
+        "production_candidate_score",
+    )
+    high_return_failed = [
+        row
+        for row in sorted(summary_rows, key=lambda row: (row["mean_total_return"] is not None, row["mean_total_return"]), reverse=True)
+        if row["production_guardrail_pass"] == 0
+    ]
+    _append_top_section("Guardrail failed but high-return candidates", high_return_failed, "mean_total_return")
 
     md.parent.mkdir(parents=True, exist_ok=True)
     md.write_text("\n".join(lines), encoding="utf-8")
