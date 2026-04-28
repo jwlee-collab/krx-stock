@@ -1487,3 +1487,18 @@ python scripts/run_robustness_experiments.py \
 --portfolio-dd-cut-pct-values 0.10,0.15 \
 --portfolio-dd-cooldown-days-values 20
 ```
+
+## Trade/Episode Attribution 진단 스크립트
+
+```bash
+python scripts/analyze_trade_attribution.py \
+  --db data/market_pipeline.db \
+  --run-id <BACKTEST_RUN_ID> \
+  --output-dir outputs/trade_attribution
+```
+
+생성 파일:
+- `trade_episode_attribution_<run_id>.csv`
+- `trade_feature_summary_<run_id>.csv`
+- `stop_loss_after_return_<run_id>.csv`
+- `trade_attribution_report_<run_id>.md`
