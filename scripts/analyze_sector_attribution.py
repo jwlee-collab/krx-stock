@@ -33,15 +33,22 @@ class FocusWindow:
 
 def _read_csv(path: Path) -> list[dict[str, str]]:
     with path.open("r", encoding="utf-8-sig", newline="") as f:
-        return list(csv.DictReader(f))
+        rows = list(csv.DictReader(f))
+    for row in rows:
+        if "symbol" in row:
+            row["symbol"] = _norm_symbol(row.get("symbol"))
+    return rows
 
 
 def _write_csv(path: Path, rows: list[dict[str, Any]], fieldnames: list[str]) -> None:
     with path.open("w", encoding="utf-8", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=fieldnames)
+        w = csv.DictWriter(f, fieldnames=fieldnames, quoting=csv.QUOTE_ALL)
         w.writeheader()
         for row in rows:
-            w.writerow({k: row.get(k) for k in fieldnames})
+            payload = {k: row.get(k) for k in fieldnames}
+            if "symbol" in payload:
+                payload["symbol"] = _norm_symbol(payload.get("symbol"))
+            w.writerow(payload)
 
 
 def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
