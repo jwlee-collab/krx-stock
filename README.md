@@ -1578,3 +1578,19 @@ python scripts/analyze_trade_attribution.py \
 - `trade_feature_summary_<run_id>.csv`
 - `stop_loss_after_return_<run_id>.csv`
 - `trade_attribution_report_<run_id>.md`
+
+### KOSPI sector map 생성
+
+`analyze_sector_attribution.py`에서 `UNKNOWN` 비중이 100%로 나오는 경우, 먼저 sector map CSV를 생성하세요.
+
+```bash
+python scripts/build_kospi_sector_map.py \
+  --universe-file data/kospi_valid_universe_495.csv \
+  --output data/kospi_sector_map.csv \
+  --source auto \
+  --overwrite
+```
+
+- `--source auto`는 `FinanceDataReader -> pykrx -> universe-file(manual)` 순서로 메타데이터를 보강합니다.
+- 외부 조회 실패 시에도 각 종목은 `fallback-sector`(기본: `UNKNOWN`)으로 채워져 출력됩니다.
+- 실행 마지막 줄에 `KOSPI_SECTOR_MAP_JSON={...}` 요약이 출력됩니다.
