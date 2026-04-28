@@ -14,7 +14,16 @@ class OverheatEntryGateTest(unittest.TestCase):
     def tearDown(self) -> None:
         self.conn.close()
 
-    def _insert_row(self, symbol: str, date: str, rank: int, ret_5d: float, volume_z20: float) -> None:
+    def _insert_row(
+        self,
+        symbol: str,
+        date: str,
+        rank: int,
+        ret_5d: float,
+        volume_z20: float,
+        ret_1d: float = 0.01,
+        range_pct: float = 0.05,
+    ) -> None:
         px = 100.0
         self.conn.execute(
             "INSERT INTO daily_prices(symbol,date,open,high,low,close,volume) VALUES(?,?,?,?,?,?,?)",
@@ -31,7 +40,7 @@ class OverheatEntryGateTest(unittest.TestCase):
                 range_pct,volatility_20d,volume_z20
             ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
             """,
-            (symbol, date, 0.01, ret_5d, 0.01, 0.01, 0.01, 0.01, 0.05, 0.01, volume_z20),
+            (symbol, date, ret_1d, ret_5d, 0.01, 0.01, 0.01, 0.01, range_pct, 0.01, volume_z20),
         )
 
     def _run_with_gate(self) -> str:
@@ -43,6 +52,10 @@ class OverheatEntryGateTest(unittest.TestCase):
             keep_rank_threshold=2,
             stop_loss_cash_mode="keep_cash",
             enable_overheat_entry_gate=True,
+            enable_overheat_ret_1d_rule=True,
+            enable_overheat_ret_5d_rule=True,
+            enable_overheat_range_rule=True,
+            enable_overheat_volume_z20_rule=True,
             max_entry_ret_1d=0.08,
             max_entry_ret_5d=0.15,
             max_entry_range_pct=0.10,
@@ -50,6 +63,17 @@ class OverheatEntryGateTest(unittest.TestCase):
             enable_volume_surge_overheat_rule=True,
             volume_surge_threshold=3.0,
             volume_surge_ret_5d_threshold=0.10,
+        )
+
+    def _run_with_gate_no_subrules(self) -> str:
+        return run_backtest(
+            self.conn,
+            top_n=2,
+            rebalance_frequency="daily",
+            min_holding_days=3,
+            keep_rank_threshold=2,
+            stop_loss_cash_mode="keep_cash",
+            enable_overheat_entry_gate=True,
         )
 
     def test_gate_does_not_force_sell_existing_holdings(self) -> None:
@@ -101,6 +125,53 @@ class OverheatEntryGateTest(unittest.TestCase):
         self.assertGreaterEqual(int(diag[1]), 1)
         self.assertGreater(float(diag[2]), 0.0)
         self.assertLess(float(diag[3]), 1.0)
+
+    def test_each_rule_reject_counter_increases(self) -> None:
+        for d in ["2024-01-01", "2024-01-02", "2024-01-03", "2024-01-04"]:
+            self._insert_row("A", d, 1, 0.03, 0.5)
+        self._insert_row("B", "2024-01-03", 2, 0.20, 4.0, ret_1d=0.10, range_pct=0.12)
+        self._insert_row("B", "2024-01-04", 2, 0.20, 4.0, ret_1d=0.10, range_pct=0.12)
+        self.conn.commit()
+
+        run_id = self._run_with_gate()
+        diag = self.conn.execute(
+            """
+            SELECT overheat_rejected_by_ret_1d, overheat_rejected_by_ret_5d,
+                   overheat_rejected_by_range_pct, overheat_rejected_by_volume_z20,
+                   overheat_rejected_by_volume_surge_rule
+            FROM backtest_runs WHERE run_id=?
+            """,
+            (run_id,),
+        ).fetchone()
+        self.assertIsNotNone(diag)
+        self.assertGreaterEqual(int(diag[0]), 1)
+        self.assertGreaterEqual(int(diag[1]), 1)
+        self.assertGreaterEqual(int(diag[2]), 1)
+        self.assertGreaterEqual(int(diag[3]), 1)
+        self.assertGreaterEqual(int(diag[4]), 1)
+
+    def test_gate_on_with_all_subrules_off_matches_gate_off_behavior(self) -> None:
+        self._insert_row("A", "2024-01-01", 1, 0.03, 0.5)
+        self._insert_row("A", "2024-01-02", 1, 0.03, 0.5)
+        self._insert_row("B", "2024-01-02", 2, 0.25, 5.0)
+        self._insert_row("A", "2024-01-03", 1, 0.03, 0.5)
+        self._insert_row("B", "2024-01-03", 2, 0.25, 5.0)
+        self.conn.commit()
+
+        run_gate_on = self._run_with_gate_no_subrules()
+        run_gate_off = run_backtest(
+            self.conn,
+            top_n=2,
+            rebalance_frequency="daily",
+            min_holding_days=3,
+            keep_rank_threshold=2,
+            stop_loss_cash_mode="keep_cash",
+            enable_overheat_entry_gate=False,
+        )
+        c_on = self.conn.execute("SELECT overheat_rejected_count FROM backtest_runs WHERE run_id=?", (run_gate_on,)).fetchone()[0]
+        c_off = self.conn.execute("SELECT overheat_rejected_count FROM backtest_runs WHERE run_id=?", (run_gate_off,)).fetchone()[0]
+        self.assertEqual(int(c_on), 0)
+        self.assertEqual(int(c_off), 0)
 
 
 if __name__ == "__main__":
