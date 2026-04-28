@@ -252,18 +252,34 @@ CLI 옵션:
 
 ```bash
 python scripts/generate_final_candidate_report.py \
-  --db data/market_pipeline.db \
-  --output-dir data/reports \
-  --universe-file data/kospi_source_universe_500.csv \
+  --db data/kospi_495_rolling_3y.db \
+  --universe-file data/kospi_valid_universe_495.csv \
+  --outdir reports/final_candidate_report/latest \
+  --benchmark-mode universe \
+  --eval-frequencies monthly,quarterly \
+  --horizons 1,3,6,12 \
   --start-date 2024-01-01 \
-  --end-date 2025-12-31
+  --end-date 2025-12-31 \
+  --overwrite
 ```
 
 생성 파일:
-- `final_candidate_summary.csv`
-- `final_candidate_equity_curve.csv`
-- `final_candidate_monthly_returns.csv`
+- `manifest.json`
+- `candidate_summary.csv`
+- `window_results.csv`
+- `equity_curve.csv`
+- `drawdown_curve.csv`
+- `monthly_returns.csv`
+- `worst_windows.csv`
 - `final_candidate_report.md`
+- `equity_curve.png`
+- `drawdown_curve.png`
+- `monthly_returns_plot.png` (또는 heatmap)
+
+추가 옵션:
+- `--output-dir` 는 하위 호환 alias(내부적으로 `--outdir`로 매핑)
+- `--allow-smoke` 를 지정하면 full-period 단일 백테스트만 수행(robustness window 생략 가능)
+- 기본 strict final mode(`--allow-smoke` 미지정)에서는 `window_results.csv`가 비어 있으면 실패
 
 ### 3-3-3) Entry Gate + 현금 보유 허용 (무조건 top_n 매수 방지)
 
