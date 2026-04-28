@@ -28,7 +28,9 @@ def _build_target_holdings(
     require_positive_momentum60: bool = False,
     require_above_sma20: bool = False,
     require_above_sma60: bool = False,
+    blocked_new_entries: set[str] | None = None,
 ) -> set[str]:
+    blocked_new_entries = blocked_new_entries or set()
     keep_due_rank = {
         sym
         for sym in current_symbols
@@ -45,6 +47,8 @@ def _build_target_holdings(
     for row in ranked_rows:
         sym = row["symbol"]
         if sym in kept:
+            continue
+        if sym in blocked_new_entries:
             continue
         if len(target) >= top_n:
             break
@@ -135,12 +139,16 @@ def run_backtest(
     enable_portfolio_dd_cut: bool = False,
     portfolio_dd_cut_pct: float = 0.10,
     portfolio_dd_cooldown_days: int = 20,
+    stop_loss_cash_mode: str = "rebalance_remaining",
+    stop_loss_cooldown_days: int = 0,
 ) -> str:
     """Equal-weight long backtest using daily_scores and next-day close returns."""
     if rebalance_frequency not in {"daily", "weekly"}:
         raise ValueError("rebalance_frequency must be one of: daily, weekly")
     if market_filter_ma60_mode not in {"none", "block_new_buys", "cash"}:
         raise ValueError("market_filter_ma60_mode must be one of: none, block_new_buys, cash")
+    if stop_loss_cash_mode not in {"rebalance_remaining", "keep_cash"}:
+        raise ValueError("stop_loss_cash_mode must be one of: rebalance_remaining, keep_cash")
     if position_stop_loss_pct < 0.0 or trailing_stop_pct < 0.0 or portfolio_dd_cut_pct < 0.0:
         raise ValueError("risk cut percentages must be >= 0")
 
@@ -180,8 +188,10 @@ def run_backtest(
             enable_position_stop_loss,position_stop_loss_pct,enable_trailing_stop,trailing_stop_pct,
             enable_portfolio_dd_cut,portfolio_dd_cut_pct,portfolio_dd_cooldown_days,
             position_stop_loss_count,trailing_stop_count,portfolio_dd_cut_count,
-            portfolio_dd_cooldown_days_count,risk_cut_cash_days
-        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            portfolio_dd_cooldown_days_count,risk_cut_cash_days,
+            stop_loss_cash_mode,stop_loss_cooldown_days,
+            average_cash_weight,average_exposure,min_exposure,max_single_position_weight
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """,
         (
             run_id,
@@ -225,6 +235,12 @@ def run_backtest(
             0,
             0,
             0,
+            stop_loss_cash_mode,
+            int(max(0, stop_loss_cooldown_days)),
+            0.0,
+            0.0,
+            0.0,
+            0.0,
         ),
     )
 
@@ -250,6 +266,8 @@ def run_backtest(
     risk_cut_cash_days = 0
     entry_price_by_symbol: dict[str, float] = {}
     peak_price_by_symbol: dict[str, float] = {}
+    holding_weight_by_symbol: dict[str, float] = {}
+    stop_loss_cooldown_until_idx_by_symbol: dict[str, int] = {}
     portfolio_peak_equity = float(initial_equity)
     dd_cooldown_until_idx = -1
 
@@ -326,6 +344,11 @@ def run_backtest(
                 require_positive_momentum60=require_positive_momentum60,
                 require_above_sma20=require_above_sma20,
                 require_above_sma60=require_above_sma60,
+                blocked_new_entries={
+                    sym
+                    for sym, cooldown_until_idx in stop_loss_cooldown_until_idx_by_symbol.items()
+                    if cooldown_until_idx >= i and sym not in current_holdings
+                },
             )
             if block_new_buys:
                 target_holdings = target_holdings & current_holdings
@@ -385,7 +408,11 @@ def run_backtest(
                 entry_index_by_symbol.pop(sym, None)
                 entry_price_by_symbol.pop(sym, None)
                 peak_price_by_symbol.pop(sym, None)
+                holding_weight_by_symbol.pop(sym, None)
             current_holdings = target_holdings
+            equal_weight = (1.0 / float(len(current_holdings))) if current_holdings else 0.0
+            for sym in current_holdings:
+                holding_weight_by_symbol[sym] = equal_weight
 
         current_close_rows = conn.execute(
             "SELECT symbol, close FROM daily_prices WHERE date=?",
@@ -414,8 +441,24 @@ def run_backtest(
                 if ret <= -float(position_stop_loss_pct):
                     risk_exits.add(sym)
                     position_stop_loss_count += 1
+                    cooldown_until_idx = i + int(max(0, stop_loss_cooldown_days))
+                    stop_loss_cooldown_until_idx_by_symbol[sym] = cooldown_until_idx
+                    cooldown_until_date = (
+                        all_dates[cooldown_until_idx] if cooldown_until_idx < len(all_dates) else all_dates[-1]
+                    )
                     risk_event_rows.append(
-                        (run_id, d0, sym, "position_stop_loss", px, entry_px, ret, "sell_position", created_at)
+                        (
+                            run_id,
+                            d0,
+                            sym,
+                            "position_stop_loss",
+                            px,
+                            entry_px,
+                            ret,
+                            "sell_position",
+                            created_at,
+                            cooldown_until_date,
+                        )
                     )
                     continue
             if enable_trailing_stop:
@@ -426,7 +469,7 @@ def run_backtest(
                         risk_exits.add(sym)
                         trailing_stop_count += 1
                         risk_event_rows.append(
-                            (run_id, d0, sym, "trailing_stop", px, peak_px, dd_from_peak, "sell_position", created_at)
+                            (run_id, d0, sym, "trailing_stop", px, peak_px, dd_from_peak, "sell_position", created_at, None)
                         )
 
         if risk_exits:
@@ -434,9 +477,17 @@ def run_backtest(
                 entry_index_by_symbol.pop(sym, None)
                 entry_price_by_symbol.pop(sym, None)
                 peak_price_by_symbol.pop(sym, None)
+                holding_weight_by_symbol.pop(sym, None)
             current_holdings -= risk_exits
+            if current_holdings and stop_loss_cash_mode == "rebalance_remaining":
+                equal_weight = 1.0 / float(len(current_holdings))
+                for sym in current_holdings:
+                    holding_weight_by_symbol[sym] = equal_weight
             removed_by_risk_for_day = set(risk_exits)
 
+        total_weight = sum(holding_weight_by_symbol.get(sym, 0.0) for sym in current_holdings)
+        max_single_weight = max((holding_weight_by_symbol.get(sym, 0.0) for sym in current_holdings), default=0.0)
+        cash_weight = max(0.0, 1.0 - total_weight)
         if not current_holdings:
             daily_ret = 0.0
             pos_count = 0
@@ -456,8 +507,8 @@ def run_backtest(
                 )
                 for r in score_rows
             }
-            weight = 1.0 / float(len(current_holdings))
             for sym in sorted(current_holdings):
+                weight = holding_weight_by_symbol.get(sym, 0.0)
                 close_px = close_by_symbol.get(sym)
                 entry_px = entry_price_by_symbol.get(sym)
                 entry_idx = entry_index_by_symbol.get(sym)
@@ -481,7 +532,7 @@ def run_backtest(
                     )
                 )
 
-            returns = []
+            weighted_ret = 0.0
             for sym in sorted(current_holdings):
                 row0 = conn.execute(
                     "SELECT close FROM daily_prices WHERE symbol=? AND date=?", (sym, d0)
@@ -490,16 +541,17 @@ def run_backtest(
                     "SELECT close FROM daily_prices WHERE symbol=? AND date=?", (sym, d1)
                 ).fetchone()
                 if row0 and row1 and row0["close"]:
-                    returns.append((row1["close"] - row0["close"]) / row0["close"])
-            daily_ret = (sum(returns) / len(returns)) if returns else 0.0
-            pos_count = len(returns)
+                    sym_ret = (row1["close"] - row0["close"]) / row0["close"]
+                    weighted_ret += holding_weight_by_symbol.get(sym, 0.0) * sym_ret
+            daily_ret = weighted_ret
+            pos_count = len(current_holdings)
         if entry_gate_enabled and pos_count < int(top_n):
             entry_gate_cash_days += 1
         if removed_by_risk_for_day and pos_count < int(top_n):
             risk_cut_cash_days += 1
 
         equity *= 1.0 + daily_ret
-        result_rows.append((run_id, d1, equity, daily_ret, pos_count))
+        result_rows.append((run_id, d1, equity, daily_ret, pos_count, total_weight, cash_weight, max_single_weight))
         portfolio_peak_equity = max(portfolio_peak_equity, equity)
         if enable_portfolio_dd_cut and portfolio_peak_equity > 0:
             portfolio_dd = (equity - portfolio_peak_equity) / portfolio_peak_equity
@@ -519,6 +571,7 @@ def run_backtest(
                             portfolio_dd,
                             "pause_new_buys",
                             created_at,
+                            None,
                         )
                     )
 
@@ -527,8 +580,10 @@ def run_backtest(
 
     conn.executemany(
         """
-        INSERT INTO backtest_results(run_id,date,equity,daily_return,position_count)
-        VALUES(?,?,?,?,?)
+        INSERT INTO backtest_results(
+            run_id,date,equity,daily_return,position_count,exposure,cash_weight,max_single_position_weight
+        )
+        VALUES(?,?,?,?,?,?,?,?)
         """,
         result_rows,
     )
@@ -556,8 +611,8 @@ def run_backtest(
         conn.executemany(
             """
             INSERT INTO backtest_risk_events(
-                run_id,date,symbol,event_type,trigger_price,reference_price,return_pct,action,created_at
-            ) VALUES(?,?,?,?,?,?,?,?,?)
+                run_id,date,symbol,event_type,trigger_price,reference_price,return_pct,action,created_at,stop_loss_cooldown_until
+            ) VALUES(?,?,?,?,?,?,?,?,?,?)
             """,
             risk_event_rows,
         )
@@ -578,7 +633,11 @@ def run_backtest(
             trailing_stop_count=?,
             portfolio_dd_cut_count=?,
             portfolio_dd_cooldown_days_count=?,
-            risk_cut_cash_days=?
+            risk_cut_cash_days=?,
+            average_cash_weight=?,
+            average_exposure=?,
+            min_exposure=?,
+            max_single_position_weight=?
         WHERE run_id=?
         """,
         (
@@ -597,6 +656,10 @@ def run_backtest(
             int(portfolio_dd_cut_count),
             int(portfolio_dd_cooldown_days_count),
             int(risk_cut_cash_days),
+            (sum(r[6] for r in result_rows) / len(result_rows)) if result_rows else 0.0,
+            (sum(r[5] for r in result_rows) / len(result_rows)) if result_rows else 0.0,
+            min((r[5] for r in result_rows), default=0.0),
+            max((r[7] for r in result_rows), default=0.0),
             run_id,
         ),
     )

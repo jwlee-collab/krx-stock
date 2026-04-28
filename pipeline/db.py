@@ -111,7 +111,13 @@ def init_db(conn: sqlite3.Connection) -> None:
             trailing_stop_count INTEGER NOT NULL DEFAULT 0,
             portfolio_dd_cut_count INTEGER NOT NULL DEFAULT 0,
             portfolio_dd_cooldown_days_count INTEGER NOT NULL DEFAULT 0,
-            risk_cut_cash_days INTEGER NOT NULL DEFAULT 0
+            risk_cut_cash_days INTEGER NOT NULL DEFAULT 0,
+            stop_loss_cash_mode TEXT NOT NULL DEFAULT 'rebalance_remaining',
+            stop_loss_cooldown_days INTEGER NOT NULL DEFAULT 0,
+            average_cash_weight REAL NOT NULL DEFAULT 0.0,
+            average_exposure REAL NOT NULL DEFAULT 0.0,
+            min_exposure REAL NOT NULL DEFAULT 0.0,
+            max_single_position_weight REAL NOT NULL DEFAULT 0.0
         );
 
         CREATE TABLE IF NOT EXISTS backtest_market_filter_events (
@@ -136,6 +142,9 @@ def init_db(conn: sqlite3.Connection) -> None:
             equity REAL NOT NULL,
             daily_return REAL NOT NULL,
             position_count INTEGER NOT NULL,
+            exposure REAL NOT NULL DEFAULT 0.0,
+            cash_weight REAL NOT NULL DEFAULT 0.0,
+            max_single_position_weight REAL NOT NULL DEFAULT 0.0,
             PRIMARY KEY (run_id, date),
             FOREIGN KEY (run_id) REFERENCES backtest_runs(run_id)
         );
@@ -166,6 +175,7 @@ def init_db(conn: sqlite3.Connection) -> None:
             return_pct REAL,
             action TEXT NOT NULL,
             created_at TEXT NOT NULL,
+            stop_loss_cooldown_until TEXT,
             FOREIGN KEY (run_id) REFERENCES backtest_runs(run_id)
         );
 
@@ -380,6 +390,16 @@ def init_db(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "backtest_runs", "portfolio_dd_cut_count", "portfolio_dd_cut_count INTEGER NOT NULL DEFAULT 0")
     _ensure_column(conn, "backtest_runs", "portfolio_dd_cooldown_days_count", "portfolio_dd_cooldown_days_count INTEGER NOT NULL DEFAULT 0")
     _ensure_column(conn, "backtest_runs", "risk_cut_cash_days", "risk_cut_cash_days INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "backtest_runs", "stop_loss_cash_mode", "stop_loss_cash_mode TEXT NOT NULL DEFAULT 'rebalance_remaining'")
+    _ensure_column(conn, "backtest_runs", "stop_loss_cooldown_days", "stop_loss_cooldown_days INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "backtest_runs", "average_cash_weight", "average_cash_weight REAL NOT NULL DEFAULT 0.0")
+    _ensure_column(conn, "backtest_runs", "average_exposure", "average_exposure REAL NOT NULL DEFAULT 0.0")
+    _ensure_column(conn, "backtest_runs", "min_exposure", "min_exposure REAL NOT NULL DEFAULT 0.0")
+    _ensure_column(conn, "backtest_runs", "max_single_position_weight", "max_single_position_weight REAL NOT NULL DEFAULT 0.0")
+    _ensure_column(conn, "backtest_results", "exposure", "exposure REAL NOT NULL DEFAULT 0.0")
+    _ensure_column(conn, "backtest_results", "cash_weight", "cash_weight REAL NOT NULL DEFAULT 0.0")
+    _ensure_column(conn, "backtest_results", "max_single_position_weight", "max_single_position_weight REAL NOT NULL DEFAULT 0.0")
+    _ensure_column(conn, "backtest_risk_events", "stop_loss_cooldown_until", "stop_loss_cooldown_until TEXT")
     _ensure_column(conn, "paper_positions", "entry_date", "entry_date TEXT")
     _ensure_column(conn, "daily_features", "momentum_60d", "momentum_60d REAL")
     _ensure_column(conn, "daily_features", "sma_20_gap", "sma_20_gap REAL")
