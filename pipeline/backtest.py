@@ -29,7 +29,15 @@ def _build_target_holdings(
     require_above_sma20: bool = False,
     require_above_sma60: bool = False,
     blocked_new_entries: set[str] | None = None,
-) -> set[str]:
+    enable_overheat_entry_gate: bool = False,
+    max_entry_ret_1d: float = 0.08,
+    max_entry_ret_5d: float = 0.15,
+    max_entry_range_pct: float = 0.10,
+    max_entry_volume_z20: float = 3.0,
+    enable_volume_surge_overheat_rule: bool = False,
+    volume_surge_threshold: float = 3.0,
+    volume_surge_ret_5d_threshold: float = 0.10,
+) -> tuple[set[str], int]:
     blocked_new_entries = blocked_new_entries or set()
     keep_due_rank = {
         sym
@@ -44,6 +52,7 @@ def _build_target_holdings(
     kept = set(keep_due_rank) | set(keep_due_holding_period)
 
     target = list(kept)
+    overheat_rejected = 0
     for row in ranked_rows:
         sym = row["symbol"]
         if sym in kept:
@@ -68,8 +77,33 @@ def _build_target_holdings(
                 continue
             if require_above_sma60 and (g60 is None or float(g60) <= 0.0):
                 continue
+        if enable_overheat_entry_gate:
+            ret_1d = row["ret_1d"]
+            ret_5d = row["ret_5d"]
+            range_pct = row["range_pct"]
+            volume_z20 = row["volume_z20"]
+            rejected = False
+            if ret_1d is not None and float(ret_1d) > float(max_entry_ret_1d):
+                rejected = True
+            if ret_5d is not None and float(ret_5d) > float(max_entry_ret_5d):
+                rejected = True
+            if range_pct is not None and float(range_pct) > float(max_entry_range_pct):
+                rejected = True
+            if volume_z20 is not None and float(volume_z20) > float(max_entry_volume_z20):
+                rejected = True
+            if (
+                enable_volume_surge_overheat_rule
+                and volume_z20 is not None
+                and ret_5d is not None
+                and float(volume_z20) > float(volume_surge_threshold)
+                and float(ret_5d) > float(volume_surge_ret_5d_threshold)
+            ):
+                rejected = True
+            if rejected:
+                overheat_rejected += 1
+                continue
         target.append(sym)
-    return set(target)
+    return set(target), overheat_rejected
 
 
 def _build_proxy_market_close_by_date(conn: sqlite3.Connection, dates: list[str]) -> dict[str, float]:
@@ -141,6 +175,14 @@ def run_backtest(
     portfolio_dd_cooldown_days: int = 20,
     stop_loss_cash_mode: str = "rebalance_remaining",
     stop_loss_cooldown_days: int = 0,
+    enable_overheat_entry_gate: bool = False,
+    max_entry_ret_1d: float = 0.08,
+    max_entry_ret_5d: float = 0.15,
+    max_entry_range_pct: float = 0.10,
+    max_entry_volume_z20: float = 3.0,
+    enable_volume_surge_overheat_rule: bool = False,
+    volume_surge_threshold: float = 3.0,
+    volume_surge_ret_5d_threshold: float = 0.10,
 ) -> str:
     """Equal-weight long backtest using daily_scores and next-day close returns."""
     if rebalance_frequency not in {"daily", "weekly"}:
@@ -175,8 +217,67 @@ def run_backtest(
 
     regime_by_date = _build_market_regime_by_date(conn, all_dates)
 
+    initial_run_values = (
+        run_id,
+        created_at,
+        top_n,
+        start_date,
+        end_date,
+        float(initial_equity),
+        rebalance_frequency,
+        int(min_holding_days),
+        int(keep_rank_threshold),
+        scoring_profile,
+        int(bool(market_filter_enabled)),
+        int(max(0, market_filter_ma20_reduce_by)),
+        market_filter_ma60_mode,
+        0,
+        0,
+        0,
+        0,
+        0,
+        int(bool(entry_gate_enabled)),
+        float(min_entry_score),
+        int(bool(require_positive_momentum20)),
+        int(bool(require_positive_momentum60)),
+        int(bool(require_above_sma20)),
+        int(bool(require_above_sma60)),
+        0,
+        0,
+        0.0,
+        0,
+        0,
+        int(bool(enable_position_stop_loss)),
+        float(position_stop_loss_pct),
+        int(bool(enable_trailing_stop)),
+        float(trailing_stop_pct),
+        int(bool(enable_portfolio_dd_cut)),
+        float(portfolio_dd_cut_pct),
+        int(max(0, portfolio_dd_cooldown_days)),
+        0,
+        0,
+        0,
+        0,
+        0,
+        stop_loss_cash_mode,
+        int(max(0, stop_loss_cooldown_days)),
+        int(bool(enable_overheat_entry_gate)),
+        float(max_entry_ret_1d),
+        float(max_entry_ret_5d),
+        float(max_entry_range_pct),
+        float(max_entry_volume_z20),
+        int(bool(enable_volume_surge_overheat_rule)),
+        float(volume_surge_threshold),
+        float(volume_surge_ret_5d_threshold),
+        0,
+        0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+    )
     conn.execute(
-        """
+        f"""
         INSERT INTO backtest_runs(
             run_id,created_at,top_n,start_date,end_date,initial_equity,
             rebalance_frequency,min_holding_days,keep_rank_threshold,scoring_profile,
@@ -190,58 +291,13 @@ def run_backtest(
             position_stop_loss_count,trailing_stop_count,portfolio_dd_cut_count,
             portfolio_dd_cooldown_days_count,risk_cut_cash_days,
             stop_loss_cash_mode,stop_loss_cooldown_days,
+            enable_overheat_entry_gate,max_entry_ret_1d,max_entry_ret_5d,max_entry_range_pct,max_entry_volume_z20,
+            enable_volume_surge_overheat_rule,volume_surge_threshold,volume_surge_ret_5d_threshold,
+            overheat_rejected_count,overheat_cash_days,
             average_cash_weight,average_exposure,min_exposure,max_single_position_weight
-        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ) VALUES({",".join("?" for _ in initial_run_values)})
         """,
-        (
-            run_id,
-            created_at,
-            top_n,
-            start_date,
-            end_date,
-            float(initial_equity),
-            rebalance_frequency,
-            int(min_holding_days),
-            int(keep_rank_threshold),
-            scoring_profile,
-            int(bool(market_filter_enabled)),
-            int(max(0, market_filter_ma20_reduce_by)),
-            market_filter_ma60_mode,
-            0,
-            0,
-            0,
-            0,
-            0,
-            int(bool(entry_gate_enabled)),
-            float(min_entry_score),
-            int(bool(require_positive_momentum20)),
-            int(bool(require_positive_momentum60)),
-            int(bool(require_above_sma20)),
-            int(bool(require_above_sma60)),
-            0,
-            0,
-            0.0,
-            0,
-            0,
-            int(bool(enable_position_stop_loss)),
-            float(position_stop_loss_pct),
-            int(bool(enable_trailing_stop)),
-            float(trailing_stop_pct),
-            int(bool(enable_portfolio_dd_cut)),
-            float(portfolio_dd_cut_pct),
-            int(max(0, portfolio_dd_cooldown_days)),
-            0,
-            0,
-            0,
-            0,
-            0,
-            stop_loss_cash_mode,
-            int(max(0, stop_loss_cooldown_days)),
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-        ),
+        initial_run_values,
     )
 
     equity = initial_equity
@@ -258,6 +314,8 @@ def run_backtest(
     cash_mode_days = 0
     entry_gate_rejected_count = 0
     entry_gate_cash_days = 0
+    overheat_rejected_count = 0
+    overheat_cash_days = 0
     risk_event_rows: list[tuple] = []
     position_stop_loss_count = 0
     trailing_stop_count = 0
@@ -287,7 +345,8 @@ def run_backtest(
             ranked_rows = conn.execute(
                 """
                 SELECT s.symbol, s.rank, s.score,
-                       f.momentum_20d, f.momentum_60d, f.sma_20_gap, f.sma_60_gap
+                       f.momentum_20d, f.momentum_60d, f.sma_20_gap, f.sma_60_gap,
+                       f.ret_1d, f.ret_5d, f.range_pct, f.volume_z20
                 FROM daily_scores s
                 LEFT JOIN daily_features f
                   ON f.symbol = s.symbol AND f.date = s.date
@@ -329,7 +388,7 @@ def run_backtest(
                 block_new_buys = True
                 action = "risk_cut_block_new_buys"
 
-            target_holdings = _build_target_holdings(
+            target_holdings, overheat_rejected = _build_target_holdings(
                 ranked_rows=ranked_rows,
                 rank_by_symbol=rank_by_symbol,
                 current_symbols=current_holdings,
@@ -349,7 +408,16 @@ def run_backtest(
                     for sym, cooldown_until_idx in stop_loss_cooldown_until_idx_by_symbol.items()
                     if cooldown_until_idx >= i and sym not in current_holdings
                 },
+                enable_overheat_entry_gate=enable_overheat_entry_gate,
+                max_entry_ret_1d=max_entry_ret_1d,
+                max_entry_ret_5d=max_entry_ret_5d,
+                max_entry_range_pct=max_entry_range_pct,
+                max_entry_volume_z20=max_entry_volume_z20,
+                enable_volume_surge_overheat_rule=enable_volume_surge_overheat_rule,
+                volume_surge_threshold=volume_surge_threshold,
+                volume_surge_ret_5d_threshold=volume_surge_ret_5d_threshold,
             )
+            overheat_rejected_count += int(overheat_rejected)
             if block_new_buys:
                 target_holdings = target_holdings & current_holdings
             if entry_gate_enabled:
@@ -410,7 +478,11 @@ def run_backtest(
                 peak_price_by_symbol.pop(sym, None)
                 holding_weight_by_symbol.pop(sym, None)
             current_holdings = target_holdings
-            equal_weight = (1.0 / float(len(current_holdings))) if current_holdings else 0.0
+            if current_holdings:
+                allocation_slots = int(effective_top_n) if 0 < len(current_holdings) < int(effective_top_n) else len(current_holdings)
+                equal_weight = 1.0 / float(allocation_slots)
+            else:
+                equal_weight = 0.0
             for sym in current_holdings:
                 holding_weight_by_symbol[sym] = equal_weight
 
@@ -547,6 +619,8 @@ def run_backtest(
             pos_count = len(current_holdings)
         if entry_gate_enabled and pos_count < int(top_n):
             entry_gate_cash_days += 1
+        if enable_overheat_entry_gate and pos_count < int(top_n):
+            overheat_cash_days += 1
         if removed_by_risk_for_day and pos_count < int(top_n):
             risk_cut_cash_days += 1
 
@@ -629,6 +703,8 @@ def run_backtest(
             average_actual_position_count=?,
             min_actual_position_count=?,
             max_actual_position_count=?,
+            overheat_rejected_count=?,
+            overheat_cash_days=?,
             position_stop_loss_count=?,
             trailing_stop_count=?,
             portfolio_dd_cut_count=?,
@@ -651,6 +727,8 @@ def run_backtest(
             (sum(r[4] for r in result_rows) / len(result_rows)) if result_rows else 0.0,
             min((r[4] for r in result_rows), default=0),
             max((r[4] for r in result_rows), default=0),
+            int(overheat_rejected_count),
+            int(overheat_cash_days),
             int(position_stop_loss_count),
             int(trailing_stop_count),
             int(portfolio_dd_cut_count),
