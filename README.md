@@ -1648,6 +1648,18 @@ python scripts/run_broad_sector_guardrail_experiment.py \
   --outdir outputs/broad_sector_guardrail/quick
 ```
 
+strict final report baseline parity 검증까지 같이 수행하려면:
+
+```bash
+python scripts/run_broad_sector_guardrail_experiment.py \
+  --db data/kospi_495_rolling_3y.db \
+  --universe-file data/kospi_valid_universe_495.csv \
+  --sector-file data/kospi_sector_map.csv \
+  --mode quick \
+  --reference-final-report-dir reports/final_candidate_report/latest \
+  --outdir outputs/broad_sector_guardrail/quick
+```
+
 Full 실행(monthly,quarterly + 1,3,6,12개월):
 
 ```bash
@@ -1672,3 +1684,11 @@ python scripts/run_broad_sector_guardrail_experiment.py \
 - `guardrail_report.md`
 - `equity_curve.csv`, `drawdown_curve.csv`
 - `equity_curve.png`, `drawdown_curve.png`, `broad_sector_exposure_heatmap.png`
+
+추가 검증/추적:
+
+- `manifest.json`에 `score_signatures`(candidate별 scoring_profile, row_count, sample date top10 심볼 등)가 저장됩니다.
+- `manifest.json`에 `no_cap_baseline_parity_check`가 저장됩니다.
+  - `--reference-final-report-dir` 지정 시 strict final report의 `baseline_old`와 full-period/window metric parity를 검사합니다.
+  - mismatch 시 스크립트는 실패하며 guardrail 결과를 invalid로 처리합니다.
+- rolling universe는 `daily_universe` 기존 데이터가 있으면 재사용하고, `--rebuild-rolling-universe` 지정 시에만 재생성합니다.
