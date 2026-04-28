@@ -402,6 +402,7 @@ def _build_worst_windows(window_rows: list[dict[str, object]]) -> list[dict[str,
                     "benchmark_return": worst["benchmark_return"],
                     "excess_return": worst["excess_return"],
                     "max_drawdown": worst["max_drawdown"],
+                    "run_id": worst.get("run_id"),
                 }
             )
     return out
@@ -761,6 +762,7 @@ def main() -> None:
                 "avg_position_count": result["avg_position_count"],
                 "max_single_weight_observed": result["max_single_weight_observed"],
                 "trade_count": result["trade_count"],
+                "run_id": result["run_id"],
             }
         )
 
@@ -823,6 +825,7 @@ def main() -> None:
                                 "turnover": r["mean_turnover"],
                                 "avg_position_count": r["avg_position_count"],
                                 "max_single_weight_observed": r["max_single_weight_observed"],
+                                "run_id": r["run_id"],
                             }
                         )
 
@@ -857,6 +860,7 @@ def main() -> None:
         raise ValueError("final mode requires non-empty candidate_summary.csv")
 
     summary_csv = outdir / "candidate_summary.csv"
+    full_period_csv = outdir / "full_period_results.csv"
     window_results_csv = outdir / "window_results.csv"
     equity_curve_csv = outdir / "equity_curve.csv"
     drawdown_curve_csv = outdir / "drawdown_curve.csv"
@@ -868,6 +872,21 @@ def main() -> None:
     _write_csv(equity_curve_csv, equity_curve_rows)
     _write_csv(drawdown_curve_csv, drawdown_rows)
     _write_csv(monthly_returns_csv, monthly_rows)
+    _write_csv(full_period_csv, full_period_rows, fieldnames=[
+        "candidate",
+        "scoring_profile",
+        "start_date",
+        "end_date",
+        "total_return",
+        "benchmark_return",
+        "excess_return",
+        "max_drawdown",
+        "turnover",
+        "avg_position_count",
+        "max_single_weight_observed",
+        "trade_count",
+        "run_id",
+    ])
     _write_csv(window_results_csv, window_rows, fieldnames=[
         "candidate",
         "scoring_profile",
@@ -883,6 +902,7 @@ def main() -> None:
         "turnover",
         "avg_position_count",
         "max_single_weight_observed",
+        "run_id",
     ])
     _write_csv(summary_csv, summary_rows, fieldnames=[
         "candidate",
@@ -917,6 +937,7 @@ def main() -> None:
         "benchmark_return",
         "excess_return",
         "max_drawdown",
+        "run_id",
     ])
 
     plots = _plot_outputs(outdir, equity_curve_rows, drawdown_rows, monthly_rows)
@@ -1081,11 +1102,13 @@ def main() -> None:
             for c in CANDIDATES
         ],
         "date_range": {"start_date": full_start, "end_date": full_end},
+        "full_period_run_ids": {row["candidate"]: row.get("run_id") for row in full_period_rows},
         "lookahead_validation": lookahead_validation,
         "rows_changed": universe_build.get("row_changes"),
         "output_file_paths": {
             "manifest_path": str(manifest_path),
             "summary_csv": str(summary_csv),
+            "full_period_csv": str(full_period_csv),
             "window_results_csv": str(window_results_csv),
             "monthly_returns_csv": str(monthly_returns_csv),
             "equity_curve_csv": str(equity_curve_csv),
@@ -1104,6 +1127,7 @@ def main() -> None:
         "outdir": str(outdir),
         "manifest_path": str(manifest_path),
         "summary_csv": str(summary_csv),
+        "full_period_csv": str(full_period_csv),
         "window_results_csv": str(window_results_csv),
         "monthly_returns_csv": str(monthly_returns_csv),
         "equity_curve_csv": str(equity_curve_csv),
