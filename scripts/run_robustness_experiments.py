@@ -81,6 +81,21 @@ class ExperimentResult:
     portfolio_dd_cut_count: int
     portfolio_dd_cooldown_days_count: int
     risk_cut_cash_days: int
+    overheat_entry_gate_enabled: int
+    max_entry_ret_1d: float
+    max_entry_ret_5d: float
+    max_entry_range_pct: float
+    max_entry_volume_z20: float
+    volume_surge_rule_enabled: int
+    volume_surge_threshold: float
+    volume_surge_ret_5d_threshold: float
+    overheat_rejected_count: int
+    overheat_cash_days: int
+    overheat_rejected_by_ret_1d: int
+    overheat_rejected_by_ret_5d: int
+    overheat_rejected_by_range_pct: int
+    overheat_rejected_by_volume_z20: int
+    overheat_rejected_by_volume_surge_rule: int
     market_scope: str
     source_symbol_count: int
     average_daily_universe_count: float
@@ -620,7 +635,14 @@ def main() -> None:
                                                                        enable_trailing_stop, trailing_stop_pct,
                                                                        enable_portfolio_dd_cut, portfolio_dd_cut_pct, portfolio_dd_cooldown_days,
                                                                        position_stop_loss_count, trailing_stop_count, portfolio_dd_cut_count,
-                                                                       portfolio_dd_cooldown_days_count, risk_cut_cash_days
+                                                                       portfolio_dd_cooldown_days_count, risk_cut_cash_days,
+                                                                       enable_overheat_entry_gate, max_entry_ret_1d, max_entry_ret_5d,
+                                                                       max_entry_range_pct, max_entry_volume_z20,
+                                                                       enable_volume_surge_overheat_rule, volume_surge_threshold, volume_surge_ret_5d_threshold,
+                                                                       overheat_rejected_count, overheat_cash_days,
+                                                                       overheat_rejected_by_ret_1d, overheat_rejected_by_ret_5d,
+                                                                       overheat_rejected_by_range_pct, overheat_rejected_by_volume_z20,
+                                                                       overheat_rejected_by_volume_surge_rule
                                                                 FROM backtest_runs
                                                                 WHERE run_id=?
                                                                 """,
@@ -702,6 +724,21 @@ def main() -> None:
                                                                 portfolio_dd_cut_count=int(market_diag["portfolio_dd_cut_count"]) if market_diag else 0,
                                                                 portfolio_dd_cooldown_days_count=int(market_diag["portfolio_dd_cooldown_days_count"]) if market_diag else 0,
                                                                 risk_cut_cash_days=int(market_diag["risk_cut_cash_days"]) if market_diag else 0,
+                                                                overheat_entry_gate_enabled=int(market_diag["enable_overheat_entry_gate"]) if market_diag else 0,
+                                                                max_entry_ret_1d=float(market_diag["max_entry_ret_1d"]) if market_diag else 0.08,
+                                                                max_entry_ret_5d=float(market_diag["max_entry_ret_5d"]) if market_diag else 0.15,
+                                                                max_entry_range_pct=float(market_diag["max_entry_range_pct"]) if market_diag else 0.10,
+                                                                max_entry_volume_z20=float(market_diag["max_entry_volume_z20"]) if market_diag else 3.0,
+                                                                volume_surge_rule_enabled=int(market_diag["enable_volume_surge_overheat_rule"]) if market_diag else 0,
+                                                                volume_surge_threshold=float(market_diag["volume_surge_threshold"]) if market_diag else 3.0,
+                                                                volume_surge_ret_5d_threshold=float(market_diag["volume_surge_ret_5d_threshold"]) if market_diag else 0.10,
+                                                                overheat_rejected_count=int(market_diag["overheat_rejected_count"]) if market_diag else 0,
+                                                                overheat_cash_days=int(market_diag["overheat_cash_days"]) if market_diag else 0,
+                                                                overheat_rejected_by_ret_1d=int(market_diag["overheat_rejected_by_ret_1d"]) if market_diag else 0,
+                                                                overheat_rejected_by_ret_5d=int(market_diag["overheat_rejected_by_ret_5d"]) if market_diag else 0,
+                                                                overheat_rejected_by_range_pct=int(market_diag["overheat_rejected_by_range_pct"]) if market_diag else 0,
+                                                                overheat_rejected_by_volume_z20=int(market_diag["overheat_rejected_by_volume_z20"]) if market_diag else 0,
+                                                                overheat_rejected_by_volume_surge_rule=int(market_diag["overheat_rejected_by_volume_surge_rule"]) if market_diag else 0,
                                                                 market_scope=market_scope,
                                                                 source_symbol_count=len(scoped_symbols),
                                                                 average_daily_universe_count=(sum(len(h) for h in holdings_by_day) / len(holdings_by_day)) if holdings_by_day else 0.0,
@@ -765,6 +802,21 @@ def main() -> None:
                                                                 result.portfolio_dd_cut_count,
                                                                 result.portfolio_dd_cooldown_days_count,
                                                                 result.risk_cut_cash_days,
+                                                                result.overheat_entry_gate_enabled,
+                                                                result.max_entry_ret_1d,
+                                                                result.max_entry_ret_5d,
+                                                                result.max_entry_range_pct,
+                                                                result.max_entry_volume_z20,
+                                                                result.volume_surge_rule_enabled,
+                                                                result.volume_surge_threshold,
+                                                                result.volume_surge_ret_5d_threshold,
+                                                                result.overheat_rejected_count,
+                                                                result.overheat_cash_days,
+                                                                result.overheat_rejected_by_ret_1d,
+                                                                result.overheat_rejected_by_ret_5d,
+                                                                result.overheat_rejected_by_range_pct,
+                                                                result.overheat_rejected_by_volume_z20,
+                                                                result.overheat_rejected_by_volume_surge_rule,
                                                                 result.market_scope,
                                                                 result.source_symbol_count,
                                                                 result.average_daily_universe_count,
@@ -797,6 +849,11 @@ def main() -> None:
                                 enable_portfolio_dd_cut, portfolio_dd_cut_pct, portfolio_dd_cooldown_days,
                                 position_stop_loss_count, trailing_stop_count, portfolio_dd_cut_count,
                                 portfolio_dd_cooldown_days_count, risk_cut_cash_days,
+                                enable_overheat_entry_gate, max_entry_ret_1d, max_entry_ret_5d, max_entry_range_pct, max_entry_volume_z20,
+                                enable_volume_surge_overheat_rule, volume_surge_threshold, volume_surge_ret_5d_threshold,
+                                overheat_rejected_count, overheat_cash_days,
+                                overheat_rejected_by_ret_1d, overheat_rejected_by_ret_5d, overheat_rejected_by_range_pct,
+                                overheat_rejected_by_volume_z20, overheat_rejected_by_volume_surge_rule,
                                 market_scope, source_symbol_count, average_daily_universe_count,
                                 selected_kospi_count, selected_kosdaq_count, kospi_contribution_return, kosdaq_contribution_return,
                                 total_return, max_drawdown, sharpe, trade_count,

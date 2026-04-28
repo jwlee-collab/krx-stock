@@ -115,15 +115,26 @@ def init_db(conn: sqlite3.Connection) -> None:
             stop_loss_cash_mode TEXT NOT NULL DEFAULT 'rebalance_remaining',
             stop_loss_cooldown_days INTEGER NOT NULL DEFAULT 0,
             enable_overheat_entry_gate INTEGER NOT NULL DEFAULT 0,
+            overheat_entry_gate_enabled INTEGER NOT NULL DEFAULT 0,
+            enable_overheat_ret_1d_rule INTEGER NOT NULL DEFAULT 0,
+            enable_overheat_ret_5d_rule INTEGER NOT NULL DEFAULT 0,
+            enable_overheat_range_rule INTEGER NOT NULL DEFAULT 0,
+            enable_overheat_volume_z20_rule INTEGER NOT NULL DEFAULT 0,
             max_entry_ret_1d REAL NOT NULL DEFAULT 0.08,
             max_entry_ret_5d REAL NOT NULL DEFAULT 0.15,
             max_entry_range_pct REAL NOT NULL DEFAULT 0.10,
             max_entry_volume_z20 REAL NOT NULL DEFAULT 3.0,
             enable_volume_surge_overheat_rule INTEGER NOT NULL DEFAULT 0,
+            volume_surge_rule_enabled INTEGER NOT NULL DEFAULT 0,
             volume_surge_threshold REAL NOT NULL DEFAULT 3.0,
             volume_surge_ret_5d_threshold REAL NOT NULL DEFAULT 0.10,
             overheat_rejected_count INTEGER NOT NULL DEFAULT 0,
             overheat_cash_days INTEGER NOT NULL DEFAULT 0,
+            overheat_rejected_by_ret_1d INTEGER NOT NULL DEFAULT 0,
+            overheat_rejected_by_ret_5d INTEGER NOT NULL DEFAULT 0,
+            overheat_rejected_by_range_pct INTEGER NOT NULL DEFAULT 0,
+            overheat_rejected_by_volume_z20 INTEGER NOT NULL DEFAULT 0,
+            overheat_rejected_by_volume_surge_rule INTEGER NOT NULL DEFAULT 0,
             average_cash_weight REAL NOT NULL DEFAULT 0.0,
             average_exposure REAL NOT NULL DEFAULT 0.0,
             min_exposure REAL NOT NULL DEFAULT 0.0,
@@ -296,6 +307,25 @@ def init_db(conn: sqlite3.Connection) -> None:
             portfolio_dd_cut_count INTEGER NOT NULL DEFAULT 0,
             portfolio_dd_cooldown_days_count INTEGER NOT NULL DEFAULT 0,
             risk_cut_cash_days INTEGER NOT NULL DEFAULT 0,
+            enable_overheat_entry_gate INTEGER NOT NULL DEFAULT 0,
+            enable_overheat_ret_1d_rule INTEGER NOT NULL DEFAULT 0,
+            enable_overheat_ret_5d_rule INTEGER NOT NULL DEFAULT 0,
+            enable_overheat_range_rule INTEGER NOT NULL DEFAULT 0,
+            enable_overheat_volume_z20_rule INTEGER NOT NULL DEFAULT 0,
+            max_entry_ret_1d REAL NOT NULL DEFAULT 0.08,
+            max_entry_ret_5d REAL NOT NULL DEFAULT 0.15,
+            max_entry_range_pct REAL NOT NULL DEFAULT 0.10,
+            max_entry_volume_z20 REAL NOT NULL DEFAULT 3.0,
+            enable_volume_surge_overheat_rule INTEGER NOT NULL DEFAULT 0,
+            volume_surge_threshold REAL NOT NULL DEFAULT 3.0,
+            volume_surge_ret_5d_threshold REAL NOT NULL DEFAULT 0.10,
+            overheat_rejected_count INTEGER NOT NULL DEFAULT 0,
+            overheat_cash_days INTEGER NOT NULL DEFAULT 0,
+            overheat_rejected_by_ret_1d INTEGER NOT NULL DEFAULT 0,
+            overheat_rejected_by_ret_5d INTEGER NOT NULL DEFAULT 0,
+            overheat_rejected_by_range_pct INTEGER NOT NULL DEFAULT 0,
+            overheat_rejected_by_volume_z20 INTEGER NOT NULL DEFAULT 0,
+            overheat_rejected_by_volume_surge_rule INTEGER NOT NULL DEFAULT 0,
             market_scope TEXT NOT NULL DEFAULT 'ALL',
             source_symbol_count INTEGER NOT NULL DEFAULT 0,
             average_daily_universe_count REAL NOT NULL DEFAULT 0.0,
@@ -403,15 +433,26 @@ def init_db(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "backtest_runs", "stop_loss_cash_mode", "stop_loss_cash_mode TEXT NOT NULL DEFAULT 'rebalance_remaining'")
     _ensure_column(conn, "backtest_runs", "stop_loss_cooldown_days", "stop_loss_cooldown_days INTEGER NOT NULL DEFAULT 0")
     _ensure_column(conn, "backtest_runs", "enable_overheat_entry_gate", "enable_overheat_entry_gate INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "backtest_runs", "overheat_entry_gate_enabled", "overheat_entry_gate_enabled INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "backtest_runs", "enable_overheat_ret_1d_rule", "enable_overheat_ret_1d_rule INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "backtest_runs", "enable_overheat_ret_5d_rule", "enable_overheat_ret_5d_rule INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "backtest_runs", "enable_overheat_range_rule", "enable_overheat_range_rule INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "backtest_runs", "enable_overheat_volume_z20_rule", "enable_overheat_volume_z20_rule INTEGER NOT NULL DEFAULT 0")
     _ensure_column(conn, "backtest_runs", "max_entry_ret_1d", "max_entry_ret_1d REAL NOT NULL DEFAULT 0.08")
     _ensure_column(conn, "backtest_runs", "max_entry_ret_5d", "max_entry_ret_5d REAL NOT NULL DEFAULT 0.15")
     _ensure_column(conn, "backtest_runs", "max_entry_range_pct", "max_entry_range_pct REAL NOT NULL DEFAULT 0.10")
     _ensure_column(conn, "backtest_runs", "max_entry_volume_z20", "max_entry_volume_z20 REAL NOT NULL DEFAULT 3.0")
     _ensure_column(conn, "backtest_runs", "enable_volume_surge_overheat_rule", "enable_volume_surge_overheat_rule INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "backtest_runs", "volume_surge_rule_enabled", "volume_surge_rule_enabled INTEGER NOT NULL DEFAULT 0")
     _ensure_column(conn, "backtest_runs", "volume_surge_threshold", "volume_surge_threshold REAL NOT NULL DEFAULT 3.0")
     _ensure_column(conn, "backtest_runs", "volume_surge_ret_5d_threshold", "volume_surge_ret_5d_threshold REAL NOT NULL DEFAULT 0.10")
     _ensure_column(conn, "backtest_runs", "overheat_rejected_count", "overheat_rejected_count INTEGER NOT NULL DEFAULT 0")
     _ensure_column(conn, "backtest_runs", "overheat_cash_days", "overheat_cash_days INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "backtest_runs", "overheat_rejected_by_ret_1d", "overheat_rejected_by_ret_1d INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "backtest_runs", "overheat_rejected_by_ret_5d", "overheat_rejected_by_ret_5d INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "backtest_runs", "overheat_rejected_by_range_pct", "overheat_rejected_by_range_pct INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "backtest_runs", "overheat_rejected_by_volume_z20", "overheat_rejected_by_volume_z20 INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "backtest_runs", "overheat_rejected_by_volume_surge_rule", "overheat_rejected_by_volume_surge_rule INTEGER NOT NULL DEFAULT 0")
     _ensure_column(conn, "backtest_runs", "average_cash_weight", "average_cash_weight REAL NOT NULL DEFAULT 0.0")
     _ensure_column(conn, "backtest_runs", "average_exposure", "average_exposure REAL NOT NULL DEFAULT 0.0")
     _ensure_column(conn, "backtest_runs", "min_exposure", "min_exposure REAL NOT NULL DEFAULT 0.0")
@@ -444,6 +485,25 @@ def init_db(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "robustness_experiment_results", "portfolio_dd_cut_count", "portfolio_dd_cut_count INTEGER NOT NULL DEFAULT 0")
     _ensure_column(conn, "robustness_experiment_results", "portfolio_dd_cooldown_days_count", "portfolio_dd_cooldown_days_count INTEGER NOT NULL DEFAULT 0")
     _ensure_column(conn, "robustness_experiment_results", "risk_cut_cash_days", "risk_cut_cash_days INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "robustness_experiment_results", "enable_overheat_entry_gate", "enable_overheat_entry_gate INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "robustness_experiment_results", "enable_overheat_ret_1d_rule", "enable_overheat_ret_1d_rule INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "robustness_experiment_results", "enable_overheat_ret_5d_rule", "enable_overheat_ret_5d_rule INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "robustness_experiment_results", "enable_overheat_range_rule", "enable_overheat_range_rule INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "robustness_experiment_results", "enable_overheat_volume_z20_rule", "enable_overheat_volume_z20_rule INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "robustness_experiment_results", "max_entry_ret_1d", "max_entry_ret_1d REAL NOT NULL DEFAULT 0.08")
+    _ensure_column(conn, "robustness_experiment_results", "max_entry_ret_5d", "max_entry_ret_5d REAL NOT NULL DEFAULT 0.15")
+    _ensure_column(conn, "robustness_experiment_results", "max_entry_range_pct", "max_entry_range_pct REAL NOT NULL DEFAULT 0.10")
+    _ensure_column(conn, "robustness_experiment_results", "max_entry_volume_z20", "max_entry_volume_z20 REAL NOT NULL DEFAULT 3.0")
+    _ensure_column(conn, "robustness_experiment_results", "enable_volume_surge_overheat_rule", "enable_volume_surge_overheat_rule INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "robustness_experiment_results", "volume_surge_threshold", "volume_surge_threshold REAL NOT NULL DEFAULT 3.0")
+    _ensure_column(conn, "robustness_experiment_results", "volume_surge_ret_5d_threshold", "volume_surge_ret_5d_threshold REAL NOT NULL DEFAULT 0.10")
+    _ensure_column(conn, "robustness_experiment_results", "overheat_rejected_count", "overheat_rejected_count INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "robustness_experiment_results", "overheat_cash_days", "overheat_cash_days INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "robustness_experiment_results", "overheat_rejected_by_ret_1d", "overheat_rejected_by_ret_1d INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "robustness_experiment_results", "overheat_rejected_by_ret_5d", "overheat_rejected_by_ret_5d INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "robustness_experiment_results", "overheat_rejected_by_range_pct", "overheat_rejected_by_range_pct INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "robustness_experiment_results", "overheat_rejected_by_volume_z20", "overheat_rejected_by_volume_z20 INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "robustness_experiment_results", "overheat_rejected_by_volume_surge_rule", "overheat_rejected_by_volume_surge_rule INTEGER NOT NULL DEFAULT 0")
     _ensure_column(conn, "robustness_experiment_results", "market_filter_enabled", "market_filter_enabled INTEGER NOT NULL DEFAULT 0")
     _ensure_column(conn, "robustness_experiment_results", "universe_mode", "universe_mode TEXT NOT NULL DEFAULT 'static'")
     _ensure_column(conn, "robustness_experiment_results", "universe_size", "universe_size INTEGER")

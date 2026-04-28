@@ -30,6 +30,10 @@ def _build_target_holdings(
     require_above_sma60: bool = False,
     blocked_new_entries: set[str] | None = None,
     enable_overheat_entry_gate: bool = False,
+    enable_overheat_ret_1d_rule: bool = False,
+    enable_overheat_ret_5d_rule: bool = False,
+    enable_overheat_range_rule: bool = False,
+    enable_overheat_volume_z20_rule: bool = False,
     max_entry_ret_1d: float = 0.08,
     max_entry_ret_5d: float = 0.15,
     max_entry_range_pct: float = 0.10,
@@ -37,7 +41,7 @@ def _build_target_holdings(
     enable_volume_surge_overheat_rule: bool = False,
     volume_surge_threshold: float = 3.0,
     volume_surge_ret_5d_threshold: float = 0.10,
-) -> tuple[set[str], int]:
+) -> tuple[set[str], dict[str, int]]:
     blocked_new_entries = blocked_new_entries or set()
     keep_due_rank = {
         sym
@@ -52,7 +56,14 @@ def _build_target_holdings(
     kept = set(keep_due_rank) | set(keep_due_holding_period)
 
     target = list(kept)
-    overheat_rejected = 0
+    overheat_diag = {
+        "overheat_rejected_count": 0,
+        "overheat_rejected_by_ret_1d": 0,
+        "overheat_rejected_by_ret_5d": 0,
+        "overheat_rejected_by_range_pct": 0,
+        "overheat_rejected_by_volume_z20": 0,
+        "overheat_rejected_by_volume_surge_rule": 0,
+    }
     for row in ranked_rows:
         sym = row["symbol"]
         if sym in kept:
@@ -83,14 +94,18 @@ def _build_target_holdings(
             range_pct = row["range_pct"]
             volume_z20 = row["volume_z20"]
             rejected = False
-            if ret_1d is not None and float(ret_1d) > float(max_entry_ret_1d):
+            if enable_overheat_ret_1d_rule and ret_1d is not None and float(ret_1d) > float(max_entry_ret_1d):
                 rejected = True
-            if ret_5d is not None and float(ret_5d) > float(max_entry_ret_5d):
+                overheat_diag["overheat_rejected_by_ret_1d"] += 1
+            if enable_overheat_ret_5d_rule and ret_5d is not None and float(ret_5d) > float(max_entry_ret_5d):
                 rejected = True
-            if range_pct is not None and float(range_pct) > float(max_entry_range_pct):
+                overheat_diag["overheat_rejected_by_ret_5d"] += 1
+            if enable_overheat_range_rule and range_pct is not None and float(range_pct) > float(max_entry_range_pct):
                 rejected = True
-            if volume_z20 is not None and float(volume_z20) > float(max_entry_volume_z20):
+                overheat_diag["overheat_rejected_by_range_pct"] += 1
+            if enable_overheat_volume_z20_rule and volume_z20 is not None and float(volume_z20) > float(max_entry_volume_z20):
                 rejected = True
+                overheat_diag["overheat_rejected_by_volume_z20"] += 1
             if (
                 enable_volume_surge_overheat_rule
                 and volume_z20 is not None
@@ -99,11 +114,12 @@ def _build_target_holdings(
                 and float(ret_5d) > float(volume_surge_ret_5d_threshold)
             ):
                 rejected = True
+                overheat_diag["overheat_rejected_by_volume_surge_rule"] += 1
             if rejected:
-                overheat_rejected += 1
+                overheat_diag["overheat_rejected_count"] += 1
                 continue
         target.append(sym)
-    return set(target), overheat_rejected
+    return set(target), overheat_diag
 
 
 def _build_proxy_market_close_by_date(conn: sqlite3.Connection, dates: list[str]) -> dict[str, float]:
@@ -176,6 +192,10 @@ def run_backtest(
     stop_loss_cash_mode: str = "rebalance_remaining",
     stop_loss_cooldown_days: int = 0,
     enable_overheat_entry_gate: bool = False,
+    enable_overheat_ret_1d_rule: bool = False,
+    enable_overheat_ret_5d_rule: bool = False,
+    enable_overheat_range_rule: bool = False,
+    enable_overheat_volume_z20_rule: bool = False,
     max_entry_ret_1d: float = 0.08,
     max_entry_ret_5d: float = 0.15,
     max_entry_range_pct: float = 0.10,
@@ -262,13 +282,24 @@ def run_backtest(
         stop_loss_cash_mode,
         int(max(0, stop_loss_cooldown_days)),
         int(bool(enable_overheat_entry_gate)),
+        int(bool(enable_overheat_entry_gate)),
+        int(bool(enable_overheat_ret_1d_rule)),
+        int(bool(enable_overheat_ret_5d_rule)),
+        int(bool(enable_overheat_range_rule)),
+        int(bool(enable_overheat_volume_z20_rule)),
         float(max_entry_ret_1d),
         float(max_entry_ret_5d),
         float(max_entry_range_pct),
         float(max_entry_volume_z20),
         int(bool(enable_volume_surge_overheat_rule)),
+        int(bool(enable_volume_surge_overheat_rule)),
         float(volume_surge_threshold),
         float(volume_surge_ret_5d_threshold),
+        0,
+        0,
+        0,
+        0,
+        0,
         0,
         0,
         0.0,
@@ -291,9 +322,14 @@ def run_backtest(
             position_stop_loss_count,trailing_stop_count,portfolio_dd_cut_count,
             portfolio_dd_cooldown_days_count,risk_cut_cash_days,
             stop_loss_cash_mode,stop_loss_cooldown_days,
-            enable_overheat_entry_gate,max_entry_ret_1d,max_entry_ret_5d,max_entry_range_pct,max_entry_volume_z20,
-            enable_volume_surge_overheat_rule,volume_surge_threshold,volume_surge_ret_5d_threshold,
+            enable_overheat_entry_gate,overheat_entry_gate_enabled,
+            enable_overheat_ret_1d_rule,enable_overheat_ret_5d_rule,
+            enable_overheat_range_rule,enable_overheat_volume_z20_rule,
+            max_entry_ret_1d,max_entry_ret_5d,max_entry_range_pct,max_entry_volume_z20,
+            enable_volume_surge_overheat_rule,volume_surge_rule_enabled,volume_surge_threshold,volume_surge_ret_5d_threshold,
             overheat_rejected_count,overheat_cash_days,
+            overheat_rejected_by_ret_1d,overheat_rejected_by_ret_5d,overheat_rejected_by_range_pct,
+            overheat_rejected_by_volume_z20,overheat_rejected_by_volume_surge_rule,
             average_cash_weight,average_exposure,min_exposure,max_single_position_weight
         ) VALUES({",".join("?" for _ in initial_run_values)})
         """,
@@ -316,6 +352,11 @@ def run_backtest(
     entry_gate_cash_days = 0
     overheat_rejected_count = 0
     overheat_cash_days = 0
+    overheat_rejected_by_ret_1d = 0
+    overheat_rejected_by_ret_5d = 0
+    overheat_rejected_by_range_pct = 0
+    overheat_rejected_by_volume_z20 = 0
+    overheat_rejected_by_volume_surge_rule = 0
     risk_event_rows: list[tuple] = []
     position_stop_loss_count = 0
     trailing_stop_count = 0
@@ -388,7 +429,7 @@ def run_backtest(
                 block_new_buys = True
                 action = "risk_cut_block_new_buys"
 
-            target_holdings, overheat_rejected = _build_target_holdings(
+            target_holdings, overheat_diag = _build_target_holdings(
                 ranked_rows=ranked_rows,
                 rank_by_symbol=rank_by_symbol,
                 current_symbols=current_holdings,
@@ -409,6 +450,10 @@ def run_backtest(
                     if cooldown_until_idx >= i and sym not in current_holdings
                 },
                 enable_overheat_entry_gate=enable_overheat_entry_gate,
+                enable_overheat_ret_1d_rule=enable_overheat_ret_1d_rule,
+                enable_overheat_ret_5d_rule=enable_overheat_ret_5d_rule,
+                enable_overheat_range_rule=enable_overheat_range_rule,
+                enable_overheat_volume_z20_rule=enable_overheat_volume_z20_rule,
                 max_entry_ret_1d=max_entry_ret_1d,
                 max_entry_ret_5d=max_entry_ret_5d,
                 max_entry_range_pct=max_entry_range_pct,
@@ -417,7 +462,12 @@ def run_backtest(
                 volume_surge_threshold=volume_surge_threshold,
                 volume_surge_ret_5d_threshold=volume_surge_ret_5d_threshold,
             )
-            overheat_rejected_count += int(overheat_rejected)
+            overheat_rejected_count += int(overheat_diag["overheat_rejected_count"])
+            overheat_rejected_by_ret_1d += int(overheat_diag["overheat_rejected_by_ret_1d"])
+            overheat_rejected_by_ret_5d += int(overheat_diag["overheat_rejected_by_ret_5d"])
+            overheat_rejected_by_range_pct += int(overheat_diag["overheat_rejected_by_range_pct"])
+            overheat_rejected_by_volume_z20 += int(overheat_diag["overheat_rejected_by_volume_z20"])
+            overheat_rejected_by_volume_surge_rule += int(overheat_diag["overheat_rejected_by_volume_surge_rule"])
             if block_new_buys:
                 target_holdings = target_holdings & current_holdings
             if entry_gate_enabled:
@@ -705,6 +755,11 @@ def run_backtest(
             max_actual_position_count=?,
             overheat_rejected_count=?,
             overheat_cash_days=?,
+            overheat_rejected_by_ret_1d=?,
+            overheat_rejected_by_ret_5d=?,
+            overheat_rejected_by_range_pct=?,
+            overheat_rejected_by_volume_z20=?,
+            overheat_rejected_by_volume_surge_rule=?,
             position_stop_loss_count=?,
             trailing_stop_count=?,
             portfolio_dd_cut_count=?,
@@ -729,6 +784,11 @@ def run_backtest(
             max((r[4] for r in result_rows), default=0),
             int(overheat_rejected_count),
             int(overheat_cash_days),
+            int(overheat_rejected_by_ret_1d),
+            int(overheat_rejected_by_ret_5d),
+            int(overheat_rejected_by_range_pct),
+            int(overheat_rejected_by_volume_z20),
+            int(overheat_rejected_by_volume_surge_rule),
             int(position_stop_loss_count),
             int(trailing_stop_count),
             int(portfolio_dd_cut_count),

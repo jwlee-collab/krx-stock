@@ -78,6 +78,10 @@ def main() -> None:
     p.add_argument("--require-above-sma20", action="store_true")
     p.add_argument("--require-above-sma60", action="store_true")
     p.add_argument("--enable-overheat-entry-gate", action="store_true")
+    p.add_argument("--enable-overheat-ret-1d-rule", action="store_true")
+    p.add_argument("--enable-overheat-ret-5d-rule", action="store_true")
+    p.add_argument("--enable-overheat-range-rule", action="store_true")
+    p.add_argument("--enable-overheat-volume-z20-rule", action="store_true")
     p.add_argument("--max-entry-ret-1d", type=float, default=0.08)
     p.add_argument("--max-entry-ret-5d", type=float, default=0.15)
     p.add_argument("--max-entry-range-pct", type=float, default=0.10)
@@ -269,6 +273,10 @@ def main() -> None:
         portfolio_dd_cut_pct=args.portfolio_dd_cut_pct,
         portfolio_dd_cooldown_days=args.portfolio_dd_cooldown_days,
         enable_overheat_entry_gate=args.enable_overheat_entry_gate,
+        enable_overheat_ret_1d_rule=args.enable_overheat_ret_1d_rule,
+        enable_overheat_ret_5d_rule=args.enable_overheat_ret_5d_rule,
+        enable_overheat_range_rule=args.enable_overheat_range_rule,
+        enable_overheat_volume_z20_rule=args.enable_overheat_volume_z20_rule,
         max_entry_ret_1d=args.max_entry_ret_1d,
         max_entry_ret_5d=args.max_entry_ret_5d,
         max_entry_range_pct=args.max_entry_range_pct,
@@ -292,6 +300,11 @@ def main() -> None:
                max_actual_position_count,
                overheat_rejected_count,
                overheat_cash_days,
+               overheat_rejected_by_ret_1d,
+               overheat_rejected_by_ret_5d,
+               overheat_rejected_by_range_pct,
+               overheat_rejected_by_volume_z20,
+               overheat_rejected_by_volume_surge_rule,
                position_stop_loss_count,
                trailing_stop_count,
                portfolio_dd_cut_count,
@@ -371,12 +384,21 @@ def main() -> None:
             "max_entry_ret_5d": args.max_entry_ret_5d,
             "max_entry_range_pct": args.max_entry_range_pct,
             "max_entry_volume_z20": args.max_entry_volume_z20,
+            "enable_overheat_ret_1d_rule": args.enable_overheat_ret_1d_rule,
+            "enable_overheat_ret_5d_rule": args.enable_overheat_ret_5d_rule,
+            "enable_overheat_range_rule": args.enable_overheat_range_rule,
+            "enable_overheat_volume_z20_rule": args.enable_overheat_volume_z20_rule,
             "enable_volume_surge_overheat_rule": args.enable_volume_surge_overheat_rule,
             "volume_surge_threshold": args.volume_surge_threshold,
             "volume_surge_ret_5d_threshold": args.volume_surge_ret_5d_threshold,
             "diagnostics": {
                 "overheat_rejected_count": int(market_filter_summary_row["overheat_rejected_count"]) if market_filter_summary_row else 0,
                 "overheat_cash_days": int(market_filter_summary_row["overheat_cash_days"]) if market_filter_summary_row else 0,
+                "overheat_rejected_by_ret_1d": int(market_filter_summary_row["overheat_rejected_by_ret_1d"]) if market_filter_summary_row else 0,
+                "overheat_rejected_by_ret_5d": int(market_filter_summary_row["overheat_rejected_by_ret_5d"]) if market_filter_summary_row else 0,
+                "overheat_rejected_by_range_pct": int(market_filter_summary_row["overheat_rejected_by_range_pct"]) if market_filter_summary_row else 0,
+                "overheat_rejected_by_volume_z20": int(market_filter_summary_row["overheat_rejected_by_volume_z20"]) if market_filter_summary_row else 0,
+                "overheat_rejected_by_volume_surge_rule": int(market_filter_summary_row["overheat_rejected_by_volume_surge_rule"]) if market_filter_summary_row else 0,
                 "average_actual_position_count": float(market_filter_summary_row["average_actual_position_count"]) if market_filter_summary_row else 0.0,
                 "average_cash_weight": float(market_filter_summary_row["average_cash_weight"]) if market_filter_summary_row else 0.0,
                 "average_exposure": float(market_filter_summary_row["average_exposure"]) if market_filter_summary_row else 0.0,
