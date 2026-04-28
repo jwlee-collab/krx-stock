@@ -89,6 +89,16 @@ def main() -> None:
     p.add_argument("--enable-volume-surge-overheat-rule", action="store_true")
     p.add_argument("--volume-surge-threshold", type=float, default=3.0)
     p.add_argument("--volume-surge-ret-5d-threshold", type=float, default=0.10)
+    p.add_argument("--enable-entry-quality-gate", action="store_true")
+    p.add_argument("--enable-entry-range-rule", action="store_true")
+    p.add_argument("--enable-entry-volatility-rule", action="store_true")
+    p.add_argument("--enable-entry-ret5-minus-range-rule", action="store_true")
+    p.add_argument("--enable-entry-range-to-ret5-rule", action="store_true")
+    p.add_argument("--enable-entry-volatility-to-momentum20-rule", action="store_true")
+    p.add_argument("--max-entry-volatility-20d", type=float, default=0.06)
+    p.add_argument("--min-entry-ret5-minus-range", type=float, default=0.00)
+    p.add_argument("--max-entry-range-to-ret5", type=float, default=1.5)
+    p.add_argument("--max-entry-volatility-to-momentum20", type=float, default=0.5)
     p.add_argument("--enable-position-stop-loss", action="store_true")
     p.add_argument("--position-stop-loss-pct", type=float, default=0.08)
     p.add_argument("--stop-loss-cash-mode", choices=["rebalance_remaining", "keep_cash"], default="rebalance_remaining")
@@ -284,6 +294,17 @@ def main() -> None:
         enable_volume_surge_overheat_rule=args.enable_volume_surge_overheat_rule,
         volume_surge_threshold=args.volume_surge_threshold,
         volume_surge_ret_5d_threshold=args.volume_surge_ret_5d_threshold,
+        enable_entry_quality_gate=args.enable_entry_quality_gate,
+        enable_entry_range_rule=args.enable_entry_range_rule,
+        enable_entry_volatility_rule=args.enable_entry_volatility_rule,
+        enable_entry_ret5_minus_range_rule=args.enable_entry_ret5_minus_range_rule,
+        enable_entry_range_to_ret5_rule=args.enable_entry_range_to_ret5_rule,
+        enable_entry_volatility_to_momentum20_rule=args.enable_entry_volatility_to_momentum20_rule,
+        max_entry_quality_range_pct=args.max_entry_range_pct,
+        max_entry_volatility_20d=args.max_entry_volatility_20d,
+        min_entry_ret5_minus_range=args.min_entry_ret5_minus_range,
+        max_entry_range_to_ret5=args.max_entry_range_to_ret5,
+        max_entry_volatility_to_momentum20=args.max_entry_volatility_to_momentum20,
     )
     market_filter_summary_row = conn.execute(
         """
@@ -305,6 +326,14 @@ def main() -> None:
                overheat_rejected_by_range_pct,
                overheat_rejected_by_volume_z20,
                overheat_rejected_by_volume_surge_rule,
+               entry_quality_gate_enabled,
+               entry_quality_rejected_count,
+               entry_quality_cash_days,
+               rejected_by_range_pct,
+               rejected_by_volatility_20d,
+               rejected_by_ret5_minus_range,
+               rejected_by_range_to_ret5,
+               rejected_by_volatility_to_momentum20,
                position_stop_loss_count,
                trailing_stop_count,
                portfolio_dd_cut_count,
@@ -402,6 +431,32 @@ def main() -> None:
                 "average_actual_position_count": float(market_filter_summary_row["average_actual_position_count"]) if market_filter_summary_row else 0.0,
                 "average_cash_weight": float(market_filter_summary_row["average_cash_weight"]) if market_filter_summary_row else 0.0,
                 "average_exposure": float(market_filter_summary_row["average_exposure"]) if market_filter_summary_row else 0.0,
+            },
+        },
+        "entry_quality_gate": {
+            "enabled": args.enable_entry_quality_gate,
+            "enable_entry_range_rule": args.enable_entry_range_rule,
+            "enable_entry_volatility_rule": args.enable_entry_volatility_rule,
+            "enable_entry_ret5_minus_range_rule": args.enable_entry_ret5_minus_range_rule,
+            "enable_entry_range_to_ret5_rule": args.enable_entry_range_to_ret5_rule,
+            "enable_entry_volatility_to_momentum20_rule": args.enable_entry_volatility_to_momentum20_rule,
+            "max_entry_range_pct": args.max_entry_range_pct,
+            "max_entry_volatility_20d": args.max_entry_volatility_20d,
+            "min_entry_ret5_minus_range": args.min_entry_ret5_minus_range,
+            "max_entry_range_to_ret5": args.max_entry_range_to_ret5,
+            "max_entry_volatility_to_momentum20": args.max_entry_volatility_to_momentum20,
+            "diagnostics": {
+                "entry_quality_gate_enabled": int(market_filter_summary_row["entry_quality_gate_enabled"]) if market_filter_summary_row else 0,
+                "entry_quality_rejected_count": int(market_filter_summary_row["entry_quality_rejected_count"]) if market_filter_summary_row else 0,
+                "entry_quality_cash_days": int(market_filter_summary_row["entry_quality_cash_days"]) if market_filter_summary_row else 0,
+                "rejected_by_range_pct": int(market_filter_summary_row["rejected_by_range_pct"]) if market_filter_summary_row else 0,
+                "rejected_by_volatility_20d": int(market_filter_summary_row["rejected_by_volatility_20d"]) if market_filter_summary_row else 0,
+                "rejected_by_ret5_minus_range": int(market_filter_summary_row["rejected_by_ret5_minus_range"]) if market_filter_summary_row else 0,
+                "rejected_by_range_to_ret5": int(market_filter_summary_row["rejected_by_range_to_ret5"]) if market_filter_summary_row else 0,
+                "rejected_by_volatility_to_momentum20": int(market_filter_summary_row["rejected_by_volatility_to_momentum20"]) if market_filter_summary_row else 0,
+                "average_cash_weight": float(market_filter_summary_row["average_cash_weight"]) if market_filter_summary_row else 0.0,
+                "average_exposure": float(market_filter_summary_row["average_exposure"]) if market_filter_summary_row else 0.0,
+                "max_single_position_weight": float(market_filter_summary_row["max_single_position_weight"]) if market_filter_summary_row else 0.0,
             },
         },
         "risk_cut": {

@@ -128,6 +128,24 @@ def init_db(conn: sqlite3.Connection) -> None:
             volume_surge_rule_enabled INTEGER NOT NULL DEFAULT 0,
             volume_surge_threshold REAL NOT NULL DEFAULT 3.0,
             volume_surge_ret_5d_threshold REAL NOT NULL DEFAULT 0.10,
+            entry_quality_gate_enabled INTEGER NOT NULL DEFAULT 0,
+            enable_entry_range_rule INTEGER NOT NULL DEFAULT 0,
+            enable_entry_volatility_rule INTEGER NOT NULL DEFAULT 0,
+            enable_entry_ret5_minus_range_rule INTEGER NOT NULL DEFAULT 0,
+            enable_entry_range_to_ret5_rule INTEGER NOT NULL DEFAULT 0,
+            enable_entry_volatility_to_momentum20_rule INTEGER NOT NULL DEFAULT 0,
+            max_entry_quality_range_pct REAL NOT NULL DEFAULT 0.16,
+            max_entry_volatility_20d REAL NOT NULL DEFAULT 0.06,
+            min_entry_ret5_minus_range REAL NOT NULL DEFAULT 0.0,
+            max_entry_range_to_ret5 REAL NOT NULL DEFAULT 1.5,
+            max_entry_volatility_to_momentum20 REAL NOT NULL DEFAULT 0.5,
+            entry_quality_rejected_count INTEGER NOT NULL DEFAULT 0,
+            entry_quality_cash_days INTEGER NOT NULL DEFAULT 0,
+            rejected_by_range_pct INTEGER NOT NULL DEFAULT 0,
+            rejected_by_volatility_20d INTEGER NOT NULL DEFAULT 0,
+            rejected_by_ret5_minus_range INTEGER NOT NULL DEFAULT 0,
+            rejected_by_range_to_ret5 INTEGER NOT NULL DEFAULT 0,
+            rejected_by_volatility_to_momentum20 INTEGER NOT NULL DEFAULT 0,
             overheat_rejected_count INTEGER NOT NULL DEFAULT 0,
             overheat_cash_days INTEGER NOT NULL DEFAULT 0,
             overheat_rejected_by_ret_1d INTEGER NOT NULL DEFAULT 0,
@@ -446,6 +464,24 @@ def init_db(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "backtest_runs", "volume_surge_rule_enabled", "volume_surge_rule_enabled INTEGER NOT NULL DEFAULT 0")
     _ensure_column(conn, "backtest_runs", "volume_surge_threshold", "volume_surge_threshold REAL NOT NULL DEFAULT 3.0")
     _ensure_column(conn, "backtest_runs", "volume_surge_ret_5d_threshold", "volume_surge_ret_5d_threshold REAL NOT NULL DEFAULT 0.10")
+    _ensure_column(conn, "backtest_runs", "entry_quality_gate_enabled", "entry_quality_gate_enabled INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "backtest_runs", "enable_entry_range_rule", "enable_entry_range_rule INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "backtest_runs", "enable_entry_volatility_rule", "enable_entry_volatility_rule INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "backtest_runs", "enable_entry_ret5_minus_range_rule", "enable_entry_ret5_minus_range_rule INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "backtest_runs", "enable_entry_range_to_ret5_rule", "enable_entry_range_to_ret5_rule INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "backtest_runs", "enable_entry_volatility_to_momentum20_rule", "enable_entry_volatility_to_momentum20_rule INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "backtest_runs", "max_entry_quality_range_pct", "max_entry_quality_range_pct REAL NOT NULL DEFAULT 0.16")
+    _ensure_column(conn, "backtest_runs", "max_entry_volatility_20d", "max_entry_volatility_20d REAL NOT NULL DEFAULT 0.06")
+    _ensure_column(conn, "backtest_runs", "min_entry_ret5_minus_range", "min_entry_ret5_minus_range REAL NOT NULL DEFAULT 0.0")
+    _ensure_column(conn, "backtest_runs", "max_entry_range_to_ret5", "max_entry_range_to_ret5 REAL NOT NULL DEFAULT 1.5")
+    _ensure_column(conn, "backtest_runs", "max_entry_volatility_to_momentum20", "max_entry_volatility_to_momentum20 REAL NOT NULL DEFAULT 0.5")
+    _ensure_column(conn, "backtest_runs", "entry_quality_rejected_count", "entry_quality_rejected_count INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "backtest_runs", "entry_quality_cash_days", "entry_quality_cash_days INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "backtest_runs", "rejected_by_range_pct", "rejected_by_range_pct INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "backtest_runs", "rejected_by_volatility_20d", "rejected_by_volatility_20d INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "backtest_runs", "rejected_by_ret5_minus_range", "rejected_by_ret5_minus_range INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "backtest_runs", "rejected_by_range_to_ret5", "rejected_by_range_to_ret5 INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "backtest_runs", "rejected_by_volatility_to_momentum20", "rejected_by_volatility_to_momentum20 INTEGER NOT NULL DEFAULT 0")
     _ensure_column(conn, "backtest_runs", "overheat_rejected_count", "overheat_rejected_count INTEGER NOT NULL DEFAULT 0")
     _ensure_column(conn, "backtest_runs", "overheat_cash_days", "overheat_cash_days INTEGER NOT NULL DEFAULT 0")
     _ensure_column(conn, "backtest_runs", "overheat_rejected_by_ret_1d", "overheat_rejected_by_ret_1d INTEGER NOT NULL DEFAULT 0")
