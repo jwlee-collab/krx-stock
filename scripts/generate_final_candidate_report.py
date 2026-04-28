@@ -80,30 +80,32 @@ def _daily_scores_columns(conn: sqlite3.Connection) -> list[str]:
     return cols
 
 
-def _snapshot_candidate_scores(conn: sqlite3.Connection, candidate: CandidateConfig) -> tuple[str, list[str]]:
+def _snapshot_daily_scores(conn: sqlite3.Connection, snapshot_table: str) -> list[str]:
     columns = _daily_scores_columns(conn)
     col_sql = ", ".join(columns)
-    table_name = f"tmp_final_candidate_scores_{_sanitize_identifier(candidate.name)}"
-    conn.execute(f"DROP TABLE IF EXISTS temp.{table_name}")
-    conn.execute(f"CREATE TEMP TABLE {table_name} AS SELECT {col_sql} FROM daily_scores")
-    return table_name, columns
+    conn.execute(f"DROP TABLE IF EXISTS temp.{snapshot_table}")
+    conn.execute(f"CREATE TEMP TABLE {snapshot_table} AS SELECT {col_sql} FROM daily_scores")
+    return columns
 
 
-def _restore_candidate_scores(conn: sqlite3.Connection, snapshot_table: str, columns: list[str]) -> None:
+def _restore_daily_scores(conn: sqlite3.Connection, snapshot_table: str) -> None:
+    columns = _daily_scores_columns(conn)
     col_sql = ", ".join(columns)
     conn.execute("DELETE FROM daily_scores")
     conn.execute(f"INSERT INTO daily_scores ({col_sql}) SELECT {col_sql} FROM temp.{snapshot_table}")
 
 
-def _collect_score_signature(conn: sqlite3.Connection, scoring_profile: str) -> dict[str, object]:
+def _build_score_signature(conn: sqlite3.Connection, scoring_profile: str) -> dict[str, object]:
     row_count = int(conn.execute("SELECT COUNT(1) FROM daily_scores").fetchone()[0])
     first_date = conn.execute("SELECT MIN(date) FROM daily_scores").fetchone()[0]
     last_date = conn.execute("SELECT MAX(date) FROM daily_scores").fetchone()[0]
+    middle_date = None
     sampled_dates = [d for d in [first_date, last_date] if d]
     if first_date and last_date and first_date != last_date:
         dates = [r["date"] for r in conn.execute("SELECT DISTINCT date FROM daily_scores ORDER BY date").fetchall()]
         if dates:
-            sampled_dates.insert(1, dates[len(dates) // 2])
+            middle_date = dates[len(dates) // 2]
+            sampled_dates.insert(1, middle_date)
 
     top_symbols_by_date: dict[str, list[str]] = {}
     for d in sampled_dates:
@@ -126,6 +128,7 @@ def _collect_score_signature(conn: sqlite3.Connection, scoring_profile: str) -> 
         "scoring_profile": scoring_profile,
         "row_count": row_count,
         "first_score_date": first_date,
+        "middle_score_date": middle_date,
         "last_score_date": last_date,
         "top10_symbols_by_sample_date": top_symbols_by_date,
     }
@@ -404,7 +407,12 @@ def _build_worst_windows(window_rows: list[dict[str, object]]) -> list[dict[str,
     return out
 
 
-def _all_comparable_windows_identical(window_rows: list[dict[str, object]]) -> bool:
+def _validate_candidate_outputs_not_identical(
+    window_rows: list[dict[str, object]],
+    allow_smoke: bool = False,
+    monthly_rows: list[dict[str, object]] | None = None,
+) -> dict[str, object]:
+    tolerance = 1e-12
     baseline = {
         (
             str(r["eval_frequency"]),
@@ -426,18 +434,56 @@ def _all_comparable_windows_identical(window_rows: list[dict[str, object]]) -> b
         if str(r["candidate"]) == "aggressive_hybrid_v4"
     }
     comparable_keys = sorted(set(baseline) & set(aggressive))
-    if not comparable_keys:
-        return False
+
+    max_abs_diff = {"total_return": 0.0, "excess_return": 0.0, "max_drawdown": 0.0}
     for key in comparable_keys:
         b = baseline[key]
         a = aggressive[key]
-        if not (
-            float(b["total_return"]) == float(a["total_return"])
-            and float(b["excess_return"]) == float(a["excess_return"])
-            and float(b["max_drawdown"]) == float(a["max_drawdown"])
-        ):
-            return False
-    return True
+        for metric in max_abs_diff:
+            diff = abs(float(b[metric]) - float(a[metric]))
+            if diff > max_abs_diff[metric]:
+                max_abs_diff[metric] = diff
+
+    monthly_max_abs_diff = 0.0
+    if monthly_rows:
+        baseline_monthly = {
+            str(r["month"]): r
+            for r in monthly_rows
+            if str(r["candidate"]) == "baseline_old"
+        }
+        aggressive_monthly = {
+            str(r["month"]): r
+            for r in monthly_rows
+            if str(r["candidate"]) == "aggressive_hybrid_v4"
+        }
+        comparable_months = sorted(set(baseline_monthly) & set(aggressive_monthly))
+        for m in comparable_months:
+            diff = abs(float(baseline_monthly[m]["strategy_return"]) - float(aggressive_monthly[m]["strategy_return"]))
+            if diff > monthly_max_abs_diff:
+                monthly_max_abs_diff = diff
+
+    windows_identical = bool(comparable_keys) and all(v <= tolerance for v in max_abs_diff.values())
+    monthly_identical = monthly_rows is not None and monthly_max_abs_diff <= tolerance
+    fail = windows_identical and monthly_identical
+
+    status = "pass"
+    message = "candidate outputs differ across paired windows"
+    if fail:
+        message = "candidate outputs are identical across all windows; scoring isolation failure likely"
+        status = "warn" if allow_smoke else "fail"
+        if not allow_smoke:
+            raise ValueError(message)
+
+    return {
+        "status": status,
+        "message": message,
+        "paired_window_count": len(comparable_keys),
+        "max_abs_diff": max_abs_diff,
+        "monthly_strategy_return_max_abs_diff": monthly_max_abs_diff,
+        "windows_identical": windows_identical,
+        "monthly_identical": monthly_identical,
+        "tolerance": tolerance,
+    }
 
 
 def _write_csv(path: Path, rows: list[dict[str, object]], fieldnames: list[str] | None = None) -> None:
@@ -576,10 +622,10 @@ def _decision_text(summary_rows: list[dict[str, object]]) -> tuple[str, list[str
         "mdd_breach_35_rate": agg(aggressive_rows, "mdd_breach_35_rate"),
     }
     if b == a:
-        decision = "Candidates are indistinguishable in this run; check scoring isolation."
+        decision = "Candidates are indistinguishable; candidate scoring isolation must be checked."
         rationale = [
             "baseline_old and aggressive_hybrid_v4 are exactly tied across aggregated robustness metrics.",
-            "Candidates are indistinguishable in this run; check scoring isolation.",
+            "Candidates are indistinguishable; candidate scoring isolation must be checked.",
         ]
         return decision, rationale
 
@@ -660,7 +706,7 @@ def main() -> None:
     if not benchmark_by_date:
         raise ValueError("benchmark return series is empty")
 
-    candidate_score_snapshots: dict[str, tuple[str, list[str]]] = {}
+    candidate_score_snapshots: dict[str, str] = {}
     score_signatures: list[dict[str, object]] = []
     warnings: list[str] = []
     for candidate in CANDIDATES:
@@ -673,8 +719,10 @@ def main() -> None:
             universe_size=100,
             universe_lookback_days=20,
         )
-        score_signatures.append(_collect_score_signature(conn, candidate.scoring_profile))
-        candidate_score_snapshots[candidate.name] = _snapshot_candidate_scores(conn, candidate)
+        score_signatures.append(_build_score_signature(conn, candidate.scoring_profile))
+        snapshot_table = f"tmp_final_scores_{_sanitize_identifier(candidate.name)}"
+        _snapshot_daily_scores(conn, snapshot_table)
+        candidate_score_snapshots[candidate.name] = snapshot_table
 
     signatures_by_profile = {str(s["scoring_profile"]): s for s in score_signatures}
     old_sig = signatures_by_profile.get("old")
@@ -696,8 +744,8 @@ def main() -> None:
     full_start = trading_dates[0]
     full_end = trading_dates[-1]
     for candidate in CANDIDATES:
-        snapshot_table, columns = candidate_score_snapshots[candidate.name]
-        _restore_candidate_scores(conn, snapshot_table, columns)
+        snapshot_table = candidate_score_snapshots[candidate.name]
+        _restore_daily_scores(conn, snapshot_table)
         result = _run_candidate_backtest(conn, candidate, full_start, full_end, benchmark_by_date)
         full_period_rows.append(
             {
@@ -756,8 +804,8 @@ def main() -> None:
                     if not end:
                         continue
                     for candidate in CANDIDATES:
-                        snapshot_table, columns = candidate_score_snapshots[candidate.name]
-                        _restore_candidate_scores(conn, snapshot_table, columns)
+                        snapshot_table = candidate_score_snapshots[candidate.name]
+                        _restore_daily_scores(conn, snapshot_table)
                         r = _run_candidate_backtest(conn, candidate, start, end, benchmark_by_date)
                         window_rows.append(
                             {
@@ -778,6 +826,16 @@ def main() -> None:
                             }
                         )
 
+    isolation_check: dict[str, object] = {
+        "status": "not_run",
+        "message": "window validation skipped",
+        "paired_window_count": 0,
+        "max_abs_diff": {"total_return": None, "excess_return": None, "max_drawdown": None},
+        "monthly_strategy_return_max_abs_diff": None,
+        "windows_identical": False,
+        "monthly_identical": False,
+        "tolerance": 1e-12,
+    }
     if not args.allow_smoke:
         if not window_rows:
             raise ValueError("final mode requires window_results.csv rows (robustness_rows_loaded=0 is forbidden)")
@@ -786,10 +844,11 @@ def main() -> None:
             raise ValueError(f"window results must include both candidates, got={candidates_in_window}")
         if any(r.get("benchmark_return") is None for r in window_rows):
             raise ValueError("benchmark_return missing in window rows")
-        if _all_comparable_windows_identical(window_rows):
-            raise ValueError("candidate outputs are identical across all windows; scoring isolation failure likely")
-    elif window_rows and _all_comparable_windows_identical(window_rows):
-        warnings.append("candidate outputs are identical across all windows; scoring isolation failure likely")
+        isolation_check = _validate_candidate_outputs_not_identical(window_rows, allow_smoke=False, monthly_rows=monthly_rows)
+    elif window_rows:
+        isolation_check = _validate_candidate_outputs_not_identical(window_rows, allow_smoke=True, monthly_rows=monthly_rows)
+        if isolation_check["status"] == "warn":
+            warnings.append(str(isolation_check["message"]))
 
     summary_rows = _build_candidate_summary(window_rows) if window_rows else []
     worst_rows = _build_worst_windows(window_rows) if window_rows else []
@@ -903,7 +962,7 @@ def main() -> None:
     ])
     for sig in score_signatures:
         report_lines.append(
-            f"- scoring_profile={sig['scoring_profile']}, rows={sig['row_count']}, first={sig['first_score_date']}, last={sig['last_score_date']}, samples={json.dumps(sig['top10_symbols_by_sample_date'], ensure_ascii=False)}"
+            f"- scoring_profile={sig['scoring_profile']}, rows={sig['row_count']}, first={sig['first_score_date']}, middle={sig.get('middle_score_date')}, last={sig['last_score_date']}, samples={json.dumps(sig['top10_symbols_by_sample_date'], ensure_ascii=False)}"
         )
 
     report_lines.extend([
@@ -958,6 +1017,18 @@ def main() -> None:
             )
     else:
         report_lines.append("- unavailable")
+
+    report_lines.extend([
+        "",
+        "## Candidate scoring isolation check",
+        f"- status: {isolation_check['status']}",
+        f"- message: {isolation_check['message']}",
+        f"- paired_window_count: {isolation_check['paired_window_count']}",
+        f"- max_abs_diff_total_return: {float(isolation_check['max_abs_diff']['total_return']):.12g}" if isolation_check['max_abs_diff']['total_return'] is not None else "- max_abs_diff_total_return: unavailable",
+        f"- max_abs_diff_excess_return: {float(isolation_check['max_abs_diff']['excess_return']):.12g}" if isolation_check['max_abs_diff']['excess_return'] is not None else "- max_abs_diff_excess_return: unavailable",
+        f"- max_abs_diff_max_drawdown: {float(isolation_check['max_abs_diff']['max_drawdown']):.12g}" if isolation_check['max_abs_diff']['max_drawdown'] is not None else "- max_abs_diff_max_drawdown: unavailable",
+        f"- monthly_strategy_return_max_abs_diff: {float(isolation_check['monthly_strategy_return_max_abs_diff']):.12g}" if isolation_check['monthly_strategy_return_max_abs_diff'] is not None else "- monthly_strategy_return_max_abs_diff: unavailable",
+    ])
 
     report_lines.extend(["", "## Production decision", f"- decision: {decision}"])
     report_lines.extend([f"- {line}" for line in decision_rationale])
@@ -1024,6 +1095,7 @@ def main() -> None:
             "plots": plots,
         },
         "score_signatures": score_signatures,
+        "candidate_scoring_isolation_check": isolation_check,
         "warnings": warnings,
     }
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
