@@ -1588,9 +1588,14 @@ python scripts/build_kospi_sector_map.py \
   --universe-file data/kospi_valid_universe_495.csv \
   --output data/kospi_sector_map.csv \
   --source auto \
+  --as-of-date 2026-04-25 \
   --overwrite
 ```
 
-- `--source auto`는 `FinanceDataReader -> pykrx -> universe-file(manual)` 순서로 메타데이터를 보강합니다.
+- `--source auto`는 `pykrx 업종지수 -> FinanceDataReader -> universe-file(manual)` 순서로 메타데이터를 보강합니다.
+- `--as-of-date`는 `YYYY-MM-DD` 또는 `YYYYMMDD`를 지원합니다. 미지정 시 최근 평일 기준으로 조회하고, 실패하면 `universe-file`의 `validation_end_date` 최대값 기준으로 재시도합니다.
+- pykrx는 KOSPI 업종지수 구성종목(`get_index_ticker_list / get_index_portfolio_deposit_file`)을 사용해 sector를 매핑합니다.
+- 여러 업종지수에 동시에 포함된 종목은 `sector_candidates`에 후보를 모두 기록하고, 우선순위 업종 1개를 `sector`로 선택하며 `mapping_status=conflict_resolved`로 표시합니다.
 - 외부 조회 실패 시에도 각 종목은 `fallback-sector`(기본: `UNKNOWN`)으로 채워져 출력됩니다.
 - 실행 마지막 줄에 `KOSPI_SECTOR_MAP_JSON={...}` 요약이 출력됩니다.
+- `symbol` 컬럼은 모든 CSV에서 6자리 문자열(`zfill(6)`)로 정규화되고, writer는 전체 컬럼 quoting을 사용합니다. pandas에서 재로드할 때는 `dtype={"symbol": str}` 권장.
