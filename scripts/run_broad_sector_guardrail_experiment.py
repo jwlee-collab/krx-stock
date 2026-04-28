@@ -78,6 +78,18 @@ def _max_drawdown(equities: list[float]) -> float:
     return worst
 
 
+def _quantile(values: list[float], q: float) -> float:
+    if not values:
+        raise ValueError("quantile requires non-empty values")
+    vals = sorted(values)
+    idx = (len(vals) - 1) * q
+    lo = math.floor(idx)
+    hi = math.ceil(idx)
+    if lo == hi:
+        return vals[lo]
+    return vals[lo] + (vals[hi] - vals[lo]) * (idx - lo)
+
+
 def _add_months(d: date, months: int) -> date:
     total = (d.year * 12 + (d.month - 1)) + months
     return date(total // 12, (total % 12) + 1, 1)
@@ -291,6 +303,19 @@ def _resolve_reference_baseline_rows(
     return summary_baseline, full_baseline
 
 
+def _resolve_reference_baseline_window_rows(
+    reference_dir: Path, *, eval_frequency: str, horizon_months: int
+) -> list[dict[str, str]]:
+    window_rows = _read_csv_rows(reference_dir / "window_results.csv")
+    return [
+        r
+        for r in window_rows
+        if str(r.get("candidate")) == "baseline_old"
+        and str(r.get("eval_frequency")) == str(eval_frequency)
+        and int(r.get("horizon_months", 0)) == int(horizon_months)
+    ]
+
+
 def _compare_metric_rows(
     *,
     left: dict[str, object],
@@ -401,6 +426,9 @@ def _simulate_candidate(
     dates: list[str],
     symbol_to_sector: dict[str, str],
     candidate: Candidate,
+    *,
+    start_date: str | None = None,
+    end_date: str | None = None,
 ) -> dict[str, object]:
     top_n = 5
     min_holding_days = 10
@@ -419,8 +447,9 @@ def _simulate_candidate(
     prev_d0: str | None = None
     turnover_rows: list[float] = []
 
-    for i in range(len(dates) - 1):
-        d0 = dates[i]; d1 = dates[i + 1]
+    run_dates = [d for d in dates if (start_date is None or d >= start_date) and (end_date is None or d <= end_date)]
+    for i in range(len(run_dates) - 1):
+        d0 = run_dates[i]; d1 = run_dates[i + 1]
         curr_week = datetime.strptime(d0, "%Y-%m-%d").date().isocalendar()[:2]
         prev_week = datetime.strptime(prev_d0, "%Y-%m-%d").date().isocalendar()[:2] if prev_d0 else None
         should_rebalance = prev_week is None or curr_week != prev_week
@@ -562,6 +591,40 @@ def _simulate_candidate(
     }
 
 
+def _build_summary_row_from_window_rows(candidate: Candidate, eval_frequency: str, horizon_months: int, rows_local: list[dict[str, object]]) -> dict[str, object]:
+    exs = [float(r["excess_return"]) for r in rows_local]
+    mdds = [float(r["max_drawdown"]) for r in rows_local]
+    return {
+        "candidate": candidate.name,
+        "scoring_profile": candidate.scoring_profile,
+        "guardrail_type": candidate.guardrail_type,
+        "max_names_per_broad_sector": candidate.max_names_per_broad_sector,
+        "soft_penalty_lambda": candidate.soft_penalty_lambda,
+        "eval_frequency": eval_frequency,
+        "horizon_months": horizon_months,
+        "n_windows": len(rows_local),
+        "mean_total_return": mean([float(r["total_return"]) for r in rows_local]),
+        "mean_benchmark_return": mean([float(r["benchmark_return"]) for r in rows_local]),
+        "mean_excess_return": mean(exs),
+        "median_excess_return": median(exs),
+        "p25_excess_return": _quantile(exs, 0.25),
+        "win_vs_benchmark": mean([int(r["win_vs_benchmark"]) for r in rows_local]),
+        "worst_total_return": min([float(r["total_return"]) for r in rows_local]),
+        "worst_excess_return": min(exs),
+        "worst_mdd": min(mdds),
+        "mdd_breach_30_rate": mean([1 if m <= -0.30 else 0 for m in mdds]),
+        "mdd_breach_35_rate": mean([1 if m <= -0.35 else 0 for m in mdds]),
+        "mean_turnover": mean([float(r["turnover"]) for r in rows_local]),
+        "avg_position_count": mean([float(r["avg_position_count"]) for r in rows_local]),
+        "avg_cash_weight": mean([float(r["avg_cash_weight"]) for r in rows_local]),
+        "max_single_weight_observed": max([float(r["max_single_weight_observed"]) for r in rows_local]),
+        "max_broad_sector_weight_observed": max([float(r["max_broad_sector_weight_observed"]) for r in rows_local]),
+        "avg_broad_sector_hhi": mean([float(r["avg_broad_sector_hhi"]) for r in rows_local]),
+        "max_broad_sector_hhi": max([float(r["max_broad_sector_hhi"]) for r in rows_local]),
+        "sector_cap_violation_count": sum([int(r["sector_cap_violation_count"]) for r in rows_local]),
+    }
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description="Run broad sector guardrail experiment for KOSPI final candidates")
     p.add_argument("--db", default="data/kospi_495_rolling_3y.db")
@@ -674,6 +737,33 @@ def main() -> None:
     if not benchmark_by_date:
         raise ValueError("benchmark return series is empty")
 
+    default_window_bounds: dict[tuple[str, int], list[tuple[str, str]]] = {}
+    for ef in eval_freqs:
+        starts = _window_starts(dates, ef)
+        for hz in horizons:
+            bounds: list[tuple[str, str]] = []
+            for s in starts:
+                e = _resolve_window_end(s, hz, dates)
+                if e:
+                    bounds.append((s, e))
+            default_window_bounds[(ef, hz)] = bounds
+
+    reference_window_bounds: dict[tuple[str, int], list[tuple[str, str]]] = {}
+    if args.reference_final_report_dir:
+        ref_dir_for_bounds = Path(args.reference_final_report_dir)
+        for ef in eval_freqs:
+            for hz in horizons:
+                ref_rows = _resolve_reference_baseline_window_rows(
+                    ref_dir_for_bounds,
+                    eval_frequency=ef,
+                    horizon_months=hz,
+                )
+                if ref_rows:
+                    reference_window_bounds[(ef, hz)] = [
+                        (str(r["start_date"]), str(r["end_date"]))
+                        for r in ref_rows
+                    ]
+
     profile_score_snapshots: dict[str, str] = {}
     score_signatures: dict[str, dict[str, object]] = {}
     for sp in sorted({c.scoring_profile for c in candidates}):
@@ -746,24 +836,30 @@ def main() -> None:
 
         for ef in eval_freqs:
             for hz in horizons:
-                starts = _window_starts(dates, ef)
                 rows_local = []
-                for s in starts:
-                    e = _resolve_window_end(s, hz, dates)
-                    if not e:
-                        continue
-                    seg = [r for r in daily if s < str(r["date"]) <= e]
+                bounds = default_window_bounds.get((ef, hz), [])
+                if c.guardrail_type == "none" and c.scoring_profile == "old" and (ef, hz) in reference_window_bounds:
+                    bounds = reference_window_bounds[(ef, hz)]
+                for s, e in bounds:
+                    sim_window = _simulate_candidate(
+                        conn,
+                        dates,
+                        symbol_to_sector,
+                        c,
+                        start_date=s,
+                        end_date=e,
+                    )
+                    seg = sim_window["daily"]
                     if not seg:
                         continue
-                    seq = [1.0]
+                    eqs_window = [100000.0] + [float(r["equity"]) for r in seg]
+                    tr = _safe_div(eqs_window[-1] - eqs_window[0], eqs_window[0])
                     bq = 1.0
                     for r in seg:
-                        seq.append(seq[-1] * (1.0 + float(r["daily_return"])))
                         bq *= (1.0 + benchmark_by_date.get(str(r["date"]), 0.0))
-                    tr = seq[-1] - 1.0
                     br = bq - 1.0
                     ex = tr - br
-                    mdd = _max_drawdown(seq)
+                    mdd = _max_drawdown(eqs_window)
                     max_bsw = max((float(r["max_broad_sector_weight"]) for r in seg), default=0.0)
                     cap_violation = 0
                     if c.guardrail_type == "hard_cap" and c.max_names_per_broad_sector == 2 and max_bsw > (0.4 + CAP_TOLERANCE):
@@ -785,7 +881,7 @@ def main() -> None:
                         "excess_return": ex,
                         "max_drawdown": mdd,
                         "win_vs_benchmark": int(ex > 0),
-                        "turnover": sim["mean_turnover"],
+                        "turnover": sim_window["mean_turnover"],
                         "avg_position_count": mean([int(x["position_count"]) for x in seg]),
                         "avg_cash_weight": mean([float(x["cash_weight"]) for x in seg]),
                         "max_single_weight_observed": max((float(x["max_single_weight"]) for x in seg), default=0.0),
@@ -797,36 +893,7 @@ def main() -> None:
                     rows_local.append(wr)
                     window_rows.append(wr)
                 if rows_local:
-                    exs = [float(r["excess_return"]) for r in rows_local]
-                    srow = {
-                        "candidate": c.name,
-                        "scoring_profile": c.scoring_profile,
-                        "guardrail_type": c.guardrail_type,
-                        "max_names_per_broad_sector": c.max_names_per_broad_sector,
-                        "soft_penalty_lambda": c.soft_penalty_lambda,
-                        "eval_frequency": ef,
-                        "horizon_months": hz,
-                        "n_windows": len(rows_local),
-                        "mean_total_return": mean([float(r["total_return"]) for r in rows_local]),
-                        "mean_benchmark_return": mean([float(r["benchmark_return"]) for r in rows_local]),
-                        "mean_excess_return": mean(exs),
-                        "median_excess_return": median(exs),
-                        "p25_excess_return": sorted(exs)[max(0, int(len(exs) * 0.25) - 1)],
-                        "win_vs_benchmark": mean([int(r["win_vs_benchmark"]) for r in rows_local]),
-                        "worst_total_return": min([float(r["total_return"]) for r in rows_local]),
-                        "worst_excess_return": min(exs),
-                        "worst_mdd": min([float(r["max_drawdown"]) for r in rows_local]),
-                        "mdd_breach_30_rate": mean([1 if float(r["max_drawdown"]) <= -0.30 else 0 for r in rows_local]),
-                        "mdd_breach_35_rate": mean([1 if float(r["max_drawdown"]) <= -0.35 else 0 for r in rows_local]),
-                        "mean_turnover": mean([float(r["turnover"]) for r in rows_local]),
-                        "avg_position_count": mean([float(r["avg_position_count"]) for r in rows_local]),
-                        "avg_cash_weight": mean([float(r["avg_cash_weight"]) for r in rows_local]),
-                        "max_single_weight_observed": max([float(r["max_single_weight_observed"]) for r in rows_local]),
-                        "max_broad_sector_weight_observed": max([float(r["max_broad_sector_weight_observed"]) for r in rows_local]),
-                        "avg_broad_sector_hhi": mean([float(r["avg_broad_sector_hhi"]) for r in rows_local]),
-                        "max_broad_sector_hhi": max([float(r["max_broad_sector_hhi"]) for r in rows_local]),
-                        "sector_cap_violation_count": sum([int(r["sector_cap_violation_count"]) for r in rows_local]),
-                    }
+                    srow = _build_summary_row_from_window_rows(c, ef, hz, rows_local)
                     summary_rows.append(srow)
                     compliance_rows.append(
                         {
@@ -876,6 +943,9 @@ def main() -> None:
         "candidate": "baseline_old_no_sector_guardrail",
         "reference_final_report_dir": args.reference_final_report_dir,
         "tolerance": PARITY_TOLERANCE,
+        "no_cap_window_parity_diff_csv": None,
+        "no_cap_reference_window_results_csv": None,
+        "no_cap_guardrail_window_results_csv": None,
         "no_cap_parity_diff_csv": None,
         "no_cap_reference_summary_row_csv": None,
         "no_cap_guardrail_summary_row_csv": None,
@@ -897,10 +967,68 @@ def main() -> None:
             eval_frequency="quarterly",
             horizon_months=12,
         )
+        ref_window_rows = _resolve_reference_baseline_window_rows(
+            ref_dir,
+            eval_frequency="quarterly",
+            horizon_months=12,
+        )
         ref_full_baseline_row = ref_full_baseline if ref_full_baseline is not None else {}
         ref_summary_row = ref_summary if ref_summary is not None else {}
+        no_cap_window_rows = [
+            r
+            for r in window_rows
+            if str(r.get("candidate")) == "baseline_old_no_sector_guardrail"
+            and str(r.get("eval_frequency")) == "quarterly"
+            and int(r.get("horizon_months", 0)) == 12
+        ]
+        no_cap_window_map = {
+            (str(r.get("start_date")), str(r.get("end_date"))): r
+            for r in no_cap_window_rows
+        }
 
         full_metrics = ["total_return", "benchmark_return", "excess_return", "max_drawdown", "max_single_weight_observed"]
+        window_metrics = ["total_return", "benchmark_return", "excess_return", "max_drawdown", "max_single_weight_observed"]
+
+        window_diff_rows: list[dict[str, object]] = []
+        for ref_row in ref_window_rows:
+            key = (str(ref_row.get("start_date")), str(ref_row.get("end_date")))
+            guardrail_row = no_cap_window_map.get(key, {})
+            for metric in window_metrics:
+                ref_has = metric in ref_row
+                guard_has = metric in guardrail_row
+                if not ref_has or not guard_has:
+                    status = "FAIL_MISSING_GUARDRAIL_COLUMN" if ref_has and not guard_has else "FAIL_MISSING_REFERENCE_COLUMN"
+                    window_diff_rows.append(
+                        {
+                            "eval_frequency": "quarterly",
+                            "horizon_months": 12,
+                            "start_date": key[0],
+                            "end_date": key[1],
+                            "metric": metric,
+                            "reference_value": float(ref_row[metric]) if ref_has else None,
+                            "guardrail_value": float(guardrail_row[metric]) if guard_has else None,
+                            "abs_diff": None,
+                            "status": status,
+                        }
+                    )
+                    continue
+                rv = float(ref_row[metric])
+                gv = float(guardrail_row[metric])
+                diff = abs(rv - gv)
+                window_diff_rows.append(
+                    {
+                        "eval_frequency": "quarterly",
+                        "horizon_months": 12,
+                        "start_date": key[0],
+                        "end_date": key[1],
+                        "metric": metric,
+                        "reference_value": rv,
+                        "guardrail_value": gv,
+                        "abs_diff": diff,
+                        "status": "PASS" if diff <= PARITY_TOLERANCE else "FAIL",
+                    }
+                )
+
         full_diffs = _compare_metric_rows(
             left=no_cap_full,
             right=ref_full_baseline_row,
@@ -921,17 +1049,16 @@ def main() -> None:
             "mdd_breach_35_rate",
             "max_single_weight_observed",
         ]
-        no_cap_summary = next(
-            (
-                r
-                for r in summary_rows
-                if str(r.get("candidate")) == "baseline_old_no_sector_guardrail"
-                and str(r.get("eval_frequency")) == "quarterly"
-                and int(r.get("horizon_months", 0)) == 12
-            ),
-            None,
+        no_cap_summary_row = (
+            _build_summary_row_from_window_rows(
+                Candidate("baseline_old_no_sector_guardrail", "old", "none", None, None),
+                "quarterly",
+                12,
+                no_cap_window_rows,
+            )
+            if no_cap_window_rows
+            else {}
         )
-        no_cap_summary_row = no_cap_summary if no_cap_summary is not None else {}
         summary_diffs = _compare_metric_rows(
             left=no_cap_summary_row,
             right=ref_summary_row,
@@ -940,8 +1067,20 @@ def main() -> None:
         )
 
         parity_diff_rows: list[dict[str, object]] = []
-        for scope, diffs in [("summary_q12", summary_diffs), ("full_period", full_diffs)]:
+        for scope, diffs in [("window_q12", window_diff_rows), ("summary_q12", summary_diffs), ("full_period", full_diffs)]:
             for d in diffs:
+                if scope == "window_q12":
+                    parity_diff_rows.append(
+                        {
+                            "scope": scope,
+                            "metric": d["metric"],
+                            "reference_value": d["reference_value"],
+                            "guardrail_value": d["guardrail_value"],
+                            "abs_diff": d["abs_diff"],
+                            "status": d["status"],
+                        }
+                    )
+                    continue
                 missing_column = bool(d.get("missing_column"))
                 if missing_column:
                     if not d.get("left_has_key", False):
@@ -976,10 +1115,14 @@ def main() -> None:
             and ref_old_signature.get("top10_symbols_by_sample_date") == local_old_signature.get("top10_symbols_by_sample_date")
         )
 
+        window_ok = bool(window_diff_rows) and all(str(d.get("status")) == "PASS" for d in window_diff_rows)
         full_ok = all(bool(d["within_tolerance"]) for d in full_diffs)
         summary_ok = bool(summary_diffs) and all(bool(d["within_tolerance"]) for d in summary_diffs)
-        parity_ok = full_ok and summary_ok
+        parity_ok = window_ok and full_ok and summary_ok
         parity_diff_csv = outdir / "no_cap_parity_diff.csv"
+        no_cap_window_parity_diff_csv = outdir / "no_cap_window_parity_diff.csv"
+        no_cap_reference_window_results_csv = outdir / "no_cap_reference_window_results.csv"
+        no_cap_guardrail_window_results_csv = outdir / "no_cap_guardrail_window_results.csv"
         no_cap_reference_summary_row_csv = outdir / "no_cap_reference_summary_row.csv"
         no_cap_guardrail_summary_row_csv = outdir / "no_cap_guardrail_summary_row.csv"
         no_cap_reference_full_period_row_csv = outdir / "no_cap_reference_full_period_row.csv"
@@ -987,6 +1130,9 @@ def main() -> None:
         no_cap_reference_row_csv = outdir / "no_cap_reference_row.csv"
         no_cap_guardrail_row_csv = outdir / "no_cap_guardrail_row.csv"
         no_cap_parity_debug_json = outdir / "no_cap_parity_debug.json"
+        _write_csv("no_cap_window_parity_diff.csv", window_diff_rows)
+        _write_csv("no_cap_reference_window_results.csv", ref_window_rows)
+        _write_csv("no_cap_guardrail_window_results.csv", no_cap_window_rows)
         _write_csv("no_cap_parity_diff.csv", parity_diff_rows)
         _write_single_row_csv(no_cap_reference_summary_row_csv, ref_summary_row)
         _write_single_row_csv(no_cap_guardrail_summary_row_csv, no_cap_summary_row)
@@ -997,8 +1143,11 @@ def main() -> None:
         _write_single_row_csv(no_cap_guardrail_row_csv, no_cap_full)
         parity_debug_payload = {
             "status": "passed" if (parity_ok and signature_match) else "failed",
+            "window_q12_reference_found": bool(ref_window_rows),
+            "window_q12_guardrail_found": bool(no_cap_window_rows),
+            "window_q12_metric_diffs": window_diff_rows,
             "summary_q12_reference_found": ref_summary is not None,
-            "summary_q12_guardrail_found": no_cap_summary is not None,
+            "summary_q12_guardrail_found": bool(no_cap_summary_row),
             "summary_q12_metric_diffs": summary_diffs,
             "full_period_metric_diffs": full_diffs,
             "score_signature_reference_old": ref_old_signature,
@@ -1006,6 +1155,9 @@ def main() -> None:
             "score_signature_match": signature_match,
             "reference_final_report_dir": str(ref_dir),
             "tolerance": PARITY_TOLERANCE,
+            "no_cap_window_parity_diff_csv": str(no_cap_window_parity_diff_csv),
+            "no_cap_reference_window_results_csv": str(no_cap_reference_window_results_csv),
+            "no_cap_guardrail_window_results_csv": str(no_cap_guardrail_window_results_csv),
             "no_cap_reference_summary_row_csv": str(no_cap_reference_summary_row_csv),
             "no_cap_guardrail_summary_row_csv": str(no_cap_guardrail_summary_row_csv),
             "no_cap_reference_full_period_row_csv": str(no_cap_reference_full_period_row_csv),
@@ -1015,12 +1167,28 @@ def main() -> None:
             json.dumps(parity_debug_payload, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+        _print_parity_diff_table(
+            [
+                {
+                    "scope": f'window_q12 {r["start_date"]}->{r["end_date"]}',
+                    "metric": r["metric"],
+                    "reference_value": r["reference_value"],
+                    "guardrail_value": r["guardrail_value"],
+                    "abs_diff": r["abs_diff"],
+                    "status": r["status"],
+                }
+                for r in window_diff_rows
+            ]
+        )
         _print_parity_diff_table(parity_diff_rows)
         no_cap_baseline_parity_check = {
             "status": "passed" if (parity_ok and signature_match) else "failed",
             "candidate": "baseline_old_no_sector_guardrail",
             "reference_final_report_dir": str(ref_dir),
             "tolerance": PARITY_TOLERANCE,
+            "no_cap_window_parity_diff_csv": str(no_cap_window_parity_diff_csv),
+            "no_cap_reference_window_results_csv": str(no_cap_reference_window_results_csv),
+            "no_cap_guardrail_window_results_csv": str(no_cap_guardrail_window_results_csv),
             "no_cap_parity_diff_csv": str(parity_diff_csv),
             "no_cap_reference_summary_row_csv": str(no_cap_reference_summary_row_csv),
             "no_cap_guardrail_summary_row_csv": str(no_cap_guardrail_summary_row_csv),
@@ -1030,8 +1198,11 @@ def main() -> None:
             "no_cap_guardrail_row_csv": str(no_cap_guardrail_row_csv),
             "no_cap_parity_debug_json": str(no_cap_parity_debug_json),
             "score_signature_match": signature_match,
+            "window_q12_reference_found": bool(ref_window_rows),
+            "window_q12_guardrail_found": bool(no_cap_window_rows),
+            "window_q12_metric_diffs": window_diff_rows,
             "summary_q12_reference_found": ref_summary is not None,
-            "summary_q12_guardrail_found": no_cap_summary is not None,
+            "summary_q12_guardrail_found": bool(no_cap_summary_row),
             "summary_q12_metric_diffs": summary_diffs,
             "full_period_metric_diffs": full_diffs,
         }
