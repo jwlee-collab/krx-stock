@@ -79,6 +79,8 @@ def main() -> None:
     p.add_argument("--require-above-sma60", action="store_true")
     p.add_argument("--enable-position-stop-loss", action="store_true")
     p.add_argument("--position-stop-loss-pct", type=float, default=0.08)
+    p.add_argument("--stop-loss-cash-mode", choices=["rebalance_remaining", "keep_cash"], default="rebalance_remaining")
+    p.add_argument("--stop-loss-cooldown-days", type=int, default=0)
     p.add_argument("--enable-trailing-stop", action="store_true")
     p.add_argument("--trailing-stop-pct", type=float, default=0.10)
     p.add_argument("--enable-portfolio-dd-cut", action="store_true")
@@ -251,6 +253,8 @@ def main() -> None:
         require_above_sma60=args.require_above_sma60,
         enable_position_stop_loss=args.enable_position_stop_loss,
         position_stop_loss_pct=args.position_stop_loss_pct,
+        stop_loss_cash_mode=args.stop_loss_cash_mode,
+        stop_loss_cooldown_days=args.stop_loss_cooldown_days,
         enable_trailing_stop=args.enable_trailing_stop,
         trailing_stop_pct=args.trailing_stop_pct,
         enable_portfolio_dd_cut=args.enable_portfolio_dd_cut,
@@ -274,7 +278,11 @@ def main() -> None:
                trailing_stop_count,
                portfolio_dd_cut_count,
                portfolio_dd_cooldown_days_count,
-               risk_cut_cash_days
+               risk_cut_cash_days,
+               average_cash_weight,
+               average_exposure,
+               min_exposure,
+               max_single_position_weight
         FROM backtest_runs
         WHERE run_id=?
         """,
@@ -342,6 +350,8 @@ def main() -> None:
         "risk_cut": {
             "enable_position_stop_loss": args.enable_position_stop_loss,
             "position_stop_loss_pct": args.position_stop_loss_pct,
+            "stop_loss_cash_mode": args.stop_loss_cash_mode,
+            "stop_loss_cooldown_days": args.stop_loss_cooldown_days,
             "enable_trailing_stop": args.enable_trailing_stop,
             "trailing_stop_pct": args.trailing_stop_pct,
             "enable_portfolio_dd_cut": args.enable_portfolio_dd_cut,
@@ -353,6 +363,10 @@ def main() -> None:
                 "portfolio_dd_cut_count": int(market_filter_summary_row["portfolio_dd_cut_count"]) if market_filter_summary_row else 0,
                 "portfolio_dd_cooldown_days_count": int(market_filter_summary_row["portfolio_dd_cooldown_days_count"]) if market_filter_summary_row else 0,
                 "risk_cut_cash_days": int(market_filter_summary_row["risk_cut_cash_days"]) if market_filter_summary_row else 0,
+                "average_cash_weight": float(market_filter_summary_row["average_cash_weight"]) if market_filter_summary_row else 0.0,
+                "average_exposure": float(market_filter_summary_row["average_exposure"]) if market_filter_summary_row else 0.0,
+                "min_exposure": float(market_filter_summary_row["min_exposure"]) if market_filter_summary_row else 0.0,
+                "max_single_position_weight": float(market_filter_summary_row["max_single_position_weight"]) if market_filter_summary_row else 0.0,
             },
         },
     }

@@ -41,6 +41,8 @@ class EvaluationConfig:
     market_filter_mode: str
     position_stop_loss_enabled: int
     position_stop_loss_pct: float | None
+    stop_loss_cash_mode: str
+    stop_loss_cooldown_days: int
     portfolio_dd_cut_enabled: int
     portfolio_dd_cut_pct: float | None
     portfolio_dd_cooldown_days: int
@@ -68,6 +70,8 @@ class WindowResult:
     benchmark_mode: str
     position_stop_loss_enabled: int
     position_stop_loss_pct: float | None
+    stop_loss_cash_mode: str
+    stop_loss_cooldown_days: int
     portfolio_dd_cut_enabled: int
     portfolio_dd_cut_pct: float | None
     portfolio_dd_cooldown_days: int
@@ -102,6 +106,8 @@ class StrategySummary:
     benchmark_mode: str
     position_stop_loss_enabled: int
     position_stop_loss_pct: float | None
+    stop_loss_cash_mode: str
+    stop_loss_cooldown_days: int
     portfolio_dd_cut_enabled: int
     portfolio_dd_cut_pct: float | None
     portfolio_dd_cooldown_days: int
@@ -268,6 +274,12 @@ def _table_columns(conn: sqlite3.Connection, table: str) -> list[str]:
     return [r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()]
 
 
+def _ensure_column(conn: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
+    cols = set(_table_columns(conn, table))
+    if column not in cols:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
+
+
 def _ensure_tables(conn: sqlite3.Connection, reset: bool = False) -> None:
     tables = [
         "start_window_robustness_results",
@@ -313,6 +325,8 @@ def _ensure_tables(conn: sqlite3.Connection, reset: bool = False) -> None:
             benchmark_mode TEXT NOT NULL,
             position_stop_loss_enabled INTEGER NOT NULL,
             position_stop_loss_pct REAL,
+            stop_loss_cash_mode TEXT NOT NULL DEFAULT 'rebalance_remaining',
+            stop_loss_cooldown_days INTEGER NOT NULL DEFAULT 0,
             portfolio_dd_cut_enabled INTEGER NOT NULL,
             portfolio_dd_cut_pct REAL,
             portfolio_dd_cooldown_days INTEGER NOT NULL,
@@ -348,6 +362,8 @@ def _ensure_tables(conn: sqlite3.Connection, reset: bool = False) -> None:
             benchmark_mode TEXT NOT NULL,
             position_stop_loss_enabled INTEGER NOT NULL,
             position_stop_loss_pct REAL,
+            stop_loss_cash_mode TEXT NOT NULL DEFAULT 'rebalance_remaining',
+            stop_loss_cooldown_days INTEGER NOT NULL DEFAULT 0,
             portfolio_dd_cut_enabled INTEGER NOT NULL,
             portfolio_dd_cut_pct REAL,
             portfolio_dd_cooldown_days INTEGER NOT NULL,
@@ -397,6 +413,31 @@ def _ensure_tables(conn: sqlite3.Connection, reset: bool = False) -> None:
             "Incompatible existing start_window_robustness_results schema. "
             f"Missing columns: {sorted(missing)}. Use --reset-start-window-tables for development DB reset."
         )
+    _ensure_column(
+        conn,
+        "start_window_robustness_results",
+        "stop_loss_cash_mode",
+        "stop_loss_cash_mode TEXT NOT NULL DEFAULT 'rebalance_remaining'",
+    )
+    _ensure_column(
+        conn,
+        "start_window_robustness_results",
+        "stop_loss_cooldown_days",
+        "stop_loss_cooldown_days INTEGER NOT NULL DEFAULT 0",
+    )
+    _ensure_column(
+        conn,
+        "start_window_robustness_strategy_summary",
+        "stop_loss_cash_mode",
+        "stop_loss_cash_mode TEXT NOT NULL DEFAULT 'rebalance_remaining'",
+    )
+    _ensure_column(
+        conn,
+        "start_window_robustness_strategy_summary",
+        "stop_loss_cooldown_days",
+        "stop_loss_cooldown_days INTEGER NOT NULL DEFAULT 0",
+    )
+    conn.commit()
 
 
 def main() -> None:
@@ -433,6 +474,8 @@ def main() -> None:
     p.add_argument("--require-above-sma60", action="store_true")
     p.add_argument("--position-stop-loss-modes", default="off,on")
     p.add_argument("--position-stop-loss-pcts", default="")
+    p.add_argument("--stop-loss-cash-modes", default="rebalance_remaining")
+    p.add_argument("--stop-loss-cooldown-days-values", default="0")
     p.add_argument("--portfolio-dd-cut-modes", default="off,on")
     p.add_argument("--portfolio-dd-cut-pcts", default="")
     p.add_argument("--portfolio-dd-cooldown-days-values", default="20")
@@ -475,6 +518,11 @@ def main() -> None:
     entry_modes = [x.lower() for x in _parse_str_list(args.entry_gate_modes)]
     market_filter_modes = [x.lower() for x in _parse_str_list(args.market_filter_modes)]
     pos_sl_grid = _parse_toggle_pcts(args.position_stop_loss_pcts, args.position_stop_loss_modes, "position-stop-loss")
+    stop_loss_cash_modes = _parse_str_list(args.stop_loss_cash_modes)
+    stop_loss_cooldown_days_values = _parse_int_list(args.stop_loss_cooldown_days_values)
+    for mode in stop_loss_cash_modes:
+        if mode not in {"rebalance_remaining", "keep_cash"}:
+            raise ValueError(f"invalid stop-loss cash mode: {mode}")
     dd_cut_grid = _parse_toggle_pcts(args.portfolio_dd_cut_pcts, args.portfolio_dd_cut_modes, "portfolio-dd-cut")
     dd_cooldowns = _parse_int_list(args.portfolio_dd_cooldown_days_values)
 
@@ -500,29 +548,34 @@ def main() -> None:
                         for entry_mode in entry_modes:
                             for market_filter_mode in market_filter_modes:
                                 for sl_enabled, sl_pct in pos_sl_grid:
-                                    for dd_enabled, dd_pct in dd_cut_grid:
-                                        for cooldown in dd_cooldowns:
-                                            cfg = EvaluationConfig(
-                                                config_id=(
-                                                    f"top={top_n}|hold={min_holding_days}|keep={keep_threshold}|score={scoring_version}|"
-                                                    f"scope={market_scope}|entry={entry_mode}|mf={market_filter_mode}|"
-                                                    f"pos_sl={sl_enabled}:{sl_pct}|dd_cut={dd_enabled}:{dd_pct}|dd_cd={cooldown}"
-                                                ),
-                                                top_n=top_n,
-                                                min_holding_days=min_holding_days,
-                                                keep_rank_offset=keep_offset,
-                                                keep_rank_threshold=keep_threshold,
-                                                scoring_version=scoring_version,
-                                                market_scope=market_scope,
-                                                entry_gate_mode=entry_mode,
-                                                market_filter_mode=market_filter_mode,
-                                                position_stop_loss_enabled=sl_enabled,
-                                                position_stop_loss_pct=sl_pct,
-                                                portfolio_dd_cut_enabled=dd_enabled,
-                                                portfolio_dd_cut_pct=dd_pct,
-                                                portfolio_dd_cooldown_days=cooldown,
-                                            )
-                                            configs.append(cfg)
+                                    for stop_loss_cash_mode in stop_loss_cash_modes:
+                                        for stop_loss_cooldown_days in stop_loss_cooldown_days_values:
+                                            for dd_enabled, dd_pct in dd_cut_grid:
+                                                for cooldown in dd_cooldowns:
+                                                    cfg = EvaluationConfig(
+                                                        config_id=(
+                                                            f"top={top_n}|hold={min_holding_days}|keep={keep_threshold}|score={scoring_version}|"
+                                                            f"scope={market_scope}|entry={entry_mode}|mf={market_filter_mode}|"
+                                                            f"pos_sl={sl_enabled}:{sl_pct}|sl_cash={stop_loss_cash_mode}|"
+                                                            f"sl_cd={stop_loss_cooldown_days}|dd_cut={dd_enabled}:{dd_pct}|dd_cd={cooldown}"
+                                                        ),
+                                                        top_n=top_n,
+                                                        min_holding_days=min_holding_days,
+                                                        keep_rank_offset=keep_offset,
+                                                        keep_rank_threshold=keep_threshold,
+                                                        scoring_version=scoring_version,
+                                                        market_scope=market_scope,
+                                                        entry_gate_mode=entry_mode,
+                                                        market_filter_mode=market_filter_mode,
+                                                        position_stop_loss_enabled=sl_enabled,
+                                                        position_stop_loss_pct=sl_pct,
+                                                        stop_loss_cash_mode=stop_loss_cash_mode,
+                                                        stop_loss_cooldown_days=stop_loss_cooldown_days,
+                                                        portfolio_dd_cut_enabled=dd_enabled,
+                                                        portfolio_dd_cut_pct=dd_pct,
+                                                        portfolio_dd_cooldown_days=cooldown,
+                                                    )
+                                                    configs.append(cfg)
 
     generated_profiles: set[tuple[str, str]] = set()
     batch_id = str(uuid.uuid4())
@@ -560,6 +613,8 @@ def main() -> None:
                             market_filter_mode=cfg.market_filter_mode, benchmark_mode=args.benchmark_mode,
                             position_stop_loss_enabled=cfg.position_stop_loss_enabled,
                             position_stop_loss_pct=cfg.position_stop_loss_pct,
+                            stop_loss_cash_mode=cfg.stop_loss_cash_mode,
+                            stop_loss_cooldown_days=cfg.stop_loss_cooldown_days,
                             portfolio_dd_cut_enabled=cfg.portfolio_dd_cut_enabled,
                             portfolio_dd_cut_pct=cfg.portfolio_dd_cut_pct,
                             portfolio_dd_cooldown_days=cfg.portfolio_dd_cooldown_days,
@@ -605,6 +660,8 @@ def main() -> None:
                     market_filter_mode=cfg.market_filter_mode, benchmark_mode=args.benchmark_mode,
                     position_stop_loss_enabled=cfg.position_stop_loss_enabled,
                     position_stop_loss_pct=cfg.position_stop_loss_pct,
+                    stop_loss_cash_mode=cfg.stop_loss_cash_mode,
+                    stop_loss_cooldown_days=cfg.stop_loss_cooldown_days,
                     portfolio_dd_cut_enabled=cfg.portfolio_dd_cut_enabled,
                     portfolio_dd_cut_pct=cfg.portfolio_dd_cut_pct,
                     portfolio_dd_cooldown_days=cfg.portfolio_dd_cooldown_days,
@@ -708,6 +765,8 @@ def main() -> None:
                         require_above_sma60=args.require_above_sma60,
                         enable_position_stop_loss=bool(cfg.position_stop_loss_enabled),
                         position_stop_loss_pct=(cfg.position_stop_loss_pct or 0.1),
+                        stop_loss_cash_mode=cfg.stop_loss_cash_mode,
+                        stop_loss_cooldown_days=cfg.stop_loss_cooldown_days,
                         enable_portfolio_dd_cut=bool(cfg.portfolio_dd_cut_enabled),
                         portfolio_dd_cut_pct=(cfg.portfolio_dd_cut_pct or 0.1),
                         portfolio_dd_cooldown_days=cfg.portfolio_dd_cooldown_days,
@@ -824,6 +883,8 @@ def main() -> None:
                 benchmark_mode=cfg.benchmark_mode,
                 position_stop_loss_enabled=cfg.position_stop_loss_enabled,
                 position_stop_loss_pct=cfg.position_stop_loss_pct,
+                stop_loss_cash_mode=cfg.stop_loss_cash_mode,
+                stop_loss_cooldown_days=cfg.stop_loss_cooldown_days,
                 portfolio_dd_cut_enabled=cfg.portfolio_dd_cut_enabled,
                 portfolio_dd_cut_pct=cfg.portfolio_dd_cut_pct,
                 portfolio_dd_cooldown_days=cfg.portfolio_dd_cooldown_days,
