@@ -122,6 +122,7 @@ def _load_sector_map(path: Path | None) -> tuple[dict[str, dict[str, str]], dict
         "exists": bool(path and path.exists()),
         "symbol_column": None,
         "sector_column": None,
+        "broad_sector_column": None,
         "name_column": None,
         "mapped_symbols": 0,
     }
@@ -138,9 +139,11 @@ def _load_sector_map(path: Path | None) -> tuple[dict[str, dict[str, str]], dict
     symbol_col = lower_map.get("symbol")
     sector_col = lower_map.get("sector")
     industry_col = lower_map.get("industry")
+    broad_sector_col = lower_map.get("broad_sector")
     name_col = lower_map.get("name")
     status["symbol_column"] = symbol_col
     status["sector_column"] = sector_col or industry_col
+    status["broad_sector_column"] = broad_sector_col
     status["name_column"] = name_col
 
     if symbol_col is None:
@@ -159,6 +162,7 @@ def _load_sector_map(path: Path | None) -> tuple[dict[str, dict[str, str]], dict
         name = (row.get(name_col) if name_col else None) or ""
         result[symbol] = {
             "sector": str(sector).strip() or "UNKNOWN",
+            "broad_sector": str((row.get(broad_sector_col) if broad_sector_col else "") or "").strip() or "UNKNOWN",
             "name": str(name).strip(),
         }
 
@@ -317,6 +321,7 @@ def _aggregate_candidate(
     holdings: list[dict[str, Any]],
     sector_map: dict[str, dict[str, str]],
     stop_counts: dict[str, int],
+    group_key: str = "sector",
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], dict[str, float]]:
     per_symbol: dict[str, dict[str, Any]] = {}
     per_date_sector_weight: dict[tuple[str, str], float] = defaultdict(float)
@@ -324,14 +329,16 @@ def _aggregate_candidate(
 
     for row in holdings:
         symbol = row["symbol"]
-        meta = sector_map.get(symbol, {"sector": "UNKNOWN", "name": ""})
+        meta = sector_map.get(symbol, {"sector": "UNKNOWN", "broad_sector": "UNKNOWN", "name": ""})
         sector = meta.get("sector", "UNKNOWN") or "UNKNOWN"
+        broad_sector = meta.get("broad_sector", "UNKNOWN") or "UNKNOWN"
+        group_value = broad_sector if group_key == "broad_sector" else sector
         date = row["date"]
         weight = row["weight"]
         uret = row["unrealized_return"]
         contrib = weight * uret
 
-        key = (date, sector)
+        key = (date, group_value)
         per_date_sector_weight[key] += weight
         per_date_sector_symbols[key].add(symbol)
 
@@ -345,6 +352,7 @@ def _aggregate_candidate(
                 "symbol": symbol,
                 "name": meta.get("name", ""),
                 "sector": sector,
+                "broad_sector": broad_sector,
                 "dates": [],
                 "weights": [],
                 "unrealized_returns": [],
@@ -368,11 +376,12 @@ def _aggregate_candidate(
             "symbol": symbol,
             "name": rec["name"],
             "sector": rec["sector"],
+            "broad_sector": rec["broad_sector"],
             "holding_days": len(dates),
             "first_holding_date": dates[0] if dates else None,
             "last_holding_date": dates[-1] if dates else None,
-            "avg_weight": _mean(rec["weights"]),
-            "max_weight": max(rec["weights"]) if rec["weights"] else 0.0,
+            "avg_holding_weight": _mean(rec["weights"]),
+            "max_holding_weight": max(rec["weights"]) if rec["weights"] else 0.0,
             "avg_unrealized_return": _mean(rec["unrealized_returns"]),
             "min_unrealized_return": min(rec["unrealized_returns"]) if rec["unrealized_returns"] else 0.0,
             "max_unrealized_return": max(rec["unrealized_returns"]) if rec["unrealized_returns"] else 0.0,
@@ -380,13 +389,13 @@ def _aggregate_candidate(
             "stop_loss_count": stop_counts.get(symbol, 0),
         }
         symbol_rows.append(row)
-        sector_group[row["sector"]].append(row)
+        sector_group[row[group_key]].append(row)
 
-    total_avg_weight = sum(sum(float(s["avg_weight"]) for s in group) for group in sector_group.values())
+    total_avg_weight = sum(sum(float(s["avg_holding_weight"]) for s in group) for group in sector_group.values())
     sector_concentration_score_by_sector: dict[str, float] = {}
     if total_avg_weight > 0:
         for sector, group in sector_group.items():
-            share = sum(float(s["avg_weight"]) for s in group) / total_avg_weight
+            share = sum(float(s["avg_holding_weight"]) for s in group) / total_avg_weight
             sector_concentration_score_by_sector[sector] = share * share
     else:
         for sector in sector_group:
@@ -404,11 +413,11 @@ def _aggregate_candidate(
                 "run_id": run_id,
                 "focus_start_date": start,
                 "focus_end_date": end,
-                "sector": sector,
+                group_key: sector,
                 "holding_days": sum(int(r["holding_days"]) for r in group),
                 "symbol_count": len(group),
-                "avg_weight": _mean([float(r["avg_weight"]) for r in group]),
-                "max_weight": max(float(r["max_weight"]) for r in group),
+                "avg_holding_weight": _mean([float(r["avg_holding_weight"]) for r in group]),
+                "max_holding_weight": max(float(r["max_holding_weight"]) for r in group),
                 "avg_unrealized_return": _mean(all_unrealized),
                 "min_unrealized_return": min(all_unrealized) if all_unrealized else 0.0,
                 "max_unrealized_return": max(all_unrealized) if all_unrealized else 0.0,
@@ -417,6 +426,8 @@ def _aggregate_candidate(
                 "positive_contribution_sum": sum(positives),
                 "stop_loss_count": sum(int(r["stop_loss_count"]) for r in group),
                 "sector_concentration_score": sector_concentration_score_by_sector[sector],
+                "avg_sector_weight": 0.0,
+                "max_sector_weight": 0.0,
             }
         )
 
@@ -437,11 +448,19 @@ def _aggregate_candidate(
                 "date": date,
                 "candidate": candidate,
                 "run_id": run_id,
-                "sector": sector,
+                group_key: sector,
                 "sector_weight": sector_weight,
                 "symbol_count": len(per_date_sector_symbols[(date, sector)]),
             }
         )
+
+    sector_weight_stats: dict[str, list[float]] = defaultdict(list)
+    for row in daily_sector_exposure:
+        sector_weight_stats[str(row[group_key])].append(float(row["sector_weight"]))
+    for row in summary_rows:
+        weights = sector_weight_stats.get(str(row[group_key]), [])
+        row["avg_sector_weight"] = _mean(weights)
+        row["max_sector_weight"] = max(weights) if weights else 0.0
 
     candidate_metrics = {
         "max_sector_weight": max_sector_weight,
@@ -469,6 +488,7 @@ def _sector_comparison(
     summary_rows: list[dict[str, Any]],
     daily_rows: list[dict[str, Any]],
     focus_map: dict[str, FocusWindow],
+    group_key: str = "sector",
 ) -> list[dict[str, Any]]:
     baseline = "baseline_old"
     aggressive = "aggressive_hybrid_v4"
@@ -484,7 +504,7 @@ def _sector_comparison(
 
     by_candidate_sector: dict[tuple[str, str], dict[str, Any]] = {}
     for row in summary_rows:
-        by_candidate_sector[(row["candidate"], row["sector"])] = row
+        by_candidate_sector[(row["candidate"], str(row[group_key]))] = row
 
     daily_hhi_by_candidate: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
     daily_sector_weight: dict[tuple[str, str], list[float]] = defaultdict(list)
@@ -493,12 +513,12 @@ def _sector_comparison(
         date = row["date"]
         if overlap_available and not (overlap_start <= date <= overlap_end):
             continue
-        sector = row["sector"]
+        sector = str(row[group_key])
         weight = float(row["sector_weight"])
         daily_hhi_by_candidate[candidate][date] += weight * weight
         daily_sector_weight[(candidate, sector)].append(weight)
 
-    sectors = sorted({r["sector"] for r in summary_rows if r["candidate"] in {baseline, aggressive}})
+    sectors = sorted({str(r[group_key]) for r in summary_rows if r["candidate"] in {baseline, aggressive}})
     rows: list[dict[str, Any]] = []
     for sector in sectors:
         b_summary = by_candidate_sector.get((baseline, sector), {})
@@ -508,7 +528,7 @@ def _sector_comparison(
 
         rows.append(
             {
-                "sector": sector,
+                group_key: sector,
                 "baseline_focus_start": b_focus.focus_start_date,
                 "baseline_focus_end": b_focus.focus_end_date,
                 "aggressive_focus_start": a_focus.focus_start_date,
@@ -531,6 +551,7 @@ def _stress_summary(
     full_run_ids: dict[str, str | None],
     selected_candidates: list[str],
     sector_map: dict[str, dict[str, str]],
+    group_key: str = "sector",
 ) -> list[dict[str, Any]]:
     periods = [
         ("2024-07", "2024-07-01", "2024-07-31"),
@@ -554,7 +575,8 @@ def _stress_summary(
             by_sector_symbols: dict[str, set[str]] = defaultdict(set)
             for row in holdings:
                 symbol = row["symbol"]
-                sector = sector_map.get(symbol, {}).get("sector", "UNKNOWN") or "UNKNOWN"
+                meta = sector_map.get(symbol, {})
+                sector = str(meta.get(group_key) or "UNKNOWN")
                 by_sector_weights[sector].append(row["weight"])
                 by_sector_contrib[sector] += row["weight"] * row["unrealized_return"]
                 by_sector_symbols[sector].add(symbol)
@@ -564,7 +586,7 @@ def _stress_summary(
                     {
                         "candidate": candidate,
                         "period": label,
-                        "sector": sector,
+                        group_key: sector,
                         "avg_weight": _mean(weights),
                         "max_weight": max(weights) if weights else 0.0,
                         "estimated_contribution": by_sector_contrib[sector],
@@ -582,10 +604,24 @@ def _build_report_markdown(
     symbol_rows: list[dict[str, Any]],
     comparison_rows: list[dict[str, Any]],
     stress_rows: list[dict[str, Any]],
+    broad_summary_rows: list[dict[str, Any]],
+    broad_symbol_rows: list[dict[str, Any]],
+    broad_comparison_rows: list[dict[str, Any]],
+    broad_stress_rows: list[dict[str, Any]],
     sector_status: dict[str, Any],
     warnings: list[str],
     candidate_metrics: dict[str, dict[str, float]],
 ) -> str:
+    unknown_level = "OK"
+    unknown_ratio = 0.0
+    unknown_rows = symbol_rows if symbol_rows else broad_symbol_rows
+    if unknown_rows:
+        unknown_ratio = sum(1 for row in unknown_rows if str(row.get("sector")) == "UNKNOWN") / len(unknown_rows)
+    if unknown_ratio >= 0.8:
+        unknown_level = "UNUSABLE"
+    elif unknown_ratio >= 0.2:
+        unknown_level = "CAUTION"
+
     lines: list[str] = [
         "# Sector Attribution Report",
         "",
@@ -595,6 +631,7 @@ def _build_report_markdown(
         f"- db: {args.db}",
         f"- candidate_scope: {args.candidate}",
         f"- attribution_note: 본 리포트의 estimated_contribution은 weight * unrealized_return의 진단용 근사치이며, 회계 P&L과 다를 수 있습니다.",
+        f"- unknown_sector_ratio(holdings): {unknown_ratio:.2%} ({unknown_level})",
     ]
     for warning in warnings:
         lines.append(f"- warning: {warning}")
@@ -609,7 +646,7 @@ def _build_report_markdown(
     ]
 
     lines += ["", "## Sector file status", f"- sector_file: {args.sector_file}"]
-    for key in ["provided", "exists", "symbol_column", "sector_column", "name_column", "mapped_symbols"]:
+    for key in ["provided", "exists", "symbol_column", "sector_column", "broad_sector_column", "name_column", "mapped_symbols"]:
         lines.append(f"- {key}: {sector_status.get(key)}")
 
     lines += ["", "## Focus windows selected"]
@@ -624,7 +661,7 @@ def _build_report_markdown(
             f"- {candidate}: max_sector_weight={metrics.get('max_sector_weight', 0.0):.4f}, avg_sector_hhi={metrics.get('avg_sector_hhi', 0.0):.4f}, max_sector_hhi={metrics.get('max_sector_hhi', 0.0):.4f}"
         )
 
-    lines += ["", "## Loss contribution by sector"]
+    lines += ["", "## Detailed sector findings"]
     for candidate in sorted({row["candidate"] for row in summary_rows}):
         lines.append(f"### {candidate}")
         worst = sorted([r for r in summary_rows if r["candidate"] == candidate], key=lambda x: float(x["estimated_contribution"]))[:8]
@@ -633,7 +670,16 @@ def _build_report_markdown(
             continue
         for row in worst:
             lines.append(
-                f"- {row['sector']}: est_contrib={float(row['estimated_contribution']):.4f}, neg_sum={float(row['negative_contribution_sum']):.4f}, avg_weight={float(row['avg_weight']):.4f}"
+                f"- {row['sector']}: est_contrib={float(row['estimated_contribution']):.4f}, neg_sum={float(row['negative_contribution_sum']):.4f}, avg_sector_weight={float(row['avg_sector_weight']):.4f}"
+            )
+
+    lines += ["", "## Broad sector findings"]
+    for candidate in sorted({row["candidate"] for row in broad_summary_rows}):
+        lines.append(f"### {candidate}")
+        worst = sorted([r for r in broad_summary_rows if r["candidate"] == candidate], key=lambda x: float(x["estimated_contribution"]))[:8]
+        for row in worst:
+            lines.append(
+                f"- {row['broad_sector']}: est_contrib={float(row['estimated_contribution']):.4f}, avg_sector_weight={float(row['avg_sector_weight']):.4f}, max_sector_weight={float(row['max_sector_weight']):.4f}"
             )
 
     lines += ["", "## Worst symbols by estimated contribution"]
@@ -648,35 +694,39 @@ def _build_report_markdown(
             continue
         for row in worst_symbols:
             lines.append(
-                f"- {row['symbol']} ({row['sector']}): est_contrib={float(row['estimated_contribution']):.4f}, avg_weight={float(row['avg_weight']):.4f}, stop_loss={int(row['stop_loss_count'])}"
+                f"- {row['symbol']} ({row['sector']} / {row['broad_sector']}): est_contrib={float(row['estimated_contribution']):.4f}, avg_holding_weight={float(row['avg_holding_weight']):.4f}, stop_loss={int(row['stop_loss_count'])}"
             )
 
-    lines += ["", "## 2024 stress sector attribution"]
-    if not stress_rows:
+    lines += ["", "## 2024 stress broad sector attribution"]
+    if not broad_stress_rows:
         lines.append("- no rows")
     else:
-        for candidate in sorted({r["candidate"] for r in stress_rows}):
+        for candidate in sorted({r["candidate"] for r in broad_stress_rows}):
             lines.append(f"### {candidate}")
-            subset = [r for r in stress_rows if r["candidate"] == candidate and r["period"] in {"2024-07", "2024-08", "2024-09"}]
+            subset = [r for r in broad_stress_rows if r["candidate"] == candidate and r["period"] in {"2024-07", "2024-08", "2024-09"}]
             worst = sorted(subset, key=lambda x: float(x["estimated_contribution"]))[:8]
             for row in worst:
                 lines.append(
-                    f"- {row['period']} / {row['sector']}: est_contrib={float(row['estimated_contribution']):.4f}, avg_weight={float(row['avg_weight']):.4f}"
+                    f"- {row['period']} / {row['broad_sector']}: est_contrib={float(row['estimated_contribution']):.4f}, avg_weight={float(row['avg_weight']):.4f}"
                 )
 
-    lines += ["", "## Baseline_old vs aggressive_hybrid_v4 sector difference"]
-    if not comparison_rows:
+    lines += ["", "## Aggressive_hybrid_v4 vs baseline_old broad sector difference"]
+    lines.append("- note: candidate focus windows differ; contribution_delta is diagnostic, not apples-to-apples unless overlap window is used.")
+    if not broad_comparison_rows:
         lines.append("- comparison unavailable (candidate scope or overlap 부족)")
     else:
-        for row in sorted(comparison_rows, key=lambda x: float(x["estimated_contribution_delta"]))[:12]:
+        for row in sorted(broad_comparison_rows, key=lambda x: float(x["estimated_contribution_delta"]))[:12]:
             lines.append(
-                f"- {row['sector']}: avg_weight_delta={float(row['avg_sector_weight_delta']):+.4f}, max_weight_delta={float(row['max_sector_weight_delta']):+.4f}, est_contrib_delta={float(row['estimated_contribution_delta']):+.4f}, hhi_delta={float(row['sector_hhi_delta']):+.4f}"
+                f"- {row['broad_sector']}: avg_weight_delta={float(row['avg_sector_weight_delta']):+.4f}, max_weight_delta={float(row['max_sector_weight_delta']):+.4f}, est_contrib_delta={float(row['estimated_contribution_delta']):+.4f}, hhi_delta={float(row['sector_hhi_delta']):+.4f}"
             )
 
     lines += ["", "## Interpretation"]
-    unknown_only = summary_rows and all(row["sector"] == "UNKNOWN" for row in summary_rows)
-    if unknown_only:
-        lines.append("- 모든 섹터가 UNKNOWN으로 분류되어 있어, 우선 sector mapping 데이터 확보가 필요합니다.")
+    if unknown_level == "UNUSABLE":
+        lines.append("- UNKNOWN 비중이 80% 이상으로 sector map 품질이 낮아 해석이 불가능합니다.")
+    elif unknown_level == "CAUTION":
+        lines.append("- UNKNOWN 비중이 20~80% 구간으로 해석 시 주의가 필요합니다.")
+    else:
+        lines.append("- UNKNOWN 비중이 20% 미만으로 섹터 해석 품질은 양호(OK)합니다.")
 
     for candidate in sorted({row["candidate"] for row in symbol_rows}):
         top5 = sorted([r for r in symbol_rows if r["candidate"] == candidate], key=lambda x: float(x["estimated_contribution"]))[:5]
@@ -686,13 +736,6 @@ def _build_report_markdown(
         concentrated = [sector for sector, cnt in sector_count.items() if cnt >= 3]
         for sector in concentrated:
             lines.append(f"- {candidate}: top5 worst symbols 중 {sector}가 3개 이상으로 집중 리스크가 큽니다.")
-
-    for row in comparison_rows:
-        if float(row["avg_sector_weight_delta"]) > 0 and float(row["estimated_contribution_delta"]) < 0:
-            lines.append(
-                f"- aggressive_hybrid_v4가 {row['sector']}에서 baseline_old 대비 집중도↑ 및 손실기여↑ 패턴을 보여 baseline 승격 보류 근거가 됩니다."
-            )
-            break
 
     baseline_loss = {r["sector"] for r in summary_rows if r["candidate"] == "baseline_old" and float(r["estimated_contribution"]) < 0}
     aggressive_loss = {
@@ -713,9 +756,10 @@ def _build_report_markdown(
     lines += [
         "",
         "## Next recommended experiments",
-        "- 진단 결과 상위 손실 섹터를 기준으로 sector cap(soft cap 포함) A/B 실험.",
-        "- ranking 점수에 sector soft penalty를 소규모로 도입한 민감도 테스트.",
-        "- 공통 손실 섹터가 유지되면 regime filter 및 유동성/유니버스 재점검 실험.",
+        "- broad sector cap 실험.",
+        "- broad sector soft penalty 실험.",
+        "- cost/benchmark stress 실험.",
+        "- regime filter는 후순위.",
     ]
 
     return "\n".join(lines) + "\n"
@@ -731,6 +775,7 @@ def main() -> None:
     parser.add_argument("--focus-start-date")
     parser.add_argument("--focus-end-date")
     parser.add_argument("--top-n", type=int, default=30)
+    parser.add_argument("--group-by", choices=["sector", "broad_sector", "both"], default="both")
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
 
@@ -767,6 +812,8 @@ def main() -> None:
 
     sector_file = Path(args.sector_file) if args.sector_file else None
     sector_map, sector_status, warnings = _load_sector_map(sector_file)
+    do_sector = args.group_by in {"sector", "both"}
+    do_broad = args.group_by in {"broad_sector", "both"}
 
     conn = sqlite3.connect(args.db)
     conn.row_factory = sqlite3.Row
@@ -777,6 +824,9 @@ def main() -> None:
     summary_rows: list[dict[str, Any]] = []
     symbol_rows: list[dict[str, Any]] = []
     daily_rows: list[dict[str, Any]] = []
+    broad_summary_rows: list[dict[str, Any]] = []
+    broad_symbol_rows: list[dict[str, Any]] = []
+    broad_daily_rows: list[dict[str, Any]] = []
     candidate_metrics: dict[str, dict[str, float]] = {}
 
     for candidate in selected_candidates:
@@ -817,28 +867,51 @@ def main() -> None:
             continue
 
         stop_counts = _load_stop_loss_counts(conn, run_id, focus.focus_start_date, focus.focus_end_date)
-        c_summary, c_symbols, c_daily, c_metrics = _aggregate_candidate(
-            candidate,
-            run_id,
-            focus.focus_start_date,
-            focus.focus_end_date,
-            holdings,
-            sector_map,
-            stop_counts,
-        )
-        summary_rows.extend(c_summary)
-        symbol_rows.extend(c_symbols)
-        daily_rows.extend(c_daily)
-        candidate_metrics[candidate] = c_metrics
+        if do_sector:
+            c_summary, c_symbols, c_daily, c_metrics = _aggregate_candidate(
+                candidate,
+                run_id,
+                focus.focus_start_date,
+                focus.focus_end_date,
+                holdings,
+                sector_map,
+                stop_counts,
+                group_key="sector",
+            )
+            summary_rows.extend(c_summary)
+            symbol_rows.extend(c_symbols)
+            daily_rows.extend(c_daily)
+            candidate_metrics[candidate] = c_metrics
+        if do_broad:
+            b_summary, b_symbols, b_daily, _ = _aggregate_candidate(
+                candidate,
+                run_id,
+                focus.focus_start_date,
+                focus.focus_end_date,
+                holdings,
+                sector_map,
+                stop_counts,
+                group_key="broad_sector",
+            )
+            broad_summary_rows.extend(b_summary)
+            broad_symbol_rows.extend(b_symbols)
+            broad_daily_rows.extend(b_daily)
 
+    unknown_base_rows = symbol_rows if symbol_rows else broad_symbol_rows
     unknown_symbol_ratio = 0.0
-    if symbol_rows:
-        unknown_symbol_ratio = sum(1 for row in symbol_rows if row["sector"] == "UNKNOWN") / len(symbol_rows)
-        if unknown_symbol_ratio >= 0.5:
-            warnings.append(f"UNKNOWN sector ratio is high ({unknown_symbol_ratio:.2%})")
+    if unknown_base_rows:
+        unknown_symbol_ratio = sum(1 for row in unknown_base_rows if row["sector"] == "UNKNOWN") / len(unknown_base_rows)
+        if unknown_symbol_ratio >= 0.8:
+            warnings.append(f"UNKNOWN sector ratio is unusable ({unknown_symbol_ratio:.2%})")
+        elif unknown_symbol_ratio >= 0.2:
+            warnings.append(f"UNKNOWN sector ratio requires caution ({unknown_symbol_ratio:.2%})")
 
-    comparison_rows = _sector_comparison(summary_rows, daily_rows, focus_by_candidate)
-    stress_rows = _stress_summary(conn, full_run_ids, selected_candidates, sector_map)
+    comparison_rows = _sector_comparison(summary_rows, daily_rows, focus_by_candidate, group_key="sector") if do_sector else []
+    stress_rows = _stress_summary(conn, full_run_ids, selected_candidates, sector_map, group_key="sector") if do_sector else []
+    broad_comparison_rows = (
+        _sector_comparison(broad_summary_rows, broad_daily_rows, focus_by_candidate, group_key="broad_sector") if do_broad else []
+    )
+    broad_stress_rows = _stress_summary(conn, full_run_ids, selected_candidates, sector_map, group_key="broad_sector") if do_broad else []
 
     focus_csv_rows = [
         {
@@ -868,10 +941,11 @@ def main() -> None:
             "worst_metric",
         ],
     )
-    _write_csv(
-        output_dir / "sector_attribution_summary.csv",
-        summary_rows,
-        [
+    if do_sector:
+        _write_csv(
+            output_dir / "sector_attribution_summary.csv",
+            summary_rows,
+            [
             "candidate",
             "run_id",
             "focus_start_date",
@@ -879,8 +953,10 @@ def main() -> None:
             "sector",
             "holding_days",
             "symbol_count",
-            "avg_weight",
-            "max_weight",
+            "avg_holding_weight",
+            "max_holding_weight",
+            "avg_sector_weight",
+            "max_sector_weight",
             "avg_unrealized_return",
             "min_unrealized_return",
             "max_unrealized_return",
@@ -889,12 +965,12 @@ def main() -> None:
             "positive_contribution_sum",
             "stop_loss_count",
             "sector_concentration_score",
-        ],
-    )
-    _write_csv(
-        output_dir / "sector_symbol_attribution.csv",
-        sorted(symbol_rows, key=lambda x: float(x["estimated_contribution"])),
-        [
+            ],
+        )
+        _write_csv(
+            output_dir / "sector_symbol_attribution.csv",
+            sorted(symbol_rows, key=lambda x: float(x["estimated_contribution"])),
+            [
             "candidate",
             "run_id",
             "focus_start_date",
@@ -902,27 +978,106 @@ def main() -> None:
             "symbol",
             "name",
             "sector",
+            "broad_sector",
             "holding_days",
             "first_holding_date",
             "last_holding_date",
-            "avg_weight",
-            "max_weight",
+            "avg_holding_weight",
+            "max_holding_weight",
             "avg_unrealized_return",
             "min_unrealized_return",
             "max_unrealized_return",
             "estimated_contribution",
             "stop_loss_count",
-        ],
-    )
-    _write_csv(
-        output_dir / "daily_sector_exposure.csv",
-        daily_rows,
-        ["date", "candidate", "run_id", "sector", "sector_weight", "symbol_count"],
-    )
-    _write_csv(
-        output_dir / "sector_comparison.csv",
-        comparison_rows,
-        [
+            ],
+        )
+        _write_csv(
+            output_dir / "daily_sector_exposure.csv",
+            daily_rows,
+            ["date", "candidate", "run_id", "sector", "sector_weight", "symbol_count"],
+        )
+    if do_broad:
+        _write_csv(
+            output_dir / "broad_sector_attribution_summary.csv",
+            broad_summary_rows,
+            [
+                "candidate",
+                "run_id",
+                "focus_start_date",
+                "focus_end_date",
+                "broad_sector",
+                "holding_days",
+                "symbol_count",
+                "avg_holding_weight",
+                "max_holding_weight",
+                "avg_sector_weight",
+                "max_sector_weight",
+                "avg_unrealized_return",
+                "min_unrealized_return",
+                "max_unrealized_return",
+                "estimated_contribution",
+                "negative_contribution_sum",
+                "positive_contribution_sum",
+                "stop_loss_count",
+                "sector_concentration_score",
+            ],
+        )
+        _write_csv(
+            output_dir / "broad_sector_symbol_attribution.csv",
+            sorted(broad_symbol_rows, key=lambda x: float(x["estimated_contribution"])),
+            [
+                "candidate",
+                "run_id",
+                "focus_start_date",
+                "focus_end_date",
+                "symbol",
+                "name",
+                "sector",
+                "broad_sector",
+                "holding_days",
+                "first_holding_date",
+                "last_holding_date",
+                "avg_holding_weight",
+                "max_holding_weight",
+                "avg_unrealized_return",
+                "min_unrealized_return",
+                "max_unrealized_return",
+                "estimated_contribution",
+                "stop_loss_count",
+            ],
+        )
+        _write_csv(
+            output_dir / "daily_broad_sector_exposure.csv",
+            broad_daily_rows,
+            ["date", "candidate", "run_id", "broad_sector", "sector_weight", "symbol_count"],
+        )
+        _write_csv(
+            output_dir / "broad_sector_comparison.csv",
+            broad_comparison_rows,
+            [
+                "broad_sector",
+                "baseline_focus_start",
+                "baseline_focus_end",
+                "aggressive_focus_start",
+                "aggressive_focus_end",
+                "overlap_start",
+                "overlap_end",
+                "avg_sector_weight_delta",
+                "max_sector_weight_delta",
+                "estimated_contribution_delta",
+                "sector_hhi_delta",
+            ],
+        )
+        _write_csv(
+            output_dir / "broad_sector_2024_stress_summary.csv",
+            broad_stress_rows,
+            ["candidate", "period", "broad_sector", "avg_weight", "max_weight", "estimated_contribution", "symbol_count"],
+        )
+    if do_sector:
+        _write_csv(
+            output_dir / "sector_comparison.csv",
+            comparison_rows,
+            [
             "sector",
             "baseline_focus_start",
             "baseline_focus_end",
@@ -934,13 +1089,13 @@ def main() -> None:
             "max_sector_weight_delta",
             "estimated_contribution_delta",
             "sector_hhi_delta",
-        ],
-    )
-    _write_csv(
-        output_dir / "sector_2024_stress_summary.csv",
-        stress_rows,
-        ["candidate", "period", "sector", "avg_weight", "max_weight", "estimated_contribution", "symbol_count"],
-    )
+            ],
+        )
+        _write_csv(
+            output_dir / "sector_2024_stress_summary.csv",
+            stress_rows,
+            ["candidate", "period", "sector", "avg_weight", "max_weight", "estimated_contribution", "symbol_count"],
+        )
 
     report_text = _build_report_markdown(
         args,
@@ -950,6 +1105,10 @@ def main() -> None:
         symbol_rows,
         comparison_rows,
         stress_rows,
+        broad_summary_rows,
+        broad_symbol_rows,
+        broad_comparison_rows,
+        broad_stress_rows,
         sector_status,
         warnings,
         candidate_metrics,
@@ -958,6 +1117,32 @@ def main() -> None:
     report_path.write_text(report_text, encoding="utf-8")
 
     manifest_path = output_dir / "sector_attribution_manifest.json"
+    output_files = {
+        "sector_focus_windows": str(output_dir / "sector_focus_windows.csv"),
+        "sector_attribution_report": str(report_path),
+        "sector_attribution_manifest": str(manifest_path),
+    }
+    if do_sector:
+        output_files.update(
+            {
+                "sector_attribution_summary": str(output_dir / "sector_attribution_summary.csv"),
+                "sector_symbol_attribution": str(output_dir / "sector_symbol_attribution.csv"),
+                "daily_sector_exposure": str(output_dir / "daily_sector_exposure.csv"),
+                "sector_comparison": str(output_dir / "sector_comparison.csv"),
+                "sector_2024_stress_summary": str(output_dir / "sector_2024_stress_summary.csv"),
+            }
+        )
+    if do_broad:
+        output_files.update(
+            {
+                "broad_sector_attribution_summary": str(output_dir / "broad_sector_attribution_summary.csv"),
+                "broad_sector_symbol_attribution": str(output_dir / "broad_sector_symbol_attribution.csv"),
+                "daily_broad_sector_exposure": str(output_dir / "daily_broad_sector_exposure.csv"),
+                "broad_sector_comparison": str(output_dir / "broad_sector_comparison.csv"),
+                "broad_sector_2024_stress_summary": str(output_dir / "broad_sector_2024_stress_summary.csv"),
+            }
+        )
+
     manifest_payload = {
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "db": args.db,
@@ -969,16 +1154,7 @@ def main() -> None:
         "candidate_metrics": candidate_metrics,
         "warnings": warnings,
         "unknown_symbol_ratio": unknown_symbol_ratio,
-        "output_files": {
-            "sector_focus_windows": str(output_dir / "sector_focus_windows.csv"),
-            "sector_attribution_summary": str(output_dir / "sector_attribution_summary.csv"),
-            "sector_symbol_attribution": str(output_dir / "sector_symbol_attribution.csv"),
-            "daily_sector_exposure": str(output_dir / "daily_sector_exposure.csv"),
-            "sector_comparison": str(output_dir / "sector_comparison.csv"),
-            "sector_2024_stress_summary": str(output_dir / "sector_2024_stress_summary.csv"),
-            "sector_attribution_report": str(report_path),
-            "sector_attribution_manifest": str(manifest_path),
-        },
+        "output_files": output_files,
     }
     manifest_path.write_text(json.dumps(manifest_payload, ensure_ascii=False, indent=2), encoding="utf-8")
 

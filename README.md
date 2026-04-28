@@ -1599,7 +1599,9 @@ python scripts/build_kospi_sector_map.py \
   - 매핑률이 80% 미만이면 warning, 30% 미만이면 `--allow-partial` 없을 때 실패합니다.
 - pykrx는 KOSPI 업종지수 구성종목(`get_index_ticker_list / get_index_portfolio_deposit_file`)을 사용해 sector를 보강합니다.
 - 외부 조회 실패 시에도 각 종목은 `fallback-sector`(기본: `UNKNOWN`)으로 채워져 출력됩니다.
+- 출력 CSV(`data/kospi_sector_map.csv`)에는 `broad_sector` 컬럼이 추가되며, KIND 세부 업종을 실험용 대분류(예: `전기전자/IT하드웨어`, `금융`, `화학/소재` 등)로 매핑합니다.
 - 실행 마지막 줄에 `KOSPI_SECTOR_MAP_JSON={...}` 요약이 출력됩니다.
+  - 요약에는 `broad_sector_count`, `unknown_broad_sector_rows`, `sample_mapped_rows[].broad_sector`가 포함됩니다.
 - `symbol` 컬럼은 모든 CSV에서 6자리 문자열(`zfill(6)`)로 정규화되고, writer는 전체 컬럼 quoting을 사용합니다. pandas에서 재로드할 때는 `dtype={"symbol": str}` 권장.
 
 자동 KIND 방식 예시:
@@ -1617,5 +1619,16 @@ python scripts/build_kospi_sector_map.py --source krx-file --input-sector-file d
 sector attribution 연결:
 
 ```bash
-python scripts/analyze_sector_attribution.py --sector-file data/kospi_sector_map.csv
+python scripts/analyze_sector_attribution.py --sector-file data/kospi_sector_map.csv --group-by both
 ```
+
+- `--group-by`: `sector|broad_sector|both` (기본 `both`)
+  - `sector`: 기존 상세 업종 기준 파일 생성
+  - `broad_sector`: 대분류 업종 기준 파일 생성
+  - `both`: 상세/대분류 모두 생성
+- 추가 산출물(대분류):
+  - `broad_sector_attribution_summary.csv`
+  - `broad_sector_symbol_attribution.csv`
+  - `daily_broad_sector_exposure.csv`
+  - `broad_sector_comparison.csv`
+  - `broad_sector_2024_stress_summary.csv`
