@@ -78,6 +78,17 @@ def _max_drawdown(equities: list[float]) -> float:
     return worst
 
 
+def _drawdown_series(equities: list[float]) -> list[float]:
+    if not equities:
+        return []
+    peak = equities[0]
+    out: list[float] = []
+    for e in equities:
+        peak = max(peak, e)
+        out.append(_safe_div(e - peak, peak))
+    return out
+
+
 def _quantile(values: list[float], q: float) -> float:
     if not values:
         raise ValueError("quantile requires non-empty values")
@@ -809,7 +820,7 @@ def main() -> None:
                 b_eq *= (1.0 + benchmark_by_date.get(str(r["date"]), 0.0))
             monthly_rows.append({"candidate": c.name, "month": m, "strategy_return": s_eq - 1.0, "benchmark_return": b_eq - 1.0})
 
-        eqs = [100000.0] + [float(r["equity"]) for r in daily]
+        eqs = [float(r["equity"]) for r in daily]
         total_return = _safe_div(eqs[-1] - eqs[0], eqs[0])
         bench_eq = 1.0
         for r in daily:
@@ -852,7 +863,7 @@ def main() -> None:
                     seg = sim_window["daily"]
                     if not seg:
                         continue
-                    eqs_window = [100000.0] + [float(r["equity"]) for r in seg]
+                    eqs_window = [float(r["equity"]) for r in seg]
                     tr = _safe_div(eqs_window[-1] - eqs_window[0], eqs_window[0])
                     bq = 1.0
                     for r in seg:
@@ -954,6 +965,7 @@ def main() -> None:
         "no_cap_reference_row_csv": None,
         "no_cap_guardrail_row_csv": None,
         "no_cap_parity_debug_json": None,
+        "no_cap_failing_window_drawdown_debug_csv": None,
     }
     no_cap_rows = [r for r in full_rows if str(r.get("candidate")) == "baseline_old_no_sector_guardrail"]
     if not no_cap_rows:
@@ -1130,6 +1142,7 @@ def main() -> None:
         no_cap_reference_row_csv = outdir / "no_cap_reference_row.csv"
         no_cap_guardrail_row_csv = outdir / "no_cap_guardrail_row.csv"
         no_cap_parity_debug_json = outdir / "no_cap_parity_debug.json"
+        no_cap_failing_window_drawdown_debug_csv = outdir / "no_cap_failing_window_drawdown_debug.csv"
         _write_csv("no_cap_window_parity_diff.csv", window_diff_rows)
         _write_csv("no_cap_reference_window_results.csv", ref_window_rows)
         _write_csv("no_cap_guardrail_window_results.csv", no_cap_window_rows)
@@ -1141,6 +1154,48 @@ def main() -> None:
         # backward compatibility aliases
         _write_single_row_csv(no_cap_reference_row_csv, ref_full_baseline_row)
         _write_single_row_csv(no_cap_guardrail_row_csv, no_cap_full)
+        failing_window_debug_rows: list[dict[str, object]] = []
+        failing_mdd_rows = [r for r in window_diff_rows if str(r.get("status")) == "FAIL" and str(r.get("metric")) == "max_drawdown"]
+        if failing_mdd_rows:
+            fail_window = failing_mdd_rows[0]
+            fw_start = str(fail_window.get("start_date"))
+            fw_end = str(fail_window.get("end_date"))
+            ref_window = next((r for r in ref_window_rows if str(r.get("start_date")) == fw_start and str(r.get("end_date")) == fw_end), None)
+            if ref_window and ref_window.get("run_id"):
+                ref_run_id = int(ref_window["run_id"])
+                ref_daily = conn.execute(
+                    "SELECT date, equity FROM backtest_results WHERE run_id=? ORDER BY date",
+                    (ref_run_id,),
+                ).fetchall()
+                sim_debug = _simulate_candidate(
+                    conn,
+                    dates,
+                    symbol_to_sector,
+                    Candidate("baseline_old_no_sector_guardrail", "old", "none", None, 0.0),
+                    start_date=fw_start,
+                    end_date=fw_end,
+                )
+                grd_daily = list(sim_debug["daily"])
+                ref_eqs = [float(r["equity"]) for r in ref_daily]
+                grd_eqs = [float(r["equity"]) for r in grd_daily]
+                ref_dds = _drawdown_series(ref_eqs)
+                grd_dds = _drawdown_series(grd_eqs)
+                for idx, rr in enumerate(ref_daily):
+                    if idx >= len(grd_eqs):
+                        break
+                    failing_window_debug_rows.append(
+                        {
+                            "date": str(rr["date"]),
+                            "reference_equity": ref_eqs[idx],
+                            "guardrail_equity": grd_eqs[idx],
+                            "reference_drawdown": ref_dds[idx],
+                            "guardrail_drawdown": grd_dds[idx],
+                            "diff_equity": grd_eqs[idx] - ref_eqs[idx],
+                            "diff_drawdown": grd_dds[idx] - ref_dds[idx],
+                        }
+                    )
+        if failing_window_debug_rows:
+            _write_csv("no_cap_failing_window_drawdown_debug.csv", failing_window_debug_rows)
         parity_debug_payload = {
             "status": "passed" if (parity_ok and signature_match) else "failed",
             "window_q12_reference_found": bool(ref_window_rows),
@@ -1162,6 +1217,7 @@ def main() -> None:
             "no_cap_guardrail_summary_row_csv": str(no_cap_guardrail_summary_row_csv),
             "no_cap_reference_full_period_row_csv": str(no_cap_reference_full_period_row_csv),
             "no_cap_guardrail_full_period_row_csv": str(no_cap_guardrail_full_period_row_csv),
+            "no_cap_failing_window_drawdown_debug_csv": str(no_cap_failing_window_drawdown_debug_csv) if failing_window_debug_rows else None,
         }
         no_cap_parity_debug_json.write_text(
             json.dumps(parity_debug_payload, ensure_ascii=False, indent=2),
@@ -1197,6 +1253,7 @@ def main() -> None:
             "no_cap_reference_row_csv": str(no_cap_reference_row_csv),
             "no_cap_guardrail_row_csv": str(no_cap_guardrail_row_csv),
             "no_cap_parity_debug_json": str(no_cap_parity_debug_json),
+            "no_cap_failing_window_drawdown_debug_csv": str(no_cap_failing_window_drawdown_debug_csv) if failing_window_debug_rows else None,
             "score_signature_match": signature_match,
             "window_q12_reference_found": bool(ref_window_rows),
             "window_q12_guardrail_found": bool(no_cap_window_rows),
