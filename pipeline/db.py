@@ -114,6 +114,16 @@ def init_db(conn: sqlite3.Connection) -> None:
             risk_cut_cash_days INTEGER NOT NULL DEFAULT 0,
             stop_loss_cash_mode TEXT NOT NULL DEFAULT 'rebalance_remaining',
             stop_loss_cooldown_days INTEGER NOT NULL DEFAULT 0,
+            enable_overheat_entry_gate INTEGER NOT NULL DEFAULT 0,
+            max_entry_ret_1d REAL NOT NULL DEFAULT 0.08,
+            max_entry_ret_5d REAL NOT NULL DEFAULT 0.15,
+            max_entry_range_pct REAL NOT NULL DEFAULT 0.10,
+            max_entry_volume_z20 REAL NOT NULL DEFAULT 3.0,
+            enable_volume_surge_overheat_rule INTEGER NOT NULL DEFAULT 0,
+            volume_surge_threshold REAL NOT NULL DEFAULT 3.0,
+            volume_surge_ret_5d_threshold REAL NOT NULL DEFAULT 0.10,
+            overheat_rejected_count INTEGER NOT NULL DEFAULT 0,
+            overheat_cash_days INTEGER NOT NULL DEFAULT 0,
             average_cash_weight REAL NOT NULL DEFAULT 0.0,
             average_exposure REAL NOT NULL DEFAULT 0.0,
             min_exposure REAL NOT NULL DEFAULT 0.0,
@@ -392,6 +402,16 @@ def init_db(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "backtest_runs", "risk_cut_cash_days", "risk_cut_cash_days INTEGER NOT NULL DEFAULT 0")
     _ensure_column(conn, "backtest_runs", "stop_loss_cash_mode", "stop_loss_cash_mode TEXT NOT NULL DEFAULT 'rebalance_remaining'")
     _ensure_column(conn, "backtest_runs", "stop_loss_cooldown_days", "stop_loss_cooldown_days INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "backtest_runs", "enable_overheat_entry_gate", "enable_overheat_entry_gate INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "backtest_runs", "max_entry_ret_1d", "max_entry_ret_1d REAL NOT NULL DEFAULT 0.08")
+    _ensure_column(conn, "backtest_runs", "max_entry_ret_5d", "max_entry_ret_5d REAL NOT NULL DEFAULT 0.15")
+    _ensure_column(conn, "backtest_runs", "max_entry_range_pct", "max_entry_range_pct REAL NOT NULL DEFAULT 0.10")
+    _ensure_column(conn, "backtest_runs", "max_entry_volume_z20", "max_entry_volume_z20 REAL NOT NULL DEFAULT 3.0")
+    _ensure_column(conn, "backtest_runs", "enable_volume_surge_overheat_rule", "enable_volume_surge_overheat_rule INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "backtest_runs", "volume_surge_threshold", "volume_surge_threshold REAL NOT NULL DEFAULT 3.0")
+    _ensure_column(conn, "backtest_runs", "volume_surge_ret_5d_threshold", "volume_surge_ret_5d_threshold REAL NOT NULL DEFAULT 0.10")
+    _ensure_column(conn, "backtest_runs", "overheat_rejected_count", "overheat_rejected_count INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "backtest_runs", "overheat_cash_days", "overheat_cash_days INTEGER NOT NULL DEFAULT 0")
     _ensure_column(conn, "backtest_runs", "average_cash_weight", "average_cash_weight REAL NOT NULL DEFAULT 0.0")
     _ensure_column(conn, "backtest_runs", "average_exposure", "average_exposure REAL NOT NULL DEFAULT 0.0")
     _ensure_column(conn, "backtest_runs", "min_exposure", "min_exposure REAL NOT NULL DEFAULT 0.0")

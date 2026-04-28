@@ -291,6 +291,43 @@ python scripts/run_pipeline.py \
   --require-above-sma20
 ```
 
+### 3-3-3-a) Optional Overheat Entry Gate (신규 진입 과열 추격 방지)
+
+목적:
+- 기존 scoring 수식은 유지하고, **신규 진입 후보에만** 과열 조건을 적용해 급등 추격 매수를 줄입니다.
+- 기존 보유 종목은 `min_holding_days` / `keep_rank_threshold` 규칙을 그대로 따릅니다.
+
+`run_pipeline.py` 옵션:
+- `--enable-overheat-entry-gate` (기본 OFF)
+- `--max-entry-ret-1d` (기본 `0.08`)
+- `--max-entry-ret-5d` (기본 `0.15`)
+- `--max-entry-range-pct` (기본 `0.10`)
+- `--max-entry-volume-z20` (기본 `3.0`)
+- `--enable-volume-surge-overheat-rule` (기본 OFF)
+- `--volume-surge-threshold` (기본 `3.0`)
+- `--volume-surge-ret-5d-threshold` (기본 `0.10`)
+
+예시:
+
+```bash
+python scripts/run_pipeline.py \
+  --source krx \
+  --db data/overheat_gate_demo.db \
+  --universe-mode rolling_liquidity \
+  --universe-size 100 \
+  --rebalance-frequency weekly \
+  --scoring-version old \
+  --top-n 5 \
+  --enable-overheat-entry-gate \
+  --max-entry-ret-1d 0.08 \
+  --max-entry-ret-5d 0.15 \
+  --max-entry-range-pct 0.10 \
+  --max-entry-volume-z20 3.0 \
+  --enable-volume-surge-overheat-rule \
+  --volume-surge-threshold 3.0 \
+  --volume-surge-ret-5d-threshold 0.10
+```
+
 ### 3-3-4) KOSPI / KOSDAQ 분리 진단 (market scope)
 
 왜 분리해서 보나:

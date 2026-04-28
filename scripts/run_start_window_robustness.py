@@ -46,6 +46,7 @@ class EvaluationConfig:
     portfolio_dd_cut_enabled: int
     portfolio_dd_cut_pct: float | None
     portfolio_dd_cooldown_days: int
+    overheat_entry_gate_enabled: int
 
 
 @dataclass
@@ -479,6 +480,14 @@ def main() -> None:
     p.add_argument("--portfolio-dd-cut-modes", default="off,on")
     p.add_argument("--portfolio-dd-cut-pcts", default="")
     p.add_argument("--portfolio-dd-cooldown-days-values", default="20")
+    p.add_argument("--overheat-entry-gate-modes", default="off,on")
+    p.add_argument("--max-entry-ret-1d", type=float, default=0.08)
+    p.add_argument("--max-entry-ret-5d", type=float, default=0.15)
+    p.add_argument("--max-entry-range-pct", type=float, default=0.10)
+    p.add_argument("--max-entry-volume-z20", type=float, default=3.0)
+    p.add_argument("--enable-volume-surge-overheat-rule", action="store_true")
+    p.add_argument("--volume-surge-threshold", type=float, default=3.0)
+    p.add_argument("--volume-surge-ret-5d-threshold", type=float, default=0.10)
     p.add_argument("--benchmark-mode", choices=["none", "universe"], default="universe")
     p.add_argument("--min-warmup-days", type=int, default=20)
     p.add_argument("--reset-start-window-tables", action="store_true")
@@ -525,6 +534,10 @@ def main() -> None:
             raise ValueError(f"invalid stop-loss cash mode: {mode}")
     dd_cut_grid = _parse_toggle_pcts(args.portfolio_dd_cut_pcts, args.portfolio_dd_cut_modes, "portfolio-dd-cut")
     dd_cooldowns = _parse_int_list(args.portfolio_dd_cooldown_days_values)
+    overheat_modes = [x.lower() for x in _parse_str_list(args.overheat_entry_gate_modes)]
+    invalid_overheat_modes = [m for m in overheat_modes if m not in {"off", "on"}]
+    if invalid_overheat_modes:
+        raise ValueError(f"invalid overheat-entry-gate mode(s): {invalid_overheat_modes}")
 
     selected_symbols = parse_symbols_arg(args.symbols)
     if args.universe_file and not selected_symbols:
@@ -552,12 +565,14 @@ def main() -> None:
                                         for stop_loss_cooldown_days in stop_loss_cooldown_days_values:
                                             for dd_enabled, dd_pct in dd_cut_grid:
                                                 for cooldown in dd_cooldowns:
-                                                    cfg = EvaluationConfig(
+                                                    for overheat_mode in overheat_modes:
+                                                        cfg = EvaluationConfig(
                                                         config_id=(
                                                             f"top={top_n}|hold={min_holding_days}|keep={keep_threshold}|score={scoring_version}|"
                                                             f"scope={market_scope}|entry={entry_mode}|mf={market_filter_mode}|"
                                                             f"pos_sl={sl_enabled}:{sl_pct}|sl_cash={stop_loss_cash_mode}|"
-                                                            f"sl_cd={stop_loss_cooldown_days}|dd_cut={dd_enabled}:{dd_pct}|dd_cd={cooldown}"
+                                                            f"sl_cd={stop_loss_cooldown_days}|dd_cut={dd_enabled}:{dd_pct}|dd_cd={cooldown}|"
+                                                            f"overheat={overheat_mode}"
                                                         ),
                                                         top_n=top_n,
                                                         min_holding_days=min_holding_days,
@@ -574,8 +589,9 @@ def main() -> None:
                                                         portfolio_dd_cut_enabled=dd_enabled,
                                                         portfolio_dd_cut_pct=dd_pct,
                                                         portfolio_dd_cooldown_days=cooldown,
+                                                        overheat_entry_gate_enabled=1 if overheat_mode == "on" else 0,
                                                     )
-                                                    configs.append(cfg)
+                                                        configs.append(cfg)
 
     generated_profiles: set[tuple[str, str]] = set()
     batch_id = str(uuid.uuid4())
@@ -770,6 +786,14 @@ def main() -> None:
                         enable_portfolio_dd_cut=bool(cfg.portfolio_dd_cut_enabled),
                         portfolio_dd_cut_pct=(cfg.portfolio_dd_cut_pct or 0.1),
                         portfolio_dd_cooldown_days=cfg.portfolio_dd_cooldown_days,
+                        enable_overheat_entry_gate=bool(cfg.overheat_entry_gate_enabled),
+                        max_entry_ret_1d=args.max_entry_ret_1d,
+                        max_entry_ret_5d=args.max_entry_ret_5d,
+                        max_entry_range_pct=args.max_entry_range_pct,
+                        max_entry_volume_z20=args.max_entry_volume_z20,
+                        enable_volume_surge_overheat_rule=args.enable_volume_surge_overheat_rule,
+                        volume_surge_threshold=args.volume_surge_threshold,
+                        volume_surge_ret_5d_threshold=args.volume_surge_ret_5d_threshold,
                     )
                 except Exception:
                     results.append(
