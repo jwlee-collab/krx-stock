@@ -13,6 +13,8 @@ from typing import Any
 
 DEFAULT_UNIVERSE = Path("data/kospi_valid_universe_495.csv")
 DEFAULT_OUTPUT = Path("data/kospi_sector_map.csv")
+DEFAULT_KIND_URL = "https://kind.krx.co.kr/corpgeneral/corpList.do?method=download&searchType=13"
+CSV_ENCODINGS = ["cp949", "utf-8-sig", "utf-8"]
 
 
 @dataclass
@@ -20,13 +22,17 @@ class ProviderResult:
     rows: dict[str, dict[str, str]]
     warnings: list[str]
     provider_ok: bool
+    source_detail: str = ""
 
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Build sector map for KOSPI valid universe")
     p.add_argument("--universe-file", default=str(DEFAULT_UNIVERSE))
     p.add_argument("--output", default=str(DEFAULT_OUTPUT))
-    p.add_argument("--source", choices=["fdr", "pykrx", "manual", "auto"], default="auto")
+    p.add_argument("--source", choices=["kind", "krx-file", "fdr", "pykrx", "manual", "auto"], default="auto")
+    p.add_argument("--input-sector-file", default=None, help="Path to user-downloaded KRX/KIND sector file (CSV/XLS/XLSX)")
+    p.add_argument("--kind-url", default=DEFAULT_KIND_URL, help="KIND corpList download URL")
+    p.add_argument("--encoding", default="auto", help="CSV encoding (auto|cp949|utf-8-sig|utf-8)")
     p.add_argument(
         "--as-of-date",
         default=None,
@@ -108,6 +114,7 @@ def _read_universe(path: Path) -> tuple[list[dict[str, str]], list[str]]:
     lower = {k.lower(): k for k in rows[0].keys()}
     symbol_col = lower.get("symbol")
     name_col = lower.get("name")
+    market_col = lower.get("market")
     if symbol_col is None:
         raise SystemExit("universe file requires 'symbol' column")
 
@@ -118,12 +125,15 @@ def _read_universe(path: Path) -> tuple[list[dict[str, str]], list[str]]:
         if not symbol:
             continue
         name = str(row.get(name_col) or "").strip() if name_col else ""
+        market = str(row.get(market_col) or "KOSPI").strip() if market_col else "KOSPI"
         if symbol in unique_rows:
             duplicate_count += 1
             if not unique_rows[symbol]["name"] and name:
                 unique_rows[symbol]["name"] = name
+            if not unique_rows[symbol]["market"] and market:
+                unique_rows[symbol]["market"] = market
             continue
-        unique_rows[symbol] = {"symbol": symbol, "name": name}
+        unique_rows[symbol] = {"symbol": symbol, "name": name, "market": market or "KOSPI"}
 
     if duplicate_count:
         warnings.append(f"deduplicated symbols={duplicate_count}")
@@ -138,12 +148,12 @@ def _fetch_fdr() -> ProviderResult:
     warnings: list[str] = []
     try:
         import FinanceDataReader as fdr
-    except Exception as e:  # pragma: no cover - depends on env
+    except Exception as e:  # pragma: no cover
         return ProviderResult(rows={}, warnings=[f"FinanceDataReader import failed: {e}"], provider_ok=False)
 
     try:
         df = fdr.StockListing("KOSPI")
-    except Exception as e:  # pragma: no cover - depends on network
+    except Exception as e:  # pragma: no cover
         return ProviderResult(rows={}, warnings=[f"FinanceDataReader StockListing failed: {e}"], provider_ok=False)
 
     if df is None or df.empty:
@@ -178,14 +188,14 @@ def _fetch_fdr() -> ProviderResult:
     if industry_col is None:
         warnings.append("FinanceDataReader dataset has no industry column")
 
-    return ProviderResult(rows=rows, warnings=warnings, provider_ok=True)
+    return ProviderResult(rows=rows, warnings=warnings, provider_ok=True, source_detail="FinanceDataReader.StockListing('KOSPI')")
 
 
 def _fetch_pykrx(as_of: date, universe_path: Path) -> ProviderResult:
     warnings: list[str] = []
     try:
         from pykrx import stock
-    except Exception as e:  # pragma: no cover - depends on env
+    except Exception as e:  # pragma: no cover
         return ProviderResult(rows={}, warnings=[f"pykrx import failed: {e}"], provider_ok=False)
 
     include_sector_names = [
@@ -213,25 +223,8 @@ def _fetch_pykrx(as_of: date, universe_path: Path) -> ProviderResult:
         "제조업",
         "기타 업종지수",
     ]
-    exclude_keywords = [
-        "코스피",
-        "KOSPI",
-        "KRX300",
-        "대형주",
-        "중형주",
-        "소형주",
-        "고배당",
-        "가치주",
-        "성장주",
-        "동일가중",
-        "레버리지",
-        "인버스",
-        "ESG",
-        "배당",
-        "테마",
-    ]
+    exclude_keywords = ["코스피", "KOSPI", "KRX300", "대형주", "중형주", "소형주", "고배당", "가치주", "성장주", "동일가중", "레버리지", "인버스", "ESG", "배당", "테마"]
 
-    # Do not use today directly; use user date or recent business day with fallback dates.
     offsets = [0, 1, 2, 3, 5, 10]
     chosen_date: date | None = None
     index_tickers: list[str] = []
@@ -251,7 +244,7 @@ def _fetch_pykrx(as_of: date, universe_path: Path) -> ProviderResult:
                     chosen_date = d
                     break
                 warnings.append(f"pykrx retry ({base_label}) date={ymd}: empty index ticker list")
-            except Exception as e:  # pragma: no cover - depends on network
+            except Exception as e:  # pragma: no cover
                 last_error = str(e)
                 warnings.append(f"pykrx retry ({base_label}) date={ymd}: get_index_ticker_list failed ({e})")
         if chosen_date is not None:
@@ -297,20 +290,143 @@ def _fetch_pykrx(as_of: date, universe_path: Path) -> ProviderResult:
     for symbol, candidates in sector_candidates_by_symbol.items():
         ordered = sorted(candidates, key=lambda x: include_priority.get(x, 999))
         primary = ordered[0] if ordered else ""
-        status = "mapped" if len(ordered) <= 1 else "conflict_resolved"
         rows[symbol] = {
             "name": names_by_symbol.get(symbol, ""),
             "market": "KOSPI",
             "sector": primary,
             "industry": primary,
             "sector_candidates": ";".join(ordered),
-            "source": "pykrx_index_sector",
+            "index_ticker": "",
+            "index_name": primary,
+            "as_of_date": chosen_date.isoformat(),
+            "source": "pykrx",
             "source_detail": f"pykrx index portfolio date={ymd}",
-            "mapping_status": status,
         }
 
     warnings.append(f"pykrx index mapping as_of_date={ymd} mapped_symbols={len(rows)}")
-    return ProviderResult(rows=rows, warnings=warnings, provider_ok=True)
+    return ProviderResult(rows=rows, warnings=warnings, provider_ok=True, source_detail=f"pykrx index portfolio date={ymd}")
+
+
+def _read_csv_with_fallback(path: Path, encoding_opt: str) -> tuple[Any, str]:
+    import pandas as pd
+
+    if encoding_opt != "auto":
+        return pd.read_csv(path, dtype=str, encoding=encoding_opt), encoding_opt
+
+    errors: list[str] = []
+    for enc in CSV_ENCODINGS:
+        try:
+            return pd.read_csv(path, dtype=str, encoding=enc), enc
+        except Exception as e:
+            errors.append(f"{enc}:{e}")
+    raise ValueError("csv encoding detection failed: " + " | ".join(errors))
+
+
+def _resolve_col(columns: list[str], candidates: list[str]) -> str | None:
+    normalized = {c.strip().lower(): c for c in columns}
+    for cand in candidates:
+        key = cand.strip().lower()
+        if key in normalized:
+            return normalized[key]
+    return None
+
+
+def _fetch_kind(kind_url: str) -> ProviderResult:
+    warnings: list[str] = []
+    try:
+        import pandas as pd
+    except Exception as e:  # pragma: no cover
+        return ProviderResult(rows={}, warnings=[f"pandas import failed: {e}"], provider_ok=False)
+
+    try:
+        frames = pd.read_html(kind_url)
+    except Exception as e:
+        return ProviderResult(rows={}, warnings=[f"KIND read_html failed: {e}"], provider_ok=False, source_detail=kind_url)
+
+    if not frames:
+        return ProviderResult(rows={}, warnings=["KIND read_html returned no tables"], provider_ok=False, source_detail=kind_url)
+
+    df = frames[0]
+    cols = [str(c) for c in df.columns]
+    symbol_col = _resolve_col(cols, ["종목코드", "단축코드", "code", "ticker", "symbol"])
+    name_col = _resolve_col(cols, ["회사명", "종목명", "한글 종목명", "name"])
+    sector_col = _resolve_col(cols, ["업종", "업종명", "산업", "산업명", "KRX업종", "sector"])
+
+    if symbol_col is None or sector_col is None:
+        return ProviderResult(rows={}, warnings=[f"KIND columns not found symbol_col={symbol_col} sector_col={sector_col}"], provider_ok=False, source_detail=kind_url)
+
+    rows: dict[str, dict[str, str]] = {}
+    for _, r in df.iterrows():
+        symbol = _norm_symbol(r.get(symbol_col))
+        if not symbol:
+            continue
+        sector = str(r.get(sector_col) or "").strip()
+        rows[symbol] = {
+            "name": str(r.get(name_col) or "").strip() if name_col else "",
+            "market": "",
+            "sector": sector,
+            "industry": sector,
+            "source": "kind",
+            "source_detail": kind_url,
+        }
+
+    return ProviderResult(rows=rows, warnings=warnings, provider_ok=True, source_detail=kind_url)
+
+
+def _fetch_krx_file(input_file: Path, encoding_opt: str) -> ProviderResult:
+    warnings: list[str] = []
+    try:
+        import pandas as pd
+    except Exception as e:  # pragma: no cover
+        return ProviderResult(rows={}, warnings=[f"pandas import failed: {e}"], provider_ok=False, source_detail=str(input_file))
+
+    if not input_file.exists():
+        return ProviderResult(rows={}, warnings=[f"input sector file not found: {input_file}"], provider_ok=False, source_detail=str(input_file))
+
+    ext = input_file.suffix.lower()
+    try:
+        if ext == ".csv":
+            df, chosen_encoding = _read_csv_with_fallback(input_file, encoding_opt)
+            warnings.append(f"krx-file csv encoding={chosen_encoding}")
+        elif ext in {".xls", ".xlsx"}:
+            try:
+                df = pd.read_excel(input_file, dtype=str)
+            except Exception:
+                frames = pd.read_html(str(input_file))
+                if not frames:
+                    raise
+                df = frames[0]
+        else:
+            return ProviderResult(rows={}, warnings=[f"unsupported input-sector-file extension: {ext}"], provider_ok=False, source_detail=str(input_file))
+    except Exception as e:
+        return ProviderResult(rows={}, warnings=[f"failed to read input-sector-file: {e}"], provider_ok=False, source_detail=str(input_file))
+
+    cols = [str(c) for c in df.columns]
+    symbol_col = _resolve_col(cols, ["종목코드", "단축코드", "표준코드", "code", "ticker", "symbol"])
+    name_col = _resolve_col(cols, ["종목명", "회사명", "한글 종목명", "name"])
+    sector_col = _resolve_col(cols, ["업종", "업종명", "산업", "산업명", "지수업종", "KRX업종", "sector"])
+    industry_col = _resolve_col(cols, ["업종", "산업", "industry"])
+
+    if symbol_col is None or sector_col is None:
+        return ProviderResult(rows={}, warnings=[f"krx-file columns not found symbol_col={symbol_col} sector_col={sector_col}"], provider_ok=False, source_detail=str(input_file))
+
+    rows: dict[str, dict[str, str]] = {}
+    for _, r in df.iterrows():
+        symbol = _norm_symbol(r.get(symbol_col))
+        if not symbol:
+            continue
+        sector = str(r.get(sector_col) or "").strip()
+        industry = str(r.get(industry_col) or "").strip() if industry_col else ""
+        rows[symbol] = {
+            "name": str(r.get(name_col) or "").strip() if name_col else "",
+            "market": "",
+            "sector": sector,
+            "industry": industry or sector,
+            "source": "krx-file",
+            "source_detail": str(input_file),
+        }
+
+    return ProviderResult(rows=rows, warnings=warnings, provider_ok=True, source_detail=str(input_file))
 
 
 def _build_rows(
@@ -319,11 +435,19 @@ def _build_rows(
     fallback_sector: str,
     as_of: date,
     universe_path: Path,
-) -> tuple[list[dict[str, str]], list[str], str]:
+    allow_partial: bool,
+    input_sector_file: str | None,
+    kind_url: str,
+    encoding_opt: str,
+) -> tuple[list[dict[str, str]], list[str], str, str]:
     warnings: list[str] = []
+    used_source = source
+    used_source_detail = ""
 
     fdr = ProviderResult(rows={}, warnings=[], provider_ok=False)
     pyk = ProviderResult(rows={}, warnings=[], provider_ok=False)
+    kind = ProviderResult(rows={}, warnings=[], provider_ok=False)
+    krx_file = ProviderResult(rows={}, warnings=[], provider_ok=False)
 
     if source in {"fdr", "auto"}:
         fdr = _fetch_fdr()
@@ -331,60 +455,68 @@ def _build_rows(
     if source in {"pykrx", "auto"}:
         pyk = _fetch_pykrx(as_of=as_of, universe_path=universe_path)
         warnings.extend(pyk.warnings)
+    if source in {"kind", "auto"}:
+        kind = _fetch_kind(kind_url=kind_url)
+        warnings.extend(kind.warnings)
+    if source in {"krx-file", "auto"} and input_sector_file:
+        krx_file = _fetch_krx_file(Path(input_sector_file), encoding_opt=encoding_opt)
+        warnings.extend(krx_file.warnings)
 
-    used_source = source
     out: list[dict[str, str]] = []
     updated_at_utc = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
     for u in universe_rows:
         symbol = u["symbol"]
         base_name = str(u.get("name") or "").strip()
+        base_market = str(u.get("market") or "KOSPI").strip() or "KOSPI"
 
         meta: dict[str, str] = {}
-        if source == "fdr":
-            meta = fdr.rows.get(symbol, {})
+        if source == "krx-file":
+            meta = krx_file.rows.get(symbol, {})
+            used_source, used_source_detail = "krx-file", krx_file.source_detail or (input_sector_file or "")
+        elif source == "kind":
+            meta = kind.rows.get(symbol, {})
+            used_source, used_source_detail = "kind", kind.source_detail or kind_url
         elif source == "pykrx":
             meta = pyk.rows.get(symbol, {})
+            used_source, used_source_detail = "pykrx", pyk.source_detail
+        elif source == "fdr":
+            meta = fdr.rows.get(symbol, {})
+            used_source, used_source_detail = "fdr", fdr.source_detail
         elif source == "manual":
             meta = {}
+            used_source, used_source_detail = "manual", "universe_file"
         else:  # auto
-            if symbol in pyk.rows:
+            if krx_file.provider_ok and symbol in krx_file.rows:
+                meta = krx_file.rows[symbol]
+                used_source, used_source_detail = "auto(krx-file>kind>pykrx>fdr>manual)", krx_file.source_detail
+            elif kind.provider_ok and symbol in kind.rows:
+                meta = kind.rows[symbol]
+                used_source, used_source_detail = "auto(krx-file>kind>pykrx>fdr>manual)", kind.source_detail
+            elif pyk.provider_ok and symbol in pyk.rows:
                 meta = pyk.rows[symbol]
-                used_source = "auto(pykrx_index_sector>fdr>manual)"
-            elif symbol in fdr.rows:
+                used_source, used_source_detail = "auto(krx-file>kind>pykrx>fdr>manual)", pyk.source_detail
+            elif fdr.provider_ok and symbol in fdr.rows:
                 meta = fdr.rows[symbol]
-                used_source = "auto(pykrx_index_sector>fdr>manual)"
+                used_source, used_source_detail = "auto(krx-file>kind>pykrx>fdr>manual)", fdr.source_detail
             else:
                 meta = {}
-                used_source = "auto(pykrx_index_sector>fdr>manual)"
+                used_source, used_source_detail = "auto(krx-file>kind>pykrx>fdr>manual)", "manual"
+
+        row_source = str(meta.get("source") or ("manual" if source != "manual" else "manual"))
+        row_source_detail = str(meta.get("source_detail") or used_source_detail or "universe_file")
 
         name = str(meta.get("name") or base_name).strip()
-        market = str(meta.get("market") or "KOSPI").strip() or "KOSPI"
-        sector = str(meta.get("sector") or "").strip()
-        industry = str(meta.get("industry") or "").strip()
-
-        if not sector:
-            sector = fallback_sector
-        if not industry:
-            industry = fallback_sector
-
-        row_source = str(meta.get("source") or "manual")
-        row_source_detail = str(meta.get("source_detail") or "universe_file")
+        market = str(meta.get("market") or base_market).strip() or base_market
+        sector = str(meta.get("sector") or "").strip() or fallback_sector
+        industry = str(meta.get("industry") or "").strip() or sector
         sector_candidates = str(meta.get("sector_candidates") or sector)
-        mapping_status_hint = str(meta.get("mapping_status") or "")
+        index_ticker = str(meta.get("index_ticker") or "")
+        index_name = str(meta.get("index_name") or "")
+        row_as_of_date = str(meta.get("as_of_date") or as_of.isoformat())
 
-        if mapping_status_hint:
-            mapping_status = mapping_status_hint
-            note = ""
-        elif sector != fallback_sector:
-            mapping_status = "mapped"
-            note = ""
-        elif row_source == "manual":
-            mapping_status = "unknown"
-            note = "sector unavailable; fallback sector applied"
-        else:
-            mapping_status = "fallback"
-            note = "external metadata missing sector/industry; fallback sector applied"
+        mapping_status = "mapped" if sector != fallback_sector else "unknown"
+        note = "" if mapping_status == "mapped" else "sector unavailable; fallback sector applied"
 
         out.append(
             {
@@ -394,6 +526,9 @@ def _build_rows(
                 "sector": sector,
                 "industry": industry,
                 "sector_candidates": sector_candidates,
+                "index_ticker": index_ticker,
+                "index_name": index_name,
+                "as_of_date": row_as_of_date,
                 "source": row_source,
                 "source_detail": row_source_detail,
                 "updated_at_utc": updated_at_utc,
@@ -402,7 +537,21 @@ def _build_rows(
             }
         )
 
-    return out, warnings, used_source
+    mapped_rows = sum(1 for r in out if r.get("sector") != fallback_sector)
+    ratio = mapped_rows / len(out) if out else 0.0
+    if source == "krx-file":
+        if ratio < 0.8:
+            warnings.append(f"krx-file mapping ratio low: {ratio:.4f} (<0.8)")
+        if ratio < 0.3 and not allow_partial:
+            raise SystemExit(f"krx-file mapping ratio too low: {ratio:.4f} (<0.3) without --allow-partial")
+
+    if source == "auto":
+        if input_sector_file and not krx_file.provider_ok:
+            warnings.append("auto: krx-file source unavailable, fallback to kind/pykrx/fdr/manual")
+        if not kind.provider_ok:
+            warnings.append("auto: KIND source unavailable, fallback to pykrx/fdr/manual")
+
+    return out, warnings, used_source, used_source_detail
 
 
 def _write_csv(path: Path, rows: list[dict[str, str]], overwrite: bool) -> None:
@@ -416,6 +565,9 @@ def _write_csv(path: Path, rows: list[dict[str, str]], overwrite: bool) -> None:
         "sector",
         "industry",
         "sector_candidates",
+        "index_ticker",
+        "index_name",
+        "as_of_date",
         "source",
         "source_detail",
         "updated_at_utc",
@@ -436,6 +588,9 @@ def main() -> None:
     universe_file = Path(args.universe_file)
     output_path = Path(args.output)
 
+    if args.source == "krx-file" and not args.input_sector_file:
+        raise SystemExit("--source krx-file requires --input-sector-file")
+
     universe_rows, warnings = _read_universe(universe_file)
     cli_as_of = _parse_as_of_date(args.as_of_date)
     fallback_validation_date = _find_latest_validation_end_date(universe_file)
@@ -446,12 +601,16 @@ def main() -> None:
             f"--as-of-date not provided; computed recent business day={as_of_date.isoformat()}, universe validation_end_date max={fallback_validation_date.isoformat()}"
         )
 
-    output_rows, collect_warnings, used_source = _build_rows(
+    output_rows, collect_warnings, used_source, used_source_detail = _build_rows(
         universe_rows=universe_rows,
         source=args.source,
         fallback_sector=str(args.fallback_sector),
         as_of=as_of_date,
         universe_path=universe_file,
+        allow_partial=bool(args.allow_partial),
+        input_sector_file=args.input_sector_file,
+        kind_url=str(args.kind_url),
+        encoding_opt=str(args.encoding),
     )
     warnings.extend(collect_warnings)
 
@@ -465,7 +624,7 @@ def main() -> None:
 
     _write_csv(path=output_path, rows=output_rows, overwrite=bool(args.overwrite))
 
-    mapped_rows = sum(1 for r in output_rows if r.get("mapping_status") == "mapped")
+    mapped_rows = sum(1 for r in output_rows if r.get("sector") != str(args.fallback_sector))
     unknown_rows = sum(1 for r in output_rows if r.get("sector") == str(args.fallback_sector))
     unknown_ratio = (unknown_rows / actual_rows) if actual_rows else 1.0
 
@@ -477,8 +636,15 @@ def main() -> None:
         "unknown_ratio": round(unknown_ratio, 6),
         "output": str(output_path),
         "source": used_source,
+        "source_detail": used_source_detail,
         "warnings": warnings,
+        "sample_mapped_rows": [r for r in output_rows if r.get("mapping_status") == "mapped"][:5],
     }
+    if args.source in {"kind", "auto"}:
+        summary["kind_url"] = str(args.kind_url)
+    if args.input_sector_file:
+        summary["input_sector_file"] = str(args.input_sector_file)
+
     print(f"[done] wrote sector map rows={actual_rows} output={output_path}")
     print("KOSPI_SECTOR_MAP_JSON=" + json.dumps(summary, ensure_ascii=False, sort_keys=True))
 
