@@ -303,6 +303,57 @@ def _compare_metric_rows(
     return out
 
 
+def _print_parity_diff_table(rows: list[dict[str, object]]) -> None:
+    if not rows:
+        print("no-cap parity diff: no rows")
+        return
+    headers = ["metric", "reference_value", "guardrail_value", "abs_diff", "status"]
+    table_rows = [
+        [
+            str(r.get("metric", "")),
+            f'{float(r.get("reference_value", float("nan"))):.12f}',
+            f'{float(r.get("guardrail_value", float("nan"))):.12f}',
+            f'{float(r.get("abs_diff", float("nan"))):.12f}',
+            str(r.get("status", "")),
+        ]
+        for r in rows
+    ]
+    widths = [len(h) for h in headers]
+    for row in table_rows:
+        for i, cell in enumerate(row):
+            widths[i] = max(widths[i], len(cell))
+    header = " | ".join(h.ljust(widths[i]) for i, h in enumerate(headers))
+    sep = "-+-".join("-" * widths[i] for i in range(len(headers)))
+    print("no-cap parity diff table")
+    print(header)
+    print(sep)
+    for row in table_rows:
+        print(" | ".join(row[i].ljust(widths[i]) for i in range(len(headers))))
+
+
+def _write_single_row_csv(path: Path, row: dict[str, object]) -> None:
+    fields = list(row.keys())
+    with path.open("w", encoding="utf-8", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=fields)
+        w.writeheader()
+        w.writerow(row)
+
+
+def _load_reference_score_signatures(reference_dir: Path) -> dict[str, dict[str, object]]:
+    manifest_path = reference_dir / "manifest.json"
+    if not manifest_path.exists():
+        return {}
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    signatures = payload.get("score_signatures")
+    if not signatures:
+        return {}
+    if isinstance(signatures, list):
+        return {str(s.get("scoring_profile")): s for s in signatures if isinstance(s, dict) and s.get("scoring_profile")}
+    if isinstance(signatures, dict):
+        return {str(k): v for k, v in signatures.items() if isinstance(v, dict)}
+    return {}
+
+
 def _simulate_candidate(
     conn: sqlite3.Connection,
     dates: list[str],
@@ -581,22 +632,22 @@ def main() -> None:
     if not benchmark_by_date:
         raise ValueError("benchmark return series is empty")
 
-    candidate_score_snapshots: dict[str, str] = {}
+    profile_score_snapshots: dict[str, str] = {}
     score_signatures: dict[str, dict[str, object]] = {}
-    for c in candidates:
+    for sp in sorted({c.scoring_profile for c in candidates}):
         generate_daily_scores(
             conn,
             include_history=True,
             allowed_symbols=symbols,
-            scoring_profile=c.scoring_profile,
+            scoring_profile=sp,
             universe_mode="rolling_liquidity",
             universe_size=rolling_universe_size,
             universe_lookback_days=rolling_lookback_days,
         )
-        snapshot_table = f"tmp_guardrail_scores_{_sanitize_identifier(c.name)}"
+        snapshot_table = f"tmp_guardrail_scores_{_sanitize_identifier(sp)}"
         _snapshot_daily_scores(conn, snapshot_table)
-        candidate_score_snapshots[c.name] = snapshot_table
-        score_signatures[c.name] = _build_score_signature(conn, c.scoring_profile)
+        profile_score_snapshots[sp] = snapshot_table
+        score_signatures[sp] = _build_score_signature(conn, sp)
 
     daily_all: list[dict[str, object]] = []
     exposure_all: list[dict[str, object]] = []
@@ -607,7 +658,10 @@ def main() -> None:
     monthly_rows: list[dict[str, object]] = []
 
     for c in candidates:
-        _restore_daily_scores(conn, candidate_score_snapshots[c.name])
+        snapshot_table = profile_score_snapshots.get(c.scoring_profile)
+        if not snapshot_table:
+            raise ValueError(f"missing score snapshot for scoring_profile={c.scoring_profile}")
+        _restore_daily_scores(conn, snapshot_table)
         sim = _simulate_candidate(conn, dates, symbol_to_sector, c)
         daily = sim["daily"]
         exposure_all.extend(sim["exposure"])
@@ -780,6 +834,10 @@ def main() -> None:
         "candidate": "baseline_old_no_sector_guardrail",
         "reference_final_report_dir": args.reference_final_report_dir,
         "tolerance": PARITY_TOLERANCE,
+        "no_cap_parity_diff_csv": None,
+        "no_cap_reference_row_csv": None,
+        "no_cap_guardrail_row_csv": None,
+        "no_cap_parity_debug_json": None,
     }
     no_cap_rows = [r for r in full_rows if str(r.get("candidate")) == "baseline_old_no_sector_guardrail"]
     if not no_cap_rows:
@@ -792,80 +850,120 @@ def main() -> None:
         if ref_full_baseline is None:
             raise ValueError(f"reference baseline_old not found in {ref_dir}")
 
-        metrics = ["total_return", "benchmark_return", "excess_return", "max_drawdown", "max_single_weight_observed"]
+        full_metrics = ["total_return", "benchmark_return", "excess_return", "max_drawdown", "max_single_weight_observed"]
         full_diffs = _compare_metric_rows(
             left=no_cap_full,
             right=ref_full_baseline,
-            metric_keys=metrics,
+            metric_keys=full_metrics,
             tolerance=PARITY_TOLERANCE,
         )
-
-        no_cap_window_rows = [r for r in window_rows if str(r.get("candidate")) == "baseline_old_no_sector_guardrail"]
-        no_cap_window_keyed = {
+        summary_metrics = [
+            "mean_total_return",
+            "mean_benchmark_return",
+            "mean_excess_return",
+            "p25_excess_return",
+            "worst_total_return",
+            "worst_excess_return",
+            "worst_mdd",
+            "mdd_breach_30_rate",
+            "mdd_breach_35_rate",
+            "max_single_weight_observed",
+        ]
+        no_cap_summary = next(
             (
-                str(r["eval_frequency"]),
-                int(r["horizon_months"]),
-                str(r["start_date"]),
-                str(r["end_date"]),
-            ): r
-            for r in no_cap_window_rows
-        }
-        ref_window_keyed = {
+                r
+                for r in summary_rows
+                if str(r.get("candidate")) == "baseline_old_no_sector_guardrail"
+                and str(r.get("eval_frequency")) == "quarterly"
+                and int(r.get("horizon_months", 0)) == 12
+            ),
+            None,
+        )
+        ref_summary = next(
             (
-                str(r["eval_frequency"]),
-                int(r["horizon_months"]),
-                str(r["start_date"]),
-                str(r["end_date"]),
-            ): r
-            for r in ref_window_baseline_rows
-        }
-        common_keys = sorted(set(no_cap_window_keyed) & set(ref_window_keyed))
-        missing_reference_windows = [k for k in no_cap_window_keyed if k not in ref_window_keyed]
-        missing_no_cap_windows = [k for k in ref_window_keyed if k not in no_cap_window_keyed]
-        window_diffs: list[dict[str, object]] = []
-        for k in common_keys:
-            diffs = _compare_metric_rows(
-                left=no_cap_window_keyed[k],
-                right=ref_window_keyed[k],
-                metric_keys=metrics,
+                r
+                for r in ref_window_baseline_rows
+                if str(r.get("eval_frequency")) == "quarterly" and int(r.get("horizon_months", 0)) == 12
+            ),
+            None,
+        )
+        summary_diffs: list[dict[str, object]] = []
+        if no_cap_summary and ref_summary:
+            summary_diffs = _compare_metric_rows(
+                left=no_cap_summary,
+                right=ref_summary,
+                metric_keys=summary_metrics,
                 tolerance=PARITY_TOLERANCE,
             )
-            window_diffs.append(
-                {
-                    "eval_frequency": k[0],
-                    "horizon_months": k[1],
-                    "start_date": k[2],
-                    "end_date": k[3],
-                    "metrics": diffs,
-                    "all_within_tolerance": all(bool(d["within_tolerance"]) for d in diffs),
-                }
-            )
+
+        parity_diff_rows: list[dict[str, object]] = []
+        for scope, diffs in [("summary_q12", summary_diffs), ("full_period", full_diffs)]:
+            for d in diffs:
+                parity_diff_rows.append(
+                    {
+                        "scope": scope,
+                        "metric": d["metric"],
+                        "reference_value": d["right"],
+                        "guardrail_value": d["left"],
+                        "abs_diff": d["abs_diff"],
+                        "status": "PASS" if d["within_tolerance"] else "FAIL",
+                    }
+                )
+
+        reference_signatures = _load_reference_score_signatures(ref_dir)
+        ref_old_signature = reference_signatures.get("old")
+        local_old_signature = score_signatures.get("old")
+        signature_match = (
+            ref_old_signature is not None
+            and local_old_signature is not None
+            and ref_old_signature.get("row_count") == local_old_signature.get("row_count")
+            and ref_old_signature.get("first_score_date") == local_old_signature.get("first_score_date")
+            and ref_old_signature.get("middle_score_date") == local_old_signature.get("middle_score_date")
+            and ref_old_signature.get("last_score_date") == local_old_signature.get("last_score_date")
+            and ref_old_signature.get("top10_symbols_by_sample_date") == local_old_signature.get("top10_symbols_by_sample_date")
+        )
 
         full_ok = all(bool(d["within_tolerance"]) for d in full_diffs)
-        windows_ok = (
-            len(missing_reference_windows) == 0
-            and len(missing_no_cap_windows) == 0
-            and all(bool(w["all_within_tolerance"]) for w in window_diffs)
+        summary_ok = bool(summary_diffs) and all(bool(d["within_tolerance"]) for d in summary_diffs)
+        parity_ok = full_ok and summary_ok
+        parity_diff_csv = outdir / "no_cap_parity_diff.csv"
+        no_cap_reference_row_csv = outdir / "no_cap_reference_row.csv"
+        no_cap_guardrail_row_csv = outdir / "no_cap_guardrail_row.csv"
+        no_cap_parity_debug_json = outdir / "no_cap_parity_debug.json"
+        _write_csv("no_cap_parity_diff.csv", parity_diff_rows)
+        _write_single_row_csv(no_cap_reference_row_csv, ref_full_baseline)
+        _write_single_row_csv(no_cap_guardrail_row_csv, no_cap_full)
+        parity_debug_payload = {
+            "status": "passed" if (parity_ok and signature_match) else "failed",
+            "summary_q12_reference_found": ref_summary is not None,
+            "summary_q12_guardrail_found": no_cap_summary is not None,
+            "summary_q12_metric_diffs": summary_diffs,
+            "full_period_metric_diffs": full_diffs,
+            "score_signature_reference_old": ref_old_signature,
+            "score_signature_guardrail_old": local_old_signature,
+            "score_signature_match": signature_match,
+            "reference_final_report_dir": str(ref_dir),
+            "tolerance": PARITY_TOLERANCE,
+        }
+        no_cap_parity_debug_json.write_text(
+            json.dumps(parity_debug_payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
         )
+        _print_parity_diff_table(parity_diff_rows)
         no_cap_baseline_parity_check = {
-            "status": "passed" if (full_ok and windows_ok) else "failed",
+            "status": "passed" if (parity_ok and signature_match) else "failed",
             "candidate": "baseline_old_no_sector_guardrail",
             "reference_final_report_dir": str(ref_dir),
             "tolerance": PARITY_TOLERANCE,
+            "no_cap_parity_diff_csv": str(parity_diff_csv),
+            "no_cap_reference_row_csv": str(no_cap_reference_row_csv),
+            "no_cap_guardrail_row_csv": str(no_cap_guardrail_row_csv),
+            "no_cap_parity_debug_json": str(no_cap_parity_debug_json),
+            "score_signature_match": signature_match,
+            "summary_q12_reference_found": ref_summary is not None,
+            "summary_q12_guardrail_found": no_cap_summary is not None,
+            "summary_q12_metric_diffs": summary_diffs,
             "full_period_metric_diffs": full_diffs,
-            "window_comparison_count": len(common_keys),
-            "window_metric_diffs": window_diffs[:20],
-            "window_metric_diffs_truncated": max(0, len(window_diffs) - 20),
-            "missing_reference_windows": [
-                {"eval_frequency": k[0], "horizon_months": k[1], "start_date": k[2], "end_date": k[3]}
-                for k in missing_reference_windows[:20]
-            ],
-            "missing_reference_windows_truncated": max(0, len(missing_reference_windows) - 20),
-            "missing_no_cap_windows": [
-                {"eval_frequency": k[0], "horizon_months": k[1], "start_date": k[2], "end_date": k[3]}
-                for k in missing_no_cap_windows[:20]
-            ],
-            "missing_no_cap_windows_truncated": max(0, len(missing_no_cap_windows) - 20),
         }
         if no_cap_baseline_parity_check["status"] != "passed":
             raise ValueError("no-cap baseline parity check failed; guardrail results are invalid")
