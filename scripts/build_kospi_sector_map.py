@@ -25,6 +25,36 @@ class ProviderResult:
     source_detail: str = ""
 
 
+def map_kind_sector_to_broad_sector(sector: str) -> str:
+    raw = str(sector or "").strip()
+    if not raw:
+        return "기타"
+    if raw.upper() == "UNKNOWN":
+        return "UNKNOWN"
+
+    text = raw.replace(" ", "")
+    mapping_rules: list[tuple[str, list[str]]] = [
+        ("전기전자/IT하드웨어", ["반도체", "전자부품", "통신및방송장비", "컴퓨터", "전기장비", "절연선", "전동기", "배터리", "전지"]),
+        ("자동차/운수장비", ["자동차", "자동차부품", "운수장비", "선박", "항공기"]),
+        ("기계/장비", ["특수목적용기계", "일반목적용기계", "기계장비", "기계"]),
+        ("건설/엔지니어링", ["건축기술", "엔지니어링", "건물건설", "토목건설", "건설업"]),
+        ("금융", ["금융지원서비스업", "기타금융업", "보험업", "은행", "증권", "신탁"]),
+        ("화학/소재", ["화학", "기초화학", "기타화학", "의약화학", "플라스틱", "고무", "정유"]),
+        ("철강/금속", ["1차철강", "철강", "비철금속", "금속제품"]),
+        ("헬스케어", ["의약품", "의료용기기", "바이오", "자연과학연구개발", "연구개발"]),
+        ("소비재", ["식품", "음료", "알코올", "담배", "의복", "가구", "귀금속", "장신용품"]),
+        ("유통/상사", ["종합소매", "도매", "상품중개", "유통업"]),
+        ("운송", ["항공여객", "해상운송", "도로화물", "육상여객", "운수창고", "운수창고업"]),
+        ("에너지/유틸리티", ["전기가스", "연료용가스", "전력", "에너지", "가스"]),
+        ("소프트웨어/커뮤니케이션", ["소프트웨어", "인터넷", "자료처리", "포털", "방송", "통신"]),
+        ("부동산", ["부동산", "리츠"]),
+    ]
+    for broad_sector, keywords in mapping_rules:
+        if any(keyword in text for keyword in keywords):
+            return broad_sector
+    return "기타"
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Build sector map for KOSPI valid universe")
     p.add_argument("--universe-file", default=str(DEFAULT_UNIVERSE))
@@ -510,6 +540,7 @@ def _build_rows(
         market = str(meta.get("market") or base_market).strip() or base_market
         sector = str(meta.get("sector") or "").strip() or fallback_sector
         industry = str(meta.get("industry") or "").strip() or sector
+        broad_sector = map_kind_sector_to_broad_sector(sector)
         sector_candidates = str(meta.get("sector_candidates") or sector)
         index_ticker = str(meta.get("index_ticker") or "")
         index_name = str(meta.get("index_name") or "")
@@ -524,6 +555,7 @@ def _build_rows(
                 "name": name,
                 "market": market,
                 "sector": sector,
+                "broad_sector": broad_sector,
                 "industry": industry,
                 "sector_candidates": sector_candidates,
                 "index_ticker": index_ticker,
@@ -563,6 +595,7 @@ def _write_csv(path: Path, rows: list[dict[str, str]], overwrite: bool) -> None:
         "name",
         "market",
         "sector",
+        "broad_sector",
         "industry",
         "sector_candidates",
         "index_ticker",
@@ -627,6 +660,8 @@ def main() -> None:
     mapped_rows = sum(1 for r in output_rows if r.get("sector") != str(args.fallback_sector))
     unknown_rows = sum(1 for r in output_rows if r.get("sector") == str(args.fallback_sector))
     unknown_ratio = (unknown_rows / actual_rows) if actual_rows else 1.0
+    broad_sector_count = len({str(r.get("broad_sector") or "") for r in output_rows if str(r.get("broad_sector") or "")})
+    unknown_broad_sector_rows = sum(1 for r in output_rows if str(r.get("broad_sector") or "") == "UNKNOWN")
 
     summary = {
         "universe_rows": expected_rows,
@@ -634,6 +669,8 @@ def main() -> None:
         "mapped_rows": mapped_rows,
         "unknown_rows": unknown_rows,
         "unknown_ratio": round(unknown_ratio, 6),
+        "broad_sector_count": broad_sector_count,
+        "unknown_broad_sector_rows": unknown_broad_sector_rows,
         "output": str(output_path),
         "source": used_source,
         "source_detail": used_source_detail,

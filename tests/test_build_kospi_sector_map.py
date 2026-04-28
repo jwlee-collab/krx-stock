@@ -7,8 +7,23 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from scripts.build_kospi_sector_map import map_kind_sector_to_broad_sector
+
 
 class BuildKospiSectorMapTest(unittest.TestCase):
+    def test_map_kind_sector_to_broad_sector_fixture(self) -> None:
+        fixture = {
+            "반도체 제조업": "전기전자/IT하드웨어",
+            "자동차 신품 부품 제조업": "자동차/운수장비",
+            "금융 지원 서비스업": "금융",
+            "의약품 제조업": "헬스케어",
+            "부동산 임대업": "부동산",
+            "UNKNOWN": "UNKNOWN",
+            "기타 서비스업": "기타",
+        }
+        for sector, expected in fixture.items():
+            self.assertEqual(map_kind_sector_to_broad_sector(sector), expected)
+
     def test_manual_source_builds_same_unique_rows(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             tmp = Path(td)
