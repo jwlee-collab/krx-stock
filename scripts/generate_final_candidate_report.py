@@ -437,6 +437,7 @@ def _validate_candidate_outputs_not_identical(
     comparable_keys = sorted(set(baseline) & set(aggressive))
 
     max_abs_diff = {"total_return": 0.0, "excess_return": 0.0, "max_drawdown": 0.0}
+    diffs_total_return: list[float] = []
     for key in comparable_keys:
         b = baseline[key]
         a = aggressive[key]
@@ -444,6 +445,7 @@ def _validate_candidate_outputs_not_identical(
             diff = abs(float(b[metric]) - float(a[metric]))
             if diff > max_abs_diff[metric]:
                 max_abs_diff[metric] = diff
+        diffs_total_return.append(float(a["total_return"]) - float(b["total_return"]))
 
     monthly_max_abs_diff = 0.0
     if monthly_rows:
@@ -479,11 +481,289 @@ def _validate_candidate_outputs_not_identical(
         "status": status,
         "message": message,
         "paired_window_count": len(comparable_keys),
+        "candidate_diff_nonzero_count": sum(1 for d in diffs_total_return if abs(d) > tolerance),
+        "candidate_diff_zero_count": sum(1 for d in diffs_total_return if abs(d) <= tolerance),
+        "max_abs_candidate_diff": max((abs(d) for d in diffs_total_return), default=0.0),
+        "mean_abs_candidate_diff": mean([abs(d) for d in diffs_total_return]) if diffs_total_return else 0.0,
         "max_abs_diff": max_abs_diff,
         "monthly_strategy_return_max_abs_diff": monthly_max_abs_diff,
         "windows_identical": windows_identical,
         "monthly_identical": monthly_identical,
         "tolerance": tolerance,
+    }
+
+
+def _run_lookahead_validation(
+    conn: sqlite3.Connection,
+    mode: str,
+    sample_size: int,
+    universe_size: int,
+    lookback_days: int,
+) -> dict[str, object]:
+    base: dict[str, object] = {
+        "mode": mode,
+        "checked_rows": 0,
+        "violations": 0,
+        "checked_scope": "",
+        "status": "pass",
+        "warnings": [],
+    }
+    if mode == "sample":
+        res = validate_rolling_universe_no_lookahead(
+            conn,
+            universe_size=universe_size,
+            lookback_days=lookback_days,
+            sample_limit=sample_size,
+        )
+        base.update(res)
+        base["checked_scope"] = f"sample_limit={sample_size}"
+        if int(base["violations"]) > 0:
+            base["status"] = "fail"
+        return base
+
+    rows = conn.execute(
+        """
+        SELECT date, symbol, avg_dollar_volume
+        FROM daily_universe
+        WHERE universe_mode='rolling_liquidity'
+          AND universe_size=?
+          AND lookback_days=?
+        ORDER BY date, universe_rank
+        """,
+        (int(universe_size), int(lookback_days)),
+    ).fetchall()
+    if not rows:
+        base["status"] = "warn"
+        base["checked_scope"] = "daily_universe rows not found"
+        base["warnings"] = ["rolling universe rows not found; lookahead validation could not check full scope."]
+        return base
+
+    for row in rows:
+        rec = conn.execute(
+            """
+            WITH base AS (
+                SELECT
+                    date,
+                    close * volume AS dollar_volume,
+                    ROW_NUMBER() OVER (ORDER BY date) AS rn
+                FROM daily_prices
+                WHERE symbol=?
+            ),
+            cur AS (
+                SELECT rn
+                FROM base
+                WHERE date=?
+            )
+            SELECT AVG(prev.dollar_volume) AS avg_dv
+            FROM base prev, cur
+            WHERE prev.rn BETWEEN (cur.rn - ?) AND (cur.rn - 1)
+            """,
+            (row["symbol"], row["date"], int(lookback_days)),
+        ).fetchone()
+        if rec and rec["avg_dv"] is not None:
+            base["checked_rows"] = int(base["checked_rows"]) + 1
+            if abs(float(rec["avg_dv"]) - float(row["avg_dollar_volume"])) > 1e-6:
+                base["violations"] = int(base["violations"]) + 1
+
+    if mode == "full":
+        base["checked_scope"] = "all daily_universe rows for rolling_liquidity"
+    else:
+        base["checked_scope"] = "rebalance-proxy using all daily_universe rows (no dedicated decision-date table available)"
+        base["warnings"] = [
+            "rebalance mode used proxy check because explicit rebalance decision-date lineage columns were unavailable.",
+        ]
+        if int(base["checked_rows"]) == 0:
+            base["status"] = "warn"
+    if int(base["violations"]) > 0:
+        base["status"] = "fail"
+    elif mode == "rebalance" and base["warnings"]:
+        base["status"] = "warn"
+    return base
+
+
+def _build_candidate_diff_audit(window_rows: list[dict[str, object]]) -> tuple[list[dict[str, object]], dict[str, object]]:
+    metrics = ["total_return", "benchmark_return", "excess_return", "max_drawdown"]
+    baseline = {
+        (
+            str(r["eval_frequency"]),
+            int(r["horizon_months"]),
+            str(r["start_date"]),
+            str(r["end_date"]),
+        ): r
+        for r in window_rows
+        if str(r["candidate"]) == "baseline_old"
+    }
+    aggressive = {
+        (
+            str(r["eval_frequency"]),
+            int(r["horizon_months"]),
+            str(r["start_date"]),
+            str(r["end_date"]),
+        ): r
+        for r in window_rows
+        if str(r["candidate"]) == "aggressive_hybrid_v4"
+    }
+    paired_keys = sorted(set(baseline) & set(aggressive))
+    rows: list[dict[str, object]] = []
+    summary: dict[str, object] = {
+        "paired_window_count": len(paired_keys),
+        "metrics": {},
+    }
+    for metric in metrics:
+        diffs = [float(aggressive[k][metric]) - float(baseline[k][metric]) for k in paired_keys]
+        nonzero = sum(1 for x in diffs if abs(x) > 1e-12)
+        zero = len(diffs) - nonzero
+        max_abs = max((abs(x) for x in diffs), default=0.0)
+        mean_abs = mean([abs(x) for x in diffs]) if diffs else 0.0
+        summary["metrics"][metric] = {
+            "candidate_diff_nonzero_count": nonzero,
+            "candidate_diff_zero_count": zero,
+            "max_abs_candidate_diff": max_abs,
+            "mean_abs_candidate_diff": mean_abs,
+        }
+        combo_counts: dict[tuple[str, int], list[float]] = defaultdict(list)
+        for k, d in zip(paired_keys, diffs):
+            combo_counts[(k[0], k[1])].append(d)
+        for (freq, horizon), vals in sorted(combo_counts.items()):
+            nz = sum(1 for x in vals if abs(x) > 1e-12)
+            rows.append(
+                {
+                    "metric": metric,
+                    "eval_frequency": freq,
+                    "horizon_months": horizon,
+                    "paired_windows": len(vals),
+                    "candidate_diff_nonzero_count": nz,
+                    "candidate_diff_zero_count": len(vals) - nz,
+                    "max_abs_candidate_diff": max((abs(x) for x in vals), default=0.0),
+                    "mean_abs_candidate_diff": mean([abs(x) for x in vals]) if vals else 0.0,
+                }
+            )
+    return rows, summary
+
+
+def _build_zero_metric_audit(window_rows: list[dict[str, object]]) -> tuple[list[dict[str, object]], list[str]]:
+    metrics = ["total_return", "benchmark_return", "excess_return", "max_drawdown"]
+    grouped: dict[tuple[str, str, int], list[dict[str, object]]] = defaultdict(list)
+    warnings: list[str] = []
+    for row in window_rows:
+        grouped[(str(row["candidate"]), str(row["eval_frequency"]), int(row["horizon_months"]))].append(row)
+    out: list[dict[str, object]] = []
+    for (candidate, freq, horizon), rows in sorted(grouped.items()):
+        for metric in metrics:
+            vals = [float(r[metric]) if r.get(metric) is not None else float("nan") for r in rows]
+            nan_count = sum(1 for v in vals if math.isnan(v))
+            valid = [v for v in vals if not math.isnan(v)]
+            zero_count = sum(1 for v in valid if abs(v) <= 1e-12)
+            zero_rate = zero_count / len(rows) if rows else 0.0
+            out.append(
+                {
+                    "candidate": candidate,
+                    "eval_frequency": freq,
+                    "horizon_months": horizon,
+                    "metric": metric,
+                    "n_windows": len(rows),
+                    "zero_count": zero_count,
+                    "zero_rate": zero_rate,
+                    "nan_count": nan_count,
+                    "min": min(valid) if valid else None,
+                    "max": max(valid) if valid else None,
+                    "mean": mean(valid) if valid else None,
+                    "severity": "INFO" if metric == "max_drawdown" else ("WARN" if zero_count > 0 or nan_count > 0 else "INFO"),
+                }
+            )
+            if metric != "max_drawdown" and (zero_count > 0 or nan_count > 0):
+                warnings.append(
+                    f"zero_metric_audit WARN: candidate={candidate}, freq={freq}, horizon={horizon}, metric={metric}, zero_count={zero_count}, nan_count={nan_count}"
+                )
+    return out, warnings
+
+
+def _build_benchmark_sanity_audit(
+    monthly_rows: list[dict[str, object]],
+    equity_curve_rows: list[dict[str, object]],
+) -> tuple[list[dict[str, object]], dict[str, object], list[str]]:
+    rows: list[dict[str, object]] = []
+    warnings: list[str] = []
+    monthly_by_month: dict[str, dict[str, float]] = defaultdict(dict)
+    for row in monthly_rows:
+        monthly_by_month[str(row["month"])][str(row["candidate"])] = float(row["benchmark_return"])
+    inconsistent_months = 0
+    max_monthly_diff = 0.0
+    for month, by_candidate in sorted(monthly_by_month.items()):
+        vals = list(by_candidate.values())
+        diff = (max(vals) - min(vals)) if vals else 0.0
+        max_monthly_diff = max(max_monthly_diff, diff)
+        status = "PASS" if diff <= 1e-12 else "WARN"
+        if status != "PASS":
+            inconsistent_months += 1
+        rows.append(
+            {
+                "check_name": "monthly_benchmark_consistency",
+                "scope": month,
+                "status": status,
+                "value": diff,
+                "details": f"candidate_count={len(vals)}",
+            }
+        )
+
+    monthly_compounded_by_candidate: dict[str, float] = {}
+    by_candidate_monthly: dict[str, list[float]] = defaultdict(list)
+    for row in monthly_rows:
+        by_candidate_monthly[str(row["candidate"])].append(float(row["benchmark_return"]))
+    for candidate, rets in sorted(by_candidate_monthly.items()):
+        eq = 1.0
+        for r in rets:
+            eq *= (1.0 + r)
+        monthly_compounded_by_candidate[candidate] = eq - 1.0
+
+    eq_curve_by_candidate: dict[str, list[float]] = defaultdict(list)
+    for row in equity_curve_rows:
+        eq_curve_by_candidate[str(row["candidate"])].append(float(row["benchmark_equity"]))
+    eq_return_by_candidate: dict[str, float] = {}
+    for candidate, eqs in sorted(eq_curve_by_candidate.items()):
+        if len(eqs) >= 2 and eqs[0] != 0:
+            eq_return_by_candidate[candidate] = (eqs[-1] - eqs[0]) / eqs[0]
+        else:
+            eq_return_by_candidate[candidate] = 0.0
+
+    for candidate in sorted(set(monthly_compounded_by_candidate) | set(eq_return_by_candidate)):
+        monthly_ret = monthly_compounded_by_candidate.get(candidate, 0.0)
+        eq_ret = eq_return_by_candidate.get(candidate, 0.0)
+        diff = abs(monthly_ret - eq_ret)
+        rows.append(
+            {
+                "check_name": "monthly_vs_equity_compounded_return",
+                "scope": candidate,
+                "status": "PASS" if diff <= 1e-6 else "WARN",
+                "value": diff,
+                "details": f"monthly_compounded={monthly_ret:.12g}, equity_compounded={eq_ret:.12g}",
+            }
+        )
+        if diff > 1e-6:
+            warnings.append(f"benchmark consistency mismatch for candidate={candidate}: abs_diff={diff:.6g}")
+
+    if monthly_compounded_by_candidate:
+        repr_ret = next(iter(monthly_compounded_by_candidate.values()))
+        if abs(repr_ret) < 1e-6:
+            warnings.append("benchmark compounded return is near zero; sanity-check benchmark construction.")
+
+    summary = {
+        "inconsistent_month_count": inconsistent_months,
+        "max_monthly_candidate_diff": max_monthly_diff,
+        "monthly_compounded_by_candidate": monthly_compounded_by_candidate,
+        "equity_compounded_by_candidate": eq_return_by_candidate,
+    }
+    return rows, summary, warnings
+
+
+def _build_run_id_tracking_summary(full_period_rows: list[dict[str, object]], window_rows: list[dict[str, object]], worst_rows: list[dict[str, object]]) -> dict[str, object]:
+    full_ids = sorted({str(r.get("run_id")) for r in full_period_rows if r.get("run_id")})
+    window_has = bool(window_rows) and all(bool(r.get("run_id")) for r in window_rows)
+    worst_has = bool(worst_rows) and all(bool(r.get("run_id")) for r in worst_rows)
+    return {
+        "full_period_run_ids": full_ids,
+        "window_run_id_available": window_has,
+        "worst_window_run_id_available": worst_has,
     }
 
 
@@ -667,6 +947,8 @@ def main() -> None:
     parser.add_argument("--horizons", default="1,3,6,12")
     parser.add_argument("--start-date")
     parser.add_argument("--end-date")
+    parser.add_argument("--lookahead-check-mode", default="sample", choices=["sample", "full", "rebalance"])
+    parser.add_argument("--lookahead-sample-size", type=int, default=50)
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--allow-smoke", action="store_true", help="Allow full-period only run without robustness windows")
     args = parser.parse_args()
@@ -696,12 +978,15 @@ def main() -> None:
     horizons = _parse_int_tokens(args.horizons)
 
     universe_build = build_rolling_liquidity_universe(conn, universe_size=100, lookback_days=20)
-    try:
-        lookahead_validation = validate_rolling_universe_no_lookahead(conn, universe_size=100, lookback_days=20)
-        if int(lookahead_validation.get("violations", 0)) > 0:
-            raise ValueError(f"lookahead validation violations > 0: {lookahead_validation}")
-    except Exception as exc:
-        lookahead_validation = {"status": "unavailable", "reason": str(exc)}
+    lookahead_validation = _run_lookahead_validation(
+        conn,
+        mode=args.lookahead_check_mode,
+        sample_size=args.lookahead_sample_size,
+        universe_size=100,
+        lookback_days=20,
+    )
+    if int(lookahead_validation.get("violations", 0)) > 0:
+        raise ValueError(f"lookahead validation violations > 0: {lookahead_validation}")
 
     benchmark_by_date = _build_benchmark_returns(conn, trading_dates, allowed_symbols)
     if not benchmark_by_date:
@@ -833,6 +1118,10 @@ def main() -> None:
         "status": "not_run",
         "message": "window validation skipped",
         "paired_window_count": 0,
+        "candidate_diff_nonzero_count": 0,
+        "candidate_diff_zero_count": 0,
+        "max_abs_candidate_diff": 0.0,
+        "mean_abs_candidate_diff": 0.0,
         "max_abs_diff": {"total_return": None, "excess_return": None, "max_drawdown": None},
         "monthly_strategy_return_max_abs_diff": None,
         "windows_identical": False,
@@ -855,6 +1144,23 @@ def main() -> None:
 
     summary_rows = _build_candidate_summary(window_rows) if window_rows else []
     worst_rows = _build_worst_windows(window_rows) if window_rows else []
+    candidate_diff_rows, candidate_diff_summary = _build_candidate_diff_audit(window_rows) if window_rows else ([], {"paired_window_count": 0, "metrics": {}})
+    zero_metric_rows, zero_metric_warnings = _build_zero_metric_audit(window_rows) if window_rows else ([], [])
+    benchmark_sanity_rows, benchmark_sanity_summary, benchmark_warnings = _build_benchmark_sanity_audit(monthly_rows, equity_curve_rows)
+    warnings.extend(zero_metric_warnings)
+    warnings.extend(benchmark_warnings)
+    if lookahead_validation.get("warnings"):
+        warnings.extend([str(w) for w in lookahead_validation["warnings"]])
+    run_id_tracking_summary = _build_run_id_tracking_summary(full_period_rows, window_rows, worst_rows)
+    assumptions = [
+        "universe is current-valid KOSPI 495, historical delisted names may be excluded",
+        "survivorship bias may exist",
+        "benchmark is universe equal-weight proxy",
+        "stop loss execution assumption used by current backtest",
+        "transaction cost/slippage assumption is fixed in current backtest settings and needs stress testing",
+        "rolling liquidity universe may introduce universe drift",
+        "not a live trading system, research/reporting use only",
+    ]
 
     if not args.allow_smoke and not summary_rows:
         raise ValueError("final mode requires non-empty candidate_summary.csv")
@@ -866,6 +1172,9 @@ def main() -> None:
     drawdown_curve_csv = outdir / "drawdown_curve.csv"
     monthly_returns_csv = outdir / "monthly_returns.csv"
     worst_windows_csv = outdir / "worst_windows.csv"
+    candidate_diff_csv = outdir / "candidate_diff_audit.csv"
+    zero_metric_csv = outdir / "zero_metric_audit.csv"
+    benchmark_sanity_csv = outdir / "benchmark_sanity_audit.csv"
     report_md = outdir / "final_candidate_report.md"
     manifest_path = outdir / "manifest.json"
 
@@ -939,6 +1248,37 @@ def main() -> None:
         "max_drawdown",
         "run_id",
     ])
+    _write_csv(candidate_diff_csv, candidate_diff_rows, fieldnames=[
+        "metric",
+        "eval_frequency",
+        "horizon_months",
+        "paired_windows",
+        "candidate_diff_nonzero_count",
+        "candidate_diff_zero_count",
+        "max_abs_candidate_diff",
+        "mean_abs_candidate_diff",
+    ])
+    _write_csv(zero_metric_csv, zero_metric_rows, fieldnames=[
+        "candidate",
+        "eval_frequency",
+        "horizon_months",
+        "metric",
+        "n_windows",
+        "zero_count",
+        "zero_rate",
+        "nan_count",
+        "min",
+        "max",
+        "mean",
+        "severity",
+    ])
+    _write_csv(benchmark_sanity_csv, benchmark_sanity_rows, fieldnames=[
+        "check_name",
+        "scope",
+        "status",
+        "value",
+        "details",
+    ])
 
     plots = _plot_outputs(outdir, equity_curve_rows, drawdown_rows, monthly_rows)
 
@@ -972,12 +1312,21 @@ def main() -> None:
         f"- full_period: {full_start} ~ {full_end}",
         f"- allow_smoke: {args.allow_smoke}",
         f"- robustness_rows_loaded: {len(window_rows)}",
+        f"- lookahead_check_mode: {args.lookahead_check_mode}",
+        f"- lookahead_sample_size: {args.lookahead_sample_size}",
         "",
         "## Diagnostics",
         f"- warnings: {len(warnings)}",
     ]
     report_lines.extend([f"- warning: {w}" for w in warnings] if warnings else ["- warning: none"])
     report_lines.extend([
+        "",
+        "### Lookahead validation",
+        f"- status: {lookahead_validation.get('status')}",
+        f"- mode: {lookahead_validation.get('mode')}",
+        f"- checked_rows: {lookahead_validation.get('checked_rows')}",
+        f"- violations: {lookahead_validation.get('violations')}",
+        f"- checked_scope: {lookahead_validation.get('checked_scope')}",
         "",
         "### Score signatures",
     ])
@@ -1045,10 +1394,63 @@ def main() -> None:
         f"- status: {isolation_check['status']}",
         f"- message: {isolation_check['message']}",
         f"- paired_window_count: {isolation_check['paired_window_count']}",
+        f"- candidate_diff_nonzero_count: {isolation_check['candidate_diff_nonzero_count']}",
+        f"- candidate_diff_zero_count: {isolation_check['candidate_diff_zero_count']}",
+        f"- max_abs_candidate_diff: {float(isolation_check['max_abs_candidate_diff']):.12g}",
+        f"- mean_abs_candidate_diff: {float(isolation_check['mean_abs_candidate_diff']):.12g}",
         f"- max_abs_diff_total_return: {float(isolation_check['max_abs_diff']['total_return']):.12g}" if isolation_check['max_abs_diff']['total_return'] is not None else "- max_abs_diff_total_return: unavailable",
         f"- max_abs_diff_excess_return: {float(isolation_check['max_abs_diff']['excess_return']):.12g}" if isolation_check['max_abs_diff']['excess_return'] is not None else "- max_abs_diff_excess_return: unavailable",
         f"- max_abs_diff_max_drawdown: {float(isolation_check['max_abs_diff']['max_drawdown']):.12g}" if isolation_check['max_abs_diff']['max_drawdown'] is not None else "- max_abs_diff_max_drawdown: unavailable",
         f"- monthly_strategy_return_max_abs_diff: {float(isolation_check['monthly_strategy_return_max_abs_diff']):.12g}" if isolation_check['monthly_strategy_return_max_abs_diff'] is not None else "- monthly_strategy_return_max_abs_diff: unavailable",
+        "- This count measures candidate-to-candidate difference, not zero-return windows.",
+    ])
+    report_lines.extend(["", "### Candidate diff audit"])
+    if candidate_diff_rows:
+        for row in candidate_diff_rows:
+            report_lines.append(
+                f"- metric={row['metric']} {row['eval_frequency']} h={row['horizon_months']}m paired={row['paired_windows']} diff_nonzero={row['candidate_diff_nonzero_count']} diff_zero={row['candidate_diff_zero_count']} max_abs={float(row['max_abs_candidate_diff']):.6g} mean_abs={float(row['mean_abs_candidate_diff']):.6g}"
+            )
+    else:
+        report_lines.append("- unavailable")
+
+    report_lines.extend(["", "## Zero metric audit"])
+    if zero_metric_rows:
+        for row in zero_metric_rows:
+            report_lines.append(
+                f"- [{row['severity']}] {row['candidate']} {row['eval_frequency']} h={row['horizon_months']}m {row['metric']}: n={row['n_windows']}, zero={row['zero_count']} ({float(row['zero_rate']):.2%}), nan={row['nan_count']}, min={row['min']}, max={row['max']}, mean={row['mean']}"
+            )
+    else:
+        report_lines.append("- unavailable")
+
+    report_lines.extend(["", "## Benchmark sanity check"])
+    for row in benchmark_sanity_rows:
+        report_lines.append(
+            f"- {row['check_name']} [{row['status']}] scope={row['scope']}, value={row['value']}, details={row['details']}"
+        )
+    report_lines.extend(
+        [
+            "- warning: additional benchmark expansion is recommended (valid495 equal-weight, rolling liquidity top100 equal-weight, KOSPI index, KOSPI200, random top5 Monte Carlo benchmark).",
+        ]
+    )
+
+    report_lines.extend([
+        "",
+        "## Run ID tracking",
+        f"- full_period_run_ids: {', '.join(run_id_tracking_summary['full_period_run_ids']) if run_id_tracking_summary['full_period_run_ids'] else 'none'}",
+        f"- window_run_id_available: {run_id_tracking_summary['window_run_id_available']}",
+        f"- worst_window_run_id_available: {run_id_tracking_summary['worst_window_run_id_available']}",
+    ])
+
+    report_lines.extend([
+        "",
+        "## Assumptions",
+    ])
+    report_lines.extend([f"- {item}" for item in assumptions])
+
+    report_lines.extend([
+        "",
+        "## QA warnings",
+        "- transaction cost/slippage stress scenarios should be run: 0 bps, 5 bps one-way, 10 bps one-way, 20 bps one-way, 30 bps one-way.",
     ])
 
     report_lines.extend(["", "## Production decision", f"- decision: {decision}"])
@@ -1081,6 +1483,8 @@ def main() -> None:
             "start_date": args.start_date,
             "end_date": args.end_date,
             "allow_smoke": args.allow_smoke,
+            "lookahead_check_mode": args.lookahead_check_mode,
+            "lookahead_sample_size": args.lookahead_sample_size,
         },
         "db_path": args.db,
         "universe_path": args.universe_file,
@@ -1103,6 +1507,7 @@ def main() -> None:
         ],
         "date_range": {"start_date": full_start, "end_date": full_end},
         "full_period_run_ids": {row["candidate"]: row.get("run_id") for row in full_period_rows},
+        "window_run_id_available": run_id_tracking_summary["window_run_id_available"],
         "lookahead_validation": lookahead_validation,
         "rows_changed": universe_build.get("row_changes"),
         "output_file_paths": {
@@ -1114,11 +1519,30 @@ def main() -> None:
             "equity_curve_csv": str(equity_curve_csv),
             "drawdown_curve_csv": str(drawdown_curve_csv),
             "worst_windows_csv": str(worst_windows_csv),
+            "candidate_diff_csv": str(candidate_diff_csv),
+            "zero_metric_csv": str(zero_metric_csv),
+            "benchmark_sanity_csv": str(benchmark_sanity_csv),
             "report_md": str(report_md),
             "plots": plots,
         },
         "score_signatures": score_signatures,
         "candidate_scoring_isolation_check": isolation_check,
+        "report_quality_checks": {
+            "candidate_scoring_isolation_check": isolation_check,
+            "lookahead_validation": lookahead_validation,
+            "candidate_diff_summary": candidate_diff_summary,
+            "zero_metric_audit_summary": {
+                "rows": len(zero_metric_rows),
+                "warn_rows": sum(1 for r in zero_metric_rows if r.get("severity") == "WARN"),
+            },
+            "benchmark_sanity_summary": benchmark_sanity_summary,
+            "run_id_tracking_summary": run_id_tracking_summary,
+            "assumptions": assumptions,
+            "warnings": warnings + [
+                "benchmark extension needed: valid495 equal-weight, rolling liquidity top100 equal-weight, KOSPI index, KOSPI200, random top5 Monte Carlo benchmark",
+                "transaction cost/slippage stress pending: 0/5/10/20/30 bps one-way",
+            ],
+        },
         "warnings": warnings,
     }
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
