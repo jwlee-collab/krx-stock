@@ -66,6 +66,71 @@ def _parse_int_tokens(value: str) -> list[int]:
     return parsed
 
 
+def _sanitize_identifier(value: str) -> str:
+    sanitized = "".join(ch if ch.isalnum() or ch == "_" else "_" for ch in value)
+    if not sanitized:
+        raise ValueError("identifier cannot be empty after sanitization")
+    return sanitized
+
+
+def _daily_scores_columns(conn: sqlite3.Connection) -> list[str]:
+    cols = [str(r["name"]) for r in conn.execute("PRAGMA table_info(daily_scores)").fetchall()]
+    if not cols:
+        raise ValueError("daily_scores table not found")
+    return cols
+
+
+def _snapshot_candidate_scores(conn: sqlite3.Connection, candidate: CandidateConfig) -> tuple[str, list[str]]:
+    columns = _daily_scores_columns(conn)
+    col_sql = ", ".join(columns)
+    table_name = f"tmp_final_candidate_scores_{_sanitize_identifier(candidate.name)}"
+    conn.execute(f"DROP TABLE IF EXISTS temp.{table_name}")
+    conn.execute(f"CREATE TEMP TABLE {table_name} AS SELECT {col_sql} FROM daily_scores")
+    return table_name, columns
+
+
+def _restore_candidate_scores(conn: sqlite3.Connection, snapshot_table: str, columns: list[str]) -> None:
+    col_sql = ", ".join(columns)
+    conn.execute("DELETE FROM daily_scores")
+    conn.execute(f"INSERT INTO daily_scores ({col_sql}) SELECT {col_sql} FROM temp.{snapshot_table}")
+
+
+def _collect_score_signature(conn: sqlite3.Connection, scoring_profile: str) -> dict[str, object]:
+    row_count = int(conn.execute("SELECT COUNT(1) FROM daily_scores").fetchone()[0])
+    first_date = conn.execute("SELECT MIN(date) FROM daily_scores").fetchone()[0]
+    last_date = conn.execute("SELECT MAX(date) FROM daily_scores").fetchone()[0]
+    sampled_dates = [d for d in [first_date, last_date] if d]
+    if first_date and last_date and first_date != last_date:
+        dates = [r["date"] for r in conn.execute("SELECT DISTINCT date FROM daily_scores ORDER BY date").fetchall()]
+        if dates:
+            sampled_dates.insert(1, dates[len(dates) // 2])
+
+    top_symbols_by_date: dict[str, list[str]] = {}
+    for d in sampled_dates:
+        symbols = [
+            str(r["symbol"])
+            for r in conn.execute(
+                """
+                SELECT symbol
+                FROM daily_scores
+                WHERE date=?
+                ORDER BY rank ASC, symbol ASC
+                LIMIT 10
+                """,
+                (d,),
+            ).fetchall()
+        ]
+        top_symbols_by_date[str(d)] = symbols
+
+    return {
+        "scoring_profile": scoring_profile,
+        "row_count": row_count,
+        "first_score_date": first_date,
+        "last_score_date": last_date,
+        "top10_symbols_by_sample_date": top_symbols_by_date,
+    }
+
+
 def _add_months(d: date, months: int) -> date:
     total = (d.year * 12 + (d.month - 1)) + months
     year = total // 12
@@ -285,6 +350,11 @@ def _build_candidate_summary(window_rows: list[dict[str, object]]) -> list[dict[
         out.append(
             {
                 "candidate": candidate,
+                "scoring_profile": next(
+                    str(r.get("scoring_profile"))
+                    for r in rows
+                    if r.get("scoring_profile") is not None
+                ),
                 "eval_frequency": freq,
                 "horizon_months": horizon,
                 "n_windows": len(rows),
@@ -319,6 +389,7 @@ def _build_worst_windows(window_rows: list[dict[str, object]]) -> list[dict[str,
             out.append(
                 {
                     "candidate": candidate,
+                    "scoring_profile": str(worst.get("scoring_profile")),
                     "eval_frequency": freq,
                     "horizon_months": horizon,
                     "worst_metric": metric,
@@ -331,6 +402,42 @@ def _build_worst_windows(window_rows: list[dict[str, object]]) -> list[dict[str,
                 }
             )
     return out
+
+
+def _all_comparable_windows_identical(window_rows: list[dict[str, object]]) -> bool:
+    baseline = {
+        (
+            str(r["eval_frequency"]),
+            int(r["horizon_months"]),
+            str(r["start_date"]),
+            str(r["end_date"]),
+        ): r
+        for r in window_rows
+        if str(r["candidate"]) == "baseline_old"
+    }
+    aggressive = {
+        (
+            str(r["eval_frequency"]),
+            int(r["horizon_months"]),
+            str(r["start_date"]),
+            str(r["end_date"]),
+        ): r
+        for r in window_rows
+        if str(r["candidate"]) == "aggressive_hybrid_v4"
+    }
+    comparable_keys = sorted(set(baseline) & set(aggressive))
+    if not comparable_keys:
+        return False
+    for key in comparable_keys:
+        b = baseline[key]
+        a = aggressive[key]
+        if not (
+            float(b["total_return"]) == float(a["total_return"])
+            and float(b["excess_return"]) == float(a["excess_return"])
+            and float(b["max_drawdown"]) == float(a["max_drawdown"])
+        ):
+            return False
+    return True
 
 
 def _write_csv(path: Path, rows: list[dict[str, object]], fieldnames: list[str] | None = None) -> None:
@@ -468,6 +575,13 @@ def _decision_text(summary_rows: list[dict[str, object]]) -> tuple[str, list[str
         "mdd_breach_30_rate": agg(aggressive_rows, "mdd_breach_30_rate"),
         "mdd_breach_35_rate": agg(aggressive_rows, "mdd_breach_35_rate"),
     }
+    if b == a:
+        decision = "Candidates are indistinguishable in this run; check scoring isolation."
+        rationale = [
+            "baseline_old and aggressive_hybrid_v4 are exactly tied across aggregated robustness metrics.",
+            "Candidates are indistinguishable in this run; check scoring isolation.",
+        ]
+        return decision, rationale
 
     risk_degraded = (
         (a["worst_mdd"] < b["worst_mdd"] - 0.03)
@@ -546,6 +660,9 @@ def main() -> None:
     if not benchmark_by_date:
         raise ValueError("benchmark return series is empty")
 
+    candidate_score_snapshots: dict[str, tuple[str, list[str]]] = {}
+    score_signatures: list[dict[str, object]] = []
+    warnings: list[str] = []
     for candidate in CANDIDATES:
         generate_daily_scores(
             conn,
@@ -556,6 +673,20 @@ def main() -> None:
             universe_size=100,
             universe_lookback_days=20,
         )
+        score_signatures.append(_collect_score_signature(conn, candidate.scoring_profile))
+        candidate_score_snapshots[candidate.name] = _snapshot_candidate_scores(conn, candidate)
+
+    signatures_by_profile = {str(s["scoring_profile"]): s for s in score_signatures}
+    old_sig = signatures_by_profile.get("old")
+    hybrid_sig = signatures_by_profile.get("hybrid_v4")
+    if old_sig and hybrid_sig:
+        if (
+            int(old_sig["row_count"]) == int(hybrid_sig["row_count"])
+            and old_sig["first_score_date"] == hybrid_sig["first_score_date"]
+            and old_sig["last_score_date"] == hybrid_sig["last_score_date"]
+            and old_sig["top10_symbols_by_sample_date"] == hybrid_sig["top10_symbols_by_sample_date"]
+        ):
+            warnings.append("score signatures are identical for old and hybrid_v4; verify scoring differentiation.")
 
     equity_curve_rows: list[dict[str, object]] = []
     drawdown_rows: list[dict[str, object]] = []
@@ -565,6 +696,8 @@ def main() -> None:
     full_start = trading_dates[0]
     full_end = trading_dates[-1]
     for candidate in CANDIDATES:
+        snapshot_table, columns = candidate_score_snapshots[candidate.name]
+        _restore_candidate_scores(conn, snapshot_table, columns)
         result = _run_candidate_backtest(conn, candidate, full_start, full_end, benchmark_by_date)
         full_period_rows.append(
             {
@@ -623,10 +756,13 @@ def main() -> None:
                     if not end:
                         continue
                     for candidate in CANDIDATES:
+                        snapshot_table, columns = candidate_score_snapshots[candidate.name]
+                        _restore_candidate_scores(conn, snapshot_table, columns)
                         r = _run_candidate_backtest(conn, candidate, start, end, benchmark_by_date)
                         window_rows.append(
                             {
                                 "candidate": candidate.name,
+                                "scoring_profile": candidate.scoring_profile,
                                 "eval_frequency": freq,
                                 "horizon_months": horizon,
                                 "start_date": start,
@@ -650,6 +786,10 @@ def main() -> None:
             raise ValueError(f"window results must include both candidates, got={candidates_in_window}")
         if any(r.get("benchmark_return") is None for r in window_rows):
             raise ValueError("benchmark_return missing in window rows")
+        if _all_comparable_windows_identical(window_rows):
+            raise ValueError("candidate outputs are identical across all windows; scoring isolation failure likely")
+    elif window_rows and _all_comparable_windows_identical(window_rows):
+        warnings.append("candidate outputs are identical across all windows; scoring isolation failure likely")
 
     summary_rows = _build_candidate_summary(window_rows) if window_rows else []
     worst_rows = _build_worst_windows(window_rows) if window_rows else []
@@ -671,6 +811,7 @@ def main() -> None:
     _write_csv(monthly_returns_csv, monthly_rows)
     _write_csv(window_results_csv, window_rows, fieldnames=[
         "candidate",
+        "scoring_profile",
         "eval_frequency",
         "horizon_months",
         "start_date",
@@ -686,6 +827,7 @@ def main() -> None:
     ])
     _write_csv(summary_csv, summary_rows, fieldnames=[
         "candidate",
+        "scoring_profile",
         "eval_frequency",
         "horizon_months",
         "n_windows",
@@ -706,6 +848,7 @@ def main() -> None:
     ])
     _write_csv(worst_windows_csv, worst_rows, fieldnames=[
         "candidate",
+        "scoring_profile",
         "eval_frequency",
         "horizon_months",
         "worst_metric",
@@ -750,12 +893,27 @@ def main() -> None:
         f"- allow_smoke: {args.allow_smoke}",
         f"- robustness_rows_loaded: {len(window_rows)}",
         "",
+        "## Diagnostics",
+        f"- warnings: {len(warnings)}",
+    ]
+    report_lines.extend([f"- warning: {w}" for w in warnings] if warnings else ["- warning: none"])
+    report_lines.extend([
+        "",
+        "### Score signatures",
+    ])
+    for sig in score_signatures:
+        report_lines.append(
+            f"- scoring_profile={sig['scoring_profile']}, rows={sig['row_count']}, first={sig['first_score_date']}, last={sig['last_score_date']}, samples={json.dumps(sig['top10_symbols_by_sample_date'], ensure_ascii=False)}"
+        )
+
+    report_lines.extend([
+        "",
         "## Candidate configs",
         "- baseline_old: scoring_profile=old, top_n=5, min_holding_days=10, keep_rank_threshold=9, rebalance_frequency=weekly, position_stop_loss_pct=0.10, stop_loss_cash_mode=keep_cash, stop_loss_cooldown_days=0, overheat_gate=OFF, entry_quality_gate=OFF",
         "- aggressive_hybrid_v4: scoring_profile=hybrid_v4, top_n=5, min_holding_days=10, keep_rank_threshold=9, rebalance_frequency=weekly, position_stop_loss_pct=0.10, stop_loss_cash_mode=keep_cash, stop_loss_cooldown_days=0, overheat_gate=OFF, entry_quality_gate=OFF",
         "",
         "## Full-period result",
-    ]
+    ])
     for row in full_period_rows:
         report_lines.append(
             f"- {row['candidate']}: total={float(row['total_return']):.2%}, benchmark={float(row['benchmark_return']):.2%}, excess={float(row['excess_return']):.2%}, mdd={float(row['max_drawdown']):.2%}, turnover={row['turnover']}, avg_position_count={row['avg_position_count']:.2f}, max_single_weight_observed={float(row['max_single_weight_observed']):.4f}"
@@ -865,6 +1023,8 @@ def main() -> None:
             "report_md": str(report_md),
             "plots": plots,
         },
+        "score_signatures": score_signatures,
+        "warnings": warnings,
     }
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
 
