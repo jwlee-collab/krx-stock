@@ -272,19 +272,23 @@ def _read_csv_rows(path: Path) -> list[dict[str, str]]:
         return list(csv.DictReader(f))
 
 
-def _resolve_reference_baseline_rows(reference_dir: Path) -> tuple[dict[str, str] | None, list[dict[str, str]]]:
-    full_rows: list[dict[str, str]] = []
-    window_rows: list[dict[str, str]] = []
-    for fname in ("full_period_results.csv", "candidate_summary.csv"):
-        rows = _read_csv_rows(reference_dir / fname)
-        if rows:
-            full_rows = rows
-            break
-    window_rows = _read_csv_rows(reference_dir / "window_results.csv")
-
+def _resolve_reference_baseline_rows(
+    reference_dir: Path, *, eval_frequency: str, horizon_months: int
+) -> tuple[dict[str, str] | None, dict[str, str] | None]:
+    summary_rows = _read_csv_rows(reference_dir / "candidate_summary.csv")
+    full_rows = _read_csv_rows(reference_dir / "full_period_results.csv")
+    summary_baseline = next(
+        (
+            r
+            for r in summary_rows
+            if str(r.get("candidate")) == "baseline_old"
+            and str(r.get("eval_frequency")) == str(eval_frequency)
+            and int(r.get("horizon_months", 0)) == int(horizon_months)
+        ),
+        None,
+    )
     full_baseline = next((r for r in full_rows if str(r.get("candidate")) == "baseline_old"), None)
-    baseline_windows = [r for r in window_rows if str(r.get("candidate")) == "baseline_old"]
-    return full_baseline, baseline_windows
+    return summary_baseline, full_baseline
 
 
 def _compare_metric_rows(
@@ -296,10 +300,37 @@ def _compare_metric_rows(
 ) -> list[dict[str, object]]:
     out: list[dict[str, object]] = []
     for key in metric_keys:
+        left_has_key = key in left
+        right_has_key = key in right
+        if not left_has_key or not right_has_key:
+            out.append(
+                {
+                    "metric": key,
+                    "left": None,
+                    "right": None,
+                    "abs_diff": None,
+                    "within_tolerance": False,
+                    "left_has_key": left_has_key,
+                    "right_has_key": right_has_key,
+                    "missing_column": True,
+                }
+            )
+            continue
         lv = float(left.get(key, float("nan")))
         rv = float(right.get(key, float("nan")))
         diff = abs(lv - rv)
-        out.append({"metric": key, "left": lv, "right": rv, "abs_diff": diff, "within_tolerance": diff <= tolerance})
+        out.append(
+            {
+                "metric": key,
+                "left": lv,
+                "right": rv,
+                "abs_diff": diff,
+                "within_tolerance": diff <= tolerance,
+                "left_has_key": True,
+                "right_has_key": True,
+                "missing_column": False,
+            }
+        )
     return out
 
 
@@ -307,13 +338,22 @@ def _print_parity_diff_table(rows: list[dict[str, object]]) -> None:
     if not rows:
         print("no-cap parity diff: no rows")
         return
-    headers = ["metric", "reference_value", "guardrail_value", "abs_diff", "status"]
+    headers = ["scope", "metric", "reference_value", "guardrail_value", "abs_diff", "status"]
     table_rows = [
         [
+            str(r.get("scope", "")),
             str(r.get("metric", "")),
-            f'{float(r.get("reference_value", float("nan"))):.12f}',
-            f'{float(r.get("guardrail_value", float("nan"))):.12f}',
-            f'{float(r.get("abs_diff", float("nan"))):.12f}',
+            (
+                f'{float(r.get("reference_value", float("nan"))):.12f}'
+                if r.get("reference_value") is not None
+                else "N/A"
+            ),
+            (
+                f'{float(r.get("guardrail_value", float("nan"))):.12f}'
+                if r.get("guardrail_value") is not None
+                else "N/A"
+            ),
+            f'{float(r.get("abs_diff", float("nan"))):.12f}' if r.get("abs_diff") is not None else "N/A",
             str(r.get("status", "")),
         ]
         for r in rows
@@ -334,6 +374,8 @@ def _print_parity_diff_table(rows: list[dict[str, object]]) -> None:
 def _write_single_row_csv(path: Path, row: dict[str, object]) -> None:
     fields = list(row.keys())
     with path.open("w", encoding="utf-8", newline="") as f:
+        if not fields:
+            return
         w = csv.DictWriter(f, fieldnames=fields)
         w.writeheader()
         w.writerow(row)
@@ -835,6 +877,10 @@ def main() -> None:
         "reference_final_report_dir": args.reference_final_report_dir,
         "tolerance": PARITY_TOLERANCE,
         "no_cap_parity_diff_csv": None,
+        "no_cap_reference_summary_row_csv": None,
+        "no_cap_guardrail_summary_row_csv": None,
+        "no_cap_reference_full_period_row_csv": None,
+        "no_cap_guardrail_full_period_row_csv": None,
         "no_cap_reference_row_csv": None,
         "no_cap_guardrail_row_csv": None,
         "no_cap_parity_debug_json": None,
@@ -846,14 +892,18 @@ def main() -> None:
 
     if args.reference_final_report_dir:
         ref_dir = Path(args.reference_final_report_dir)
-        ref_full_baseline, ref_window_baseline_rows = _resolve_reference_baseline_rows(ref_dir)
-        if ref_full_baseline is None:
-            raise ValueError(f"reference baseline_old not found in {ref_dir}")
+        ref_summary, ref_full_baseline = _resolve_reference_baseline_rows(
+            ref_dir,
+            eval_frequency="quarterly",
+            horizon_months=12,
+        )
+        ref_full_baseline_row = ref_full_baseline if ref_full_baseline is not None else {}
+        ref_summary_row = ref_summary if ref_summary is not None else {}
 
         full_metrics = ["total_return", "benchmark_return", "excess_return", "max_drawdown", "max_single_weight_observed"]
         full_diffs = _compare_metric_rows(
             left=no_cap_full,
-            right=ref_full_baseline,
+            right=ref_full_baseline_row,
             metric_keys=full_metrics,
             tolerance=PARITY_TOLERANCE,
         )
@@ -861,7 +911,9 @@ def main() -> None:
             "mean_total_return",
             "mean_benchmark_return",
             "mean_excess_return",
+            "median_excess_return",
             "p25_excess_return",
+            "win_vs_benchmark",
             "worst_total_return",
             "worst_excess_return",
             "worst_mdd",
@@ -879,26 +931,27 @@ def main() -> None:
             ),
             None,
         )
-        ref_summary = next(
-            (
-                r
-                for r in ref_window_baseline_rows
-                if str(r.get("eval_frequency")) == "quarterly" and int(r.get("horizon_months", 0)) == 12
-            ),
-            None,
+        no_cap_summary_row = no_cap_summary if no_cap_summary is not None else {}
+        summary_diffs = _compare_metric_rows(
+            left=no_cap_summary_row,
+            right=ref_summary_row,
+            metric_keys=summary_metrics,
+            tolerance=PARITY_TOLERANCE,
         )
-        summary_diffs: list[dict[str, object]] = []
-        if no_cap_summary and ref_summary:
-            summary_diffs = _compare_metric_rows(
-                left=no_cap_summary,
-                right=ref_summary,
-                metric_keys=summary_metrics,
-                tolerance=PARITY_TOLERANCE,
-            )
 
         parity_diff_rows: list[dict[str, object]] = []
         for scope, diffs in [("summary_q12", summary_diffs), ("full_period", full_diffs)]:
             for d in diffs:
+                missing_column = bool(d.get("missing_column"))
+                if missing_column:
+                    if not d.get("left_has_key", False):
+                        status = "FAIL_MISSING_GUARDRAIL_COLUMN"
+                    elif not d.get("right_has_key", False):
+                        status = "FAIL_MISSING_REFERENCE_COLUMN"
+                    else:
+                        status = "FAIL_MISSING_COLUMN"
+                else:
+                    status = "PASS" if d["within_tolerance"] else "FAIL"
                 parity_diff_rows.append(
                     {
                         "scope": scope,
@@ -906,7 +959,7 @@ def main() -> None:
                         "reference_value": d["right"],
                         "guardrail_value": d["left"],
                         "abs_diff": d["abs_diff"],
-                        "status": "PASS" if d["within_tolerance"] else "FAIL",
+                        "status": status,
                     }
                 )
 
@@ -927,11 +980,20 @@ def main() -> None:
         summary_ok = bool(summary_diffs) and all(bool(d["within_tolerance"]) for d in summary_diffs)
         parity_ok = full_ok and summary_ok
         parity_diff_csv = outdir / "no_cap_parity_diff.csv"
+        no_cap_reference_summary_row_csv = outdir / "no_cap_reference_summary_row.csv"
+        no_cap_guardrail_summary_row_csv = outdir / "no_cap_guardrail_summary_row.csv"
+        no_cap_reference_full_period_row_csv = outdir / "no_cap_reference_full_period_row.csv"
+        no_cap_guardrail_full_period_row_csv = outdir / "no_cap_guardrail_full_period_row.csv"
         no_cap_reference_row_csv = outdir / "no_cap_reference_row.csv"
         no_cap_guardrail_row_csv = outdir / "no_cap_guardrail_row.csv"
         no_cap_parity_debug_json = outdir / "no_cap_parity_debug.json"
         _write_csv("no_cap_parity_diff.csv", parity_diff_rows)
-        _write_single_row_csv(no_cap_reference_row_csv, ref_full_baseline)
+        _write_single_row_csv(no_cap_reference_summary_row_csv, ref_summary_row)
+        _write_single_row_csv(no_cap_guardrail_summary_row_csv, no_cap_summary_row)
+        _write_single_row_csv(no_cap_reference_full_period_row_csv, ref_full_baseline_row)
+        _write_single_row_csv(no_cap_guardrail_full_period_row_csv, no_cap_full)
+        # backward compatibility aliases
+        _write_single_row_csv(no_cap_reference_row_csv, ref_full_baseline_row)
         _write_single_row_csv(no_cap_guardrail_row_csv, no_cap_full)
         parity_debug_payload = {
             "status": "passed" if (parity_ok and signature_match) else "failed",
@@ -944,6 +1006,10 @@ def main() -> None:
             "score_signature_match": signature_match,
             "reference_final_report_dir": str(ref_dir),
             "tolerance": PARITY_TOLERANCE,
+            "no_cap_reference_summary_row_csv": str(no_cap_reference_summary_row_csv),
+            "no_cap_guardrail_summary_row_csv": str(no_cap_guardrail_summary_row_csv),
+            "no_cap_reference_full_period_row_csv": str(no_cap_reference_full_period_row_csv),
+            "no_cap_guardrail_full_period_row_csv": str(no_cap_guardrail_full_period_row_csv),
         }
         no_cap_parity_debug_json.write_text(
             json.dumps(parity_debug_payload, ensure_ascii=False, indent=2),
@@ -956,6 +1022,10 @@ def main() -> None:
             "reference_final_report_dir": str(ref_dir),
             "tolerance": PARITY_TOLERANCE,
             "no_cap_parity_diff_csv": str(parity_diff_csv),
+            "no_cap_reference_summary_row_csv": str(no_cap_reference_summary_row_csv),
+            "no_cap_guardrail_summary_row_csv": str(no_cap_guardrail_summary_row_csv),
+            "no_cap_reference_full_period_row_csv": str(no_cap_reference_full_period_row_csv),
+            "no_cap_guardrail_full_period_row_csv": str(no_cap_guardrail_full_period_row_csv),
             "no_cap_reference_row_csv": str(no_cap_reference_row_csv),
             "no_cap_guardrail_row_csv": str(no_cap_guardrail_row_csv),
             "no_cap_parity_debug_json": str(no_cap_parity_debug_json),
