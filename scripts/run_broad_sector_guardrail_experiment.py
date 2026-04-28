@@ -32,6 +32,7 @@ from pipeline.universe_input import load_symbols_from_universe_csv
 
 MAX_SINGLE_WEIGHT_LIMIT = 0.200000001
 CAP_TOLERANCE = 1e-9
+PARITY_TOLERANCE = 1e-8
 
 
 @dataclass(frozen=True)
@@ -53,6 +54,13 @@ def _parse_int_tokens(value: str) -> list[int]:
 
 def _parse_float_tokens(value: str) -> list[float]:
     return [float(v.strip()) for v in value.split(",") if v.strip()]
+
+
+def _sanitize_identifier(value: str) -> str:
+    sanitized = "".join(ch if ch.isalnum() or ch == "_" else "_" for ch in value)
+    if not sanitized:
+        raise ValueError("identifier cannot be empty after sanitization")
+    return sanitized
 
 
 def _safe_div(x: float, y: float) -> float:
@@ -143,6 +151,67 @@ def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
     return row is not None
 
 
+def _daily_scores_columns(conn: sqlite3.Connection) -> list[str]:
+    cols = [str(r["name"]) for r in conn.execute("PRAGMA table_info(daily_scores)").fetchall()]
+    if not cols:
+        raise ValueError("daily_scores table not found")
+    return cols
+
+
+def _snapshot_daily_scores(conn: sqlite3.Connection, snapshot_table: str) -> list[str]:
+    columns = _daily_scores_columns(conn)
+    col_sql = ", ".join(columns)
+    conn.execute(f"DROP TABLE IF EXISTS temp.{snapshot_table}")
+    conn.execute(f"CREATE TEMP TABLE {snapshot_table} AS SELECT {col_sql} FROM daily_scores")
+    return columns
+
+
+def _restore_daily_scores(conn: sqlite3.Connection, snapshot_table: str) -> None:
+    columns = _daily_scores_columns(conn)
+    col_sql = ", ".join(columns)
+    conn.execute("DELETE FROM daily_scores")
+    conn.execute(f"INSERT INTO daily_scores ({col_sql}) SELECT {col_sql} FROM temp.{snapshot_table}")
+
+
+def _build_score_signature(conn: sqlite3.Connection, scoring_profile: str) -> dict[str, object]:
+    row_count = int(conn.execute("SELECT COUNT(1) FROM daily_scores").fetchone()[0])
+    first_date = conn.execute("SELECT MIN(date) FROM daily_scores").fetchone()[0]
+    last_date = conn.execute("SELECT MAX(date) FROM daily_scores").fetchone()[0]
+    middle_date = None
+    sampled_dates = [d for d in [first_date, last_date] if d]
+    if first_date and last_date and first_date != last_date:
+        dates = [r["date"] for r in conn.execute("SELECT DISTINCT date FROM daily_scores ORDER BY date").fetchall()]
+        if dates:
+            middle_date = dates[len(dates) // 2]
+            sampled_dates.insert(1, middle_date)
+
+    top_symbols_by_date: dict[str, list[str]] = {}
+    for d in sampled_dates:
+        symbols = [
+            str(r["symbol"])
+            for r in conn.execute(
+                """
+                SELECT symbol
+                FROM daily_scores
+                WHERE date=?
+                ORDER BY rank ASC, symbol ASC
+                LIMIT 10
+                """,
+                (d,),
+            ).fetchall()
+        ]
+        top_symbols_by_date[str(d)] = symbols
+
+    return {
+        "scoring_profile": scoring_profile,
+        "row_count": row_count,
+        "first_score_date": first_date,
+        "middle_score_date": middle_date,
+        "last_score_date": last_date,
+        "top10_symbols_by_sample_date": top_symbols_by_date,
+    }
+
+
 def _rolling_universe_row_count(conn: sqlite3.Connection, universe_size: int, lookback_days: int) -> int:
     if not _table_exists(conn, "daily_universe"):
         return 0
@@ -162,7 +231,6 @@ def _rolling_universe_row_count(conn: sqlite3.Connection, universe_size: int, lo
 def call_build_rolling_liquidity_universe_compat(
     conn: sqlite3.Connection,
     *,
-    symbols: list[str] | None = None,
     universe_size: int = 100,
     lookback_days: int = 20,
     top_n: int | None = None,
@@ -176,12 +244,8 @@ def call_build_rolling_liquidity_universe_compat(
         kwargs["lookback_days"] = int(lookback_days)
     if "top_n" in sig.parameters:
         kwargs["top_n"] = int(top_n if top_n is not None else universe_size)
-    if "symbols" in sig.parameters and symbols is not None:
-        kwargs["symbols"] = symbols
-
     call_attempts = [
         dict(kwargs),
-        {k: v for k, v in kwargs.items() if k != "symbols"},
         {k: v for k, v in kwargs.items() if k in {"universe_size", "top_n"}},
         {},
     ]
@@ -199,6 +263,44 @@ def call_build_rolling_liquidity_universe_compat(
     if last_error is not None:
         raise last_error
     raise RuntimeError("Unexpected failure while building rolling liquidity universe")
+
+
+def _read_csv_rows(path: Path) -> list[dict[str, str]]:
+    if not path.exists():
+        return []
+    with path.open("r", encoding="utf-8-sig", newline="") as f:
+        return list(csv.DictReader(f))
+
+
+def _resolve_reference_baseline_rows(reference_dir: Path) -> tuple[dict[str, str] | None, list[dict[str, str]]]:
+    full_rows: list[dict[str, str]] = []
+    window_rows: list[dict[str, str]] = []
+    for fname in ("full_period_results.csv", "candidate_summary.csv"):
+        rows = _read_csv_rows(reference_dir / fname)
+        if rows:
+            full_rows = rows
+            break
+    window_rows = _read_csv_rows(reference_dir / "window_results.csv")
+
+    full_baseline = next((r for r in full_rows if str(r.get("candidate")) == "baseline_old"), None)
+    baseline_windows = [r for r in window_rows if str(r.get("candidate")) == "baseline_old"]
+    return full_baseline, baseline_windows
+
+
+def _compare_metric_rows(
+    *,
+    left: dict[str, object],
+    right: dict[str, object] | dict[str, str],
+    metric_keys: list[str],
+    tolerance: float,
+) -> list[dict[str, object]]:
+    out: list[dict[str, object]] = []
+    for key in metric_keys:
+        lv = float(left.get(key, float("nan")))
+        rv = float(right.get(key, float("nan")))
+        diff = abs(lv - rv)
+        out.append({"metric": key, "left": lv, "right": rv, "abs_diff": diff, "within_tolerance": diff <= tolerance})
+    return out
 
 
 def _simulate_candidate(
@@ -262,6 +364,23 @@ def _simulate_candidate(
                 symbol_to_sector=symbol_to_sector,
                 guardrail=gcfg,
             )
+            if candidate.guardrail_type == "none":
+                control_holdings, _ = apply_broad_sector_guardrail(
+                    ranked_rows=ranked_rows,
+                    rank_by_symbol=rank_by_symbol,
+                    current_symbols=current_holdings,
+                    entry_index_by_symbol=entry_index_by_symbol,
+                    current_day_index=i,
+                    top_n=top_n,
+                    min_holding_days=min_holding_days,
+                    keep_rank_threshold=keep_rank_threshold,
+                    symbol_to_sector={},
+                    guardrail=gcfg,
+                )
+                if set(target_holdings) != set(control_holdings):
+                    raise ValueError(
+                        f"guardrail_type=none must bypass sector map effects: candidate={candidate.name} date={d0}"
+                    )
 
             # stop_loss_cash_mode=keep_cash: when fewer than top_n, keep cash.
             entered = target_holdings - current_holdings
@@ -369,6 +488,7 @@ def main() -> None:
     p.add_argument("--include-no-cap", action=argparse.BooleanOptionalAction, default=True)
     p.add_argument("--scoring-profiles", default="old")
     p.add_argument("--rebuild-rolling-universe", action="store_true")
+    p.add_argument("--reference-final-report-dir", default=None)
     args = p.parse_args()
 
     eval_freqs = _parse_csv_tokens(args.eval_frequencies)
@@ -394,6 +514,8 @@ def main() -> None:
     init_db(conn)
 
     symbols = [normalize_symbol(s) for s in load_symbols_from_universe_csv(args.universe_file)]
+    if not symbols:
+        raise ValueError("universe file has no symbols")
     rolling_universe_size = 100
     rolling_lookback_days = 20
     rolling_row_count_before = _rolling_universe_row_count(conn, rolling_universe_size, rolling_lookback_days)
@@ -405,7 +527,6 @@ def main() -> None:
     if args.rebuild_rolling_universe or rolling_row_count_before <= 0:
         build_summary = call_build_rolling_liquidity_universe_compat(
             conn,
-            symbols=symbols,
             universe_size=rolling_universe_size,
             lookback_days=rolling_lookback_days,
             top_n=rolling_universe_size,
@@ -457,6 +578,25 @@ def main() -> None:
         raise ValueError("Not enough dates for experiment range")
 
     benchmark_by_date = _build_benchmark_returns(conn, dates, symbols)
+    if not benchmark_by_date:
+        raise ValueError("benchmark return series is empty")
+
+    candidate_score_snapshots: dict[str, str] = {}
+    score_signatures: dict[str, dict[str, object]] = {}
+    for c in candidates:
+        generate_daily_scores(
+            conn,
+            include_history=True,
+            allowed_symbols=symbols,
+            scoring_profile=c.scoring_profile,
+            universe_mode="rolling_liquidity",
+            universe_size=rolling_universe_size,
+            universe_lookback_days=rolling_lookback_days,
+        )
+        snapshot_table = f"tmp_guardrail_scores_{_sanitize_identifier(c.name)}"
+        _snapshot_daily_scores(conn, snapshot_table)
+        candidate_score_snapshots[c.name] = snapshot_table
+        score_signatures[c.name] = _build_score_signature(conn, c.scoring_profile)
 
     daily_all: list[dict[str, object]] = []
     exposure_all: list[dict[str, object]] = []
@@ -467,7 +607,7 @@ def main() -> None:
     monthly_rows: list[dict[str, object]] = []
 
     for c in candidates:
-        generate_daily_scores(conn, scoring_profile=c.scoring_profile)
+        _restore_daily_scores(conn, candidate_score_snapshots[c.name])
         sim = _simulate_candidate(conn, dates, symbol_to_sector, c)
         daily = sim["daily"]
         exposure_all.extend(sim["exposure"])
@@ -635,6 +775,103 @@ def main() -> None:
             dd_rows.append({"candidate": cname, "date": r["date"], "drawdown": _safe_div(eq - peak, peak) if peak else 0.0})
     dd_csv = _write_csv("drawdown_curve.csv", dd_rows)
 
+    no_cap_baseline_parity_check: dict[str, object] = {
+        "status": "skipped",
+        "candidate": "baseline_old_no_sector_guardrail",
+        "reference_final_report_dir": args.reference_final_report_dir,
+        "tolerance": PARITY_TOLERANCE,
+    }
+    no_cap_rows = [r for r in full_rows if str(r.get("candidate")) == "baseline_old_no_sector_guardrail"]
+    if not no_cap_rows:
+        raise ValueError("baseline_old_no_sector_guardrail result row is missing")
+    no_cap_full = no_cap_rows[0]
+
+    if args.reference_final_report_dir:
+        ref_dir = Path(args.reference_final_report_dir)
+        ref_full_baseline, ref_window_baseline_rows = _resolve_reference_baseline_rows(ref_dir)
+        if ref_full_baseline is None:
+            raise ValueError(f"reference baseline_old not found in {ref_dir}")
+
+        metrics = ["total_return", "benchmark_return", "excess_return", "max_drawdown", "max_single_weight_observed"]
+        full_diffs = _compare_metric_rows(
+            left=no_cap_full,
+            right=ref_full_baseline,
+            metric_keys=metrics,
+            tolerance=PARITY_TOLERANCE,
+        )
+
+        no_cap_window_rows = [r for r in window_rows if str(r.get("candidate")) == "baseline_old_no_sector_guardrail"]
+        no_cap_window_keyed = {
+            (
+                str(r["eval_frequency"]),
+                int(r["horizon_months"]),
+                str(r["start_date"]),
+                str(r["end_date"]),
+            ): r
+            for r in no_cap_window_rows
+        }
+        ref_window_keyed = {
+            (
+                str(r["eval_frequency"]),
+                int(r["horizon_months"]),
+                str(r["start_date"]),
+                str(r["end_date"]),
+            ): r
+            for r in ref_window_baseline_rows
+        }
+        common_keys = sorted(set(no_cap_window_keyed) & set(ref_window_keyed))
+        missing_reference_windows = [k for k in no_cap_window_keyed if k not in ref_window_keyed]
+        missing_no_cap_windows = [k for k in ref_window_keyed if k not in no_cap_window_keyed]
+        window_diffs: list[dict[str, object]] = []
+        for k in common_keys:
+            diffs = _compare_metric_rows(
+                left=no_cap_window_keyed[k],
+                right=ref_window_keyed[k],
+                metric_keys=metrics,
+                tolerance=PARITY_TOLERANCE,
+            )
+            window_diffs.append(
+                {
+                    "eval_frequency": k[0],
+                    "horizon_months": k[1],
+                    "start_date": k[2],
+                    "end_date": k[3],
+                    "metrics": diffs,
+                    "all_within_tolerance": all(bool(d["within_tolerance"]) for d in diffs),
+                }
+            )
+
+        full_ok = all(bool(d["within_tolerance"]) for d in full_diffs)
+        windows_ok = (
+            len(missing_reference_windows) == 0
+            and len(missing_no_cap_windows) == 0
+            and all(bool(w["all_within_tolerance"]) for w in window_diffs)
+        )
+        no_cap_baseline_parity_check = {
+            "status": "passed" if (full_ok and windows_ok) else "failed",
+            "candidate": "baseline_old_no_sector_guardrail",
+            "reference_final_report_dir": str(ref_dir),
+            "tolerance": PARITY_TOLERANCE,
+            "full_period_metric_diffs": full_diffs,
+            "window_comparison_count": len(common_keys),
+            "window_metric_diffs": window_diffs[:20],
+            "window_metric_diffs_truncated": max(0, len(window_diffs) - 20),
+            "missing_reference_windows": [
+                {"eval_frequency": k[0], "horizon_months": k[1], "start_date": k[2], "end_date": k[3]}
+                for k in missing_reference_windows[:20]
+            ],
+            "missing_reference_windows_truncated": max(0, len(missing_reference_windows) - 20),
+            "missing_no_cap_windows": [
+                {"eval_frequency": k[0], "horizon_months": k[1], "start_date": k[2], "end_date": k[3]}
+                for k in missing_no_cap_windows[:20]
+            ],
+            "missing_no_cap_windows_truncated": max(0, len(missing_no_cap_windows) - 20),
+        }
+        if no_cap_baseline_parity_check["status"] != "passed":
+            raise ValueError("no-cap baseline parity check failed; guardrail results are invalid")
+    else:
+        no_cap_baseline_parity_check["message"] = "reference-final-report-dir not provided"
+
     report_md = outdir / "guardrail_report.md"
     report_md.write_text(
         "\n".join(
@@ -652,6 +889,8 @@ def main() -> None:
                 "- mdd_breach_30/35 감소 여부",
                 "- max_broad_sector_weight 감소 여부",
                 "- turnover 과도 증가 여부",
+                "",
+                f"- no_cap_baseline_parity_check: {no_cap_baseline_parity_check.get('status')}",
             ]
         ),
         encoding="utf-8",
@@ -670,6 +909,8 @@ def main() -> None:
         "outdir": str(outdir),
         "warnings": warnings,
         "rolling_universe_status": rolling_universe_status,
+        "score_signatures": score_signatures,
+        "no_cap_baseline_parity_check": no_cap_baseline_parity_check,
         "candidates": [c.__dict__ for c in candidates],
         "files": {
             "summary_csv": str(summary_csv),
@@ -703,6 +944,8 @@ def main() -> None:
         "candidates": [c.name for c in candidates],
         "warnings": warnings,
         "rolling_universe_status": rolling_universe_status,
+        "score_signatures": score_signatures,
+        "no_cap_baseline_parity_check": no_cap_baseline_parity_check,
     }
     print(f"BROAD_SECTOR_GUARDRAIL_EXPERIMENT_JSON={json.dumps(payload, ensure_ascii=False)}")
 
