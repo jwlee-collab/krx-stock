@@ -247,6 +247,24 @@ CLI 옵션:
 - 구현: 각 symbol/date에 대해 `ROW_NUMBER`를 사용해 직전 `lookback_days` 구간(`rn-lookback` ~ `rn-1`)의 `close*volume` 평균으로 유니버스를 산출합니다.
 - 검증: 파이프라인 실행 시 `lookahead_validation` 로그(checked/violations)를 출력합니다.
 
+
+### Final 후보 비교 리포트 생성 예시
+
+```bash
+python scripts/generate_final_candidate_report.py \
+  --db data/market_pipeline.db \
+  --output-dir data/reports \
+  --universe-file data/kospi_source_universe_500.csv \
+  --start-date 2024-01-01 \
+  --end-date 2025-12-31
+```
+
+생성 파일:
+- `final_candidate_summary.csv`
+- `final_candidate_equity_curve.csv`
+- `final_candidate_monthly_returns.csv`
+- `final_candidate_report.md`
+
 ### 3-3-3) Entry Gate + 현금 보유 허용 (무조건 top_n 매수 방지)
 
 왜 필요한가:
