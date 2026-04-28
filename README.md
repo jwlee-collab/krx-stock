@@ -328,6 +328,48 @@ python scripts/run_pipeline.py \
   --volume-surge-ret-5d-threshold 0.10
 ```
 
+### 3-3-3-b) Optional Entry Quality Gate (range/volatility 기반 신규 진입 품질 게이트)
+
+- 기본 동작: OFF (기존 전략 동작 유지)
+- 적용 대상: **신규 진입 후보만**(기존 보유 종목 강제매도 없음)
+- 개별 룰 ON/OFF:
+  - `--enable-entry-quality-gate`
+  - `--enable-entry-range-rule`
+  - `--enable-entry-volatility-rule`
+  - `--enable-entry-ret5-minus-range-rule`
+  - `--enable-entry-range-to-ret5-rule`
+  - `--enable-entry-volatility-to-momentum20-rule`
+- 임계값:
+  - `--max-entry-range-pct` (품질 range 룰 상한)
+  - `--max-entry-volatility-20d`
+  - `--min-entry-ret5-minus-range`
+  - `--max-entry-range-to-ret5`
+  - `--max-entry-volatility-to-momentum20`
+
+예시:
+
+```bash
+python scripts/run_pipeline.py \
+  --source krx \
+  --db data/entry_quality_gate_demo.db \
+  --universe-mode rolling_liquidity \
+  --universe-size 100 \
+  --rebalance-frequency weekly \
+  --scoring-version old \
+  --top-n 5 \
+  --enable-entry-quality-gate \
+  --enable-entry-range-rule \
+  --enable-entry-volatility-rule \
+  --enable-entry-ret5-minus-range-rule \
+  --enable-entry-range-to-ret5-rule \
+  --enable-entry-volatility-to-momentum20-rule \
+  --max-entry-range-pct 0.16 \
+  --max-entry-volatility-20d 0.06 \
+  --min-entry-ret5-minus-range 0.00 \
+  --max-entry-range-to-ret5 1.5 \
+  --max-entry-volatility-to-momentum20 0.5
+```
+
 ### 3-3-4) KOSPI / KOSDAQ 분리 진단 (market scope)
 
 왜 분리해서 보나:

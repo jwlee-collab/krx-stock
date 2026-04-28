@@ -11,6 +11,7 @@ import uuid
 from collections import defaultdict
 from dataclasses import dataclass, asdict
 from datetime import date, datetime, timezone
+from itertools import product
 from pathlib import Path
 from statistics import mean, median
 
@@ -52,6 +53,17 @@ class EvaluationConfig:
     overheat_range_rule_enabled: int
     overheat_volume_z20_rule_enabled: int
     volume_surge_overheat_rule_enabled: int
+    entry_quality_gate_enabled: int
+    entry_range_rule_enabled: int
+    entry_volatility_rule_enabled: int
+    entry_ret5_minus_range_rule_enabled: int
+    entry_range_to_ret5_rule_enabled: int
+    entry_volatility_to_momentum20_rule_enabled: int
+    max_entry_volatility_20d: float
+    max_entry_range_pct: float
+    min_entry_ret5_minus_range: float
+    max_entry_range_to_ret5: float
+    max_entry_volatility_to_momentum20: float
 
 
 @dataclass
@@ -82,6 +94,7 @@ class WindowResult:
     portfolio_dd_cut_pct: float | None
     portfolio_dd_cooldown_days: int
     overheat_entry_gate_enabled: int
+    entry_quality_gate_enabled: int
     max_entry_ret_1d: float
     max_entry_ret_5d: float
     max_entry_range_pct: float
@@ -96,6 +109,13 @@ class WindowResult:
     overheat_rejected_by_range_pct: int | None
     overheat_rejected_by_volume_z20: int | None
     overheat_rejected_by_volume_surge_rule: int | None
+    entry_quality_rejected_count: int | None
+    entry_quality_cash_days: int | None
+    rejected_by_range_pct: int | None
+    rejected_by_volatility_20d: int | None
+    rejected_by_ret5_minus_range: int | None
+    rejected_by_range_to_ret5: int | None
+    rejected_by_volatility_to_momentum20: int | None
     total_return: float | None
     benchmark_return: float | None
     excess_return: float | None
@@ -103,6 +123,9 @@ class WindowResult:
     max_drawdown: float | None
     trade_count: int | None
     average_actual_position_count: float | None
+    average_cash_weight: float | None
+    average_exposure: float | None
+    max_single_position_weight: float | None
     position_stop_loss_count: int | None
     portfolio_dd_cut_count: int | None
     win_vs_benchmark: int | None
@@ -147,6 +170,17 @@ class StrategySummary:
     overheat_rejected_by_range_pct_mean: float | None
     overheat_rejected_by_volume_z20_mean: float | None
     overheat_rejected_by_volume_surge_rule_mean: float | None
+    entry_quality_gate_enabled: int
+    entry_quality_rejected_count_mean: float | None
+    entry_quality_cash_days_mean: float | None
+    rejected_by_range_pct_mean: float | None
+    rejected_by_volatility_20d_mean: float | None
+    rejected_by_ret5_minus_range_mean: float | None
+    rejected_by_range_to_ret5_mean: float | None
+    rejected_by_volatility_to_momentum20_mean: float | None
+    average_cash_weight_mean: float | None
+    average_exposure_mean: float | None
+    max_single_position_weight_mean: float | None
     num_windows: int
     evaluated_windows: int
     skipped_windows: int
@@ -492,6 +526,7 @@ def _ensure_tables(conn: sqlite3.Connection, reset: bool = False) -> None:
         "stop_loss_cooldown_days INTEGER NOT NULL DEFAULT 0",
     )
     _ensure_column(conn, "start_window_robustness_results", "overheat_entry_gate_enabled", "overheat_entry_gate_enabled INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "start_window_robustness_results", "entry_quality_gate_enabled", "entry_quality_gate_enabled INTEGER NOT NULL DEFAULT 0")
     _ensure_column(conn, "start_window_robustness_results", "max_entry_ret_1d", "max_entry_ret_1d REAL NOT NULL DEFAULT 0.08")
     _ensure_column(conn, "start_window_robustness_results", "max_entry_ret_5d", "max_entry_ret_5d REAL NOT NULL DEFAULT 0.15")
     _ensure_column(conn, "start_window_robustness_results", "max_entry_range_pct", "max_entry_range_pct REAL NOT NULL DEFAULT 0.10")
@@ -506,6 +541,16 @@ def _ensure_tables(conn: sqlite3.Connection, reset: bool = False) -> None:
     _ensure_column(conn, "start_window_robustness_results", "overheat_rejected_by_range_pct", "overheat_rejected_by_range_pct INTEGER")
     _ensure_column(conn, "start_window_robustness_results", "overheat_rejected_by_volume_z20", "overheat_rejected_by_volume_z20 INTEGER")
     _ensure_column(conn, "start_window_robustness_results", "overheat_rejected_by_volume_surge_rule", "overheat_rejected_by_volume_surge_rule INTEGER")
+    _ensure_column(conn, "start_window_robustness_results", "entry_quality_rejected_count", "entry_quality_rejected_count INTEGER")
+    _ensure_column(conn, "start_window_robustness_results", "entry_quality_cash_days", "entry_quality_cash_days INTEGER")
+    _ensure_column(conn, "start_window_robustness_results", "rejected_by_range_pct", "rejected_by_range_pct INTEGER")
+    _ensure_column(conn, "start_window_robustness_results", "rejected_by_volatility_20d", "rejected_by_volatility_20d INTEGER")
+    _ensure_column(conn, "start_window_robustness_results", "rejected_by_ret5_minus_range", "rejected_by_ret5_minus_range INTEGER")
+    _ensure_column(conn, "start_window_robustness_results", "rejected_by_range_to_ret5", "rejected_by_range_to_ret5 INTEGER")
+    _ensure_column(conn, "start_window_robustness_results", "rejected_by_volatility_to_momentum20", "rejected_by_volatility_to_momentum20 INTEGER")
+    _ensure_column(conn, "start_window_robustness_results", "average_cash_weight", "average_cash_weight REAL")
+    _ensure_column(conn, "start_window_robustness_results", "average_exposure", "average_exposure REAL")
+    _ensure_column(conn, "start_window_robustness_results", "max_single_position_weight", "max_single_position_weight REAL")
     _ensure_column(
         conn,
         "start_window_robustness_strategy_summary",
@@ -533,6 +578,17 @@ def _ensure_tables(conn: sqlite3.Connection, reset: bool = False) -> None:
     _ensure_column(conn, "start_window_robustness_strategy_summary", "overheat_rejected_by_range_pct_mean", "overheat_rejected_by_range_pct_mean REAL")
     _ensure_column(conn, "start_window_robustness_strategy_summary", "overheat_rejected_by_volume_z20_mean", "overheat_rejected_by_volume_z20_mean REAL")
     _ensure_column(conn, "start_window_robustness_strategy_summary", "overheat_rejected_by_volume_surge_rule_mean", "overheat_rejected_by_volume_surge_rule_mean REAL")
+    _ensure_column(conn, "start_window_robustness_strategy_summary", "entry_quality_gate_enabled", "entry_quality_gate_enabled INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "start_window_robustness_strategy_summary", "entry_quality_rejected_count_mean", "entry_quality_rejected_count_mean REAL")
+    _ensure_column(conn, "start_window_robustness_strategy_summary", "entry_quality_cash_days_mean", "entry_quality_cash_days_mean REAL")
+    _ensure_column(conn, "start_window_robustness_strategy_summary", "rejected_by_range_pct_mean", "rejected_by_range_pct_mean REAL")
+    _ensure_column(conn, "start_window_robustness_strategy_summary", "rejected_by_volatility_20d_mean", "rejected_by_volatility_20d_mean REAL")
+    _ensure_column(conn, "start_window_robustness_strategy_summary", "rejected_by_ret5_minus_range_mean", "rejected_by_ret5_minus_range_mean REAL")
+    _ensure_column(conn, "start_window_robustness_strategy_summary", "rejected_by_range_to_ret5_mean", "rejected_by_range_to_ret5_mean REAL")
+    _ensure_column(conn, "start_window_robustness_strategy_summary", "rejected_by_volatility_to_momentum20_mean", "rejected_by_volatility_to_momentum20_mean REAL")
+    _ensure_column(conn, "start_window_robustness_strategy_summary", "average_cash_weight_mean", "average_cash_weight_mean REAL")
+    _ensure_column(conn, "start_window_robustness_strategy_summary", "average_exposure_mean", "average_exposure_mean REAL")
+    _ensure_column(conn, "start_window_robustness_strategy_summary", "max_single_position_weight_mean", "max_single_position_weight_mean REAL")
     conn.commit()
 
 
@@ -585,6 +641,17 @@ def main() -> None:
     p.add_argument("--max-entry-ret-5d", type=float, default=0.15)
     p.add_argument("--max-entry-range-pct", type=float, default=0.10)
     p.add_argument("--max-entry-volume-z20", type=float, default=3.0)
+    p.add_argument("--entry-quality-gate-modes", default="off,on")
+    p.add_argument("--entry-range-rule-modes", default="off,on")
+    p.add_argument("--entry-volatility-rule-modes", default="off,on")
+    p.add_argument("--entry-ret5-minus-range-rule-modes", default="off,on")
+    p.add_argument("--entry-range-to-ret5-rule-modes", default="off,on")
+    p.add_argument("--entry-volatility-to-momentum20-rule-modes", default="off,on")
+    p.add_argument("--max-entry-range-pct-values", default="")
+    p.add_argument("--max-entry-volatility-20d-values", default="0.06")
+    p.add_argument("--min-entry-ret5-minus-range-values", default="0.00")
+    p.add_argument("--max-entry-range-to-ret5-values", default="1.5")
+    p.add_argument("--max-entry-volatility-to-momentum20-values", default="0.5")
     p.add_argument("--enable-volume-surge-overheat-rule", action="store_true")
     p.add_argument("--volume-surge-threshold", type=float, default=3.0)
     p.add_argument("--volume-surge-ret-5d-threshold", type=float, default=0.10)
@@ -653,6 +720,32 @@ def main() -> None:
         invalid = [m for m in modes if m not in {"off", "on"}]
         if invalid:
             raise ValueError(f"invalid {label} mode(s): {invalid}")
+    entry_quality_modes = [x.lower() for x in _parse_str_list(args.entry_quality_gate_modes)]
+    entry_range_modes = [x.lower() for x in _parse_str_list(args.entry_range_rule_modes)]
+    entry_volatility_modes = [x.lower() for x in _parse_str_list(args.entry_volatility_rule_modes)]
+    entry_ret5_minus_range_modes = [x.lower() for x in _parse_str_list(args.entry_ret5_minus_range_rule_modes)]
+    entry_range_to_ret5_modes = [x.lower() for x in _parse_str_list(args.entry_range_to_ret5_rule_modes)]
+    entry_volatility_to_momentum20_modes = [x.lower() for x in _parse_str_list(args.entry_volatility_to_momentum20_rule_modes)]
+    for label, modes in [
+        ("entry-quality-gate", entry_quality_modes),
+        ("entry-range-rule", entry_range_modes),
+        ("entry-volatility-rule", entry_volatility_modes),
+        ("entry-ret5-minus-range-rule", entry_ret5_minus_range_modes),
+        ("entry-range-to-ret5-rule", entry_range_to_ret5_modes),
+        ("entry-volatility-to-momentum20-rule", entry_volatility_to_momentum20_modes),
+    ]:
+        invalid = [m for m in modes if m not in {"off", "on"}]
+        if invalid:
+            raise ValueError(f"invalid {label} mode(s): {invalid}")
+    entry_range_pct_values = (
+        [float(v) for v in _parse_str_list(args.max_entry_range_pct_values)]
+        if args.max_entry_range_pct_values.strip()
+        else [args.max_entry_range_pct]
+    )
+    entry_volatility_20d_values = [float(v) for v in _parse_str_list(args.max_entry_volatility_20d_values)]
+    entry_ret5_minus_range_values = [float(v) for v in _parse_str_list(args.min_entry_ret5_minus_range_values)]
+    entry_range_to_ret5_values = [float(v) for v in _parse_str_list(args.max_entry_range_to_ret5_values)]
+    entry_volatility_to_momentum20_values = [float(v) for v in _parse_str_list(args.max_entry_volatility_to_momentum20_values)]
 
     selected_symbols = parse_symbols_arg(args.symbols)
     if args.universe_file and not selected_symbols:
@@ -670,54 +763,111 @@ def main() -> None:
         threshold_grid = keep_threshold_values if keep_threshold_values else [top_n + off for off in keep_offsets]
         for keep_threshold in threshold_grid:
             keep_offset = keep_threshold - top_n
-            for min_holding_days in min_holds:
-                for scoring_version in scoring_versions:
-                    for market_scope in market_scopes:
-                        for entry_mode in entry_modes:
-                            for market_filter_mode in market_filter_modes:
-                                for sl_enabled, sl_pct in pos_sl_grid:
-                                    for stop_loss_cash_mode in stop_loss_cash_modes:
-                                        for stop_loss_cooldown_days in stop_loss_cooldown_days_values:
-                                            for dd_enabled, dd_pct in dd_cut_grid:
-                                                for cooldown in dd_cooldowns:
-                                                    for overheat_mode in overheat_modes:
-                                                        for ret_1d_mode in overheat_ret_1d_modes:
-                                                            for ret_5d_mode in overheat_ret_5d_modes:
-                                                                for range_mode in overheat_range_modes:
-                                                                    for volz_mode in overheat_volume_z20_modes:
-                                                                        for surge_mode in volume_surge_overheat_modes:
-                                                                            cfg = EvaluationConfig(
-                                                                                config_id=(
-                                                                                    f"top={top_n}|hold={min_holding_days}|keep={keep_threshold}|score={scoring_version}|"
-                                                                                    f"scope={market_scope}|entry={entry_mode}|mf={market_filter_mode}|"
-                                                                                    f"pos_sl={sl_enabled}:{sl_pct}|sl_cash={stop_loss_cash_mode}|"
-                                                                                    f"sl_cd={stop_loss_cooldown_days}|dd_cut={dd_enabled}:{dd_pct}|dd_cd={cooldown}|"
-                                                                                    f"overheat={overheat_mode}|ret1d={ret_1d_mode}|ret5d={ret_5d_mode}|"
-                                                                                    f"range={range_mode}|volz={volz_mode}|surge={surge_mode}"
-                                                                                ),
-                                                                                top_n=top_n,
-                                                                                min_holding_days=min_holding_days,
-                                                                                keep_rank_offset=keep_offset,
-                                                                                keep_rank_threshold=keep_threshold,
-                                                                                scoring_version=scoring_version,
-                                                                                market_scope=market_scope,
-                                                                                entry_gate_mode=entry_mode,
-                                                                                market_filter_mode=market_filter_mode,
-                                                                                position_stop_loss_enabled=sl_enabled,
-                                                                                position_stop_loss_pct=sl_pct,
-                                                                                stop_loss_cash_mode=stop_loss_cash_mode,
-                                                                                stop_loss_cooldown_days=stop_loss_cooldown_days,
-                                                                                portfolio_dd_cut_enabled=dd_enabled,
-                                                                                portfolio_dd_cut_pct=dd_pct,
-                                                                                portfolio_dd_cooldown_days=cooldown,
-                                                                                overheat_entry_gate_enabled=1 if overheat_mode == "on" else 0,
-                                                                                overheat_ret_1d_rule_enabled=1 if ret_1d_mode == "on" else 0,
-                                                                                overheat_ret_5d_rule_enabled=1 if ret_5d_mode == "on" else 0,
-                                                                                overheat_range_rule_enabled=1 if range_mode == "on" else 0,
-                                                                                overheat_volume_z20_rule_enabled=1 if volz_mode == "on" else 0,
-                                                                                volume_surge_overheat_rule_enabled=1 if surge_mode == "on" else 0,
-                                                                            )
-                                                                            configs.append(cfg)
+            iter_grid = product(
+                min_holds,
+                scoring_versions,
+                market_scopes,
+                entry_modes,
+                market_filter_modes,
+                pos_sl_grid,
+                stop_loss_cash_modes,
+                stop_loss_cooldown_days_values,
+                dd_cut_grid,
+                dd_cooldowns,
+                overheat_modes,
+                overheat_ret_1d_modes,
+                overheat_ret_5d_modes,
+                overheat_range_modes,
+                overheat_volume_z20_modes,
+                volume_surge_overheat_modes,
+                entry_quality_modes,
+                entry_range_modes,
+                entry_volatility_modes,
+                entry_ret5_minus_range_modes,
+                entry_range_to_ret5_modes,
+                entry_volatility_to_momentum20_modes,
+                entry_range_pct_values,
+                entry_volatility_20d_values,
+                entry_ret5_minus_range_values,
+                entry_range_to_ret5_values,
+                entry_volatility_to_momentum20_values,
+            )
+            for (
+                min_holding_days,
+                scoring_version,
+                market_scope,
+                entry_mode,
+                market_filter_mode,
+                (sl_enabled, sl_pct),
+                stop_loss_cash_mode,
+                stop_loss_cooldown_days,
+                (dd_enabled, dd_pct),
+                cooldown,
+                overheat_mode,
+                ret_1d_mode,
+                ret_5d_mode,
+                range_mode,
+                volz_mode,
+                surge_mode,
+                entry_quality_mode,
+                entry_range_mode,
+                entry_vol_mode,
+                entry_r5m_mode,
+                entry_r2r_mode,
+                entry_v2m_mode,
+                entry_range_pct,
+                entry_vol20,
+                entry_r5m,
+                entry_r2r,
+                entry_v2m,
+            ) in iter_grid:
+                cfg = EvaluationConfig(
+                                                                                                                            config_id=(
+                                                                                                                                f"top={top_n}|hold={min_holding_days}|keep={keep_threshold}|score={scoring_version}|"
+                                                                                                                                f"scope={market_scope}|entry={entry_mode}|mf={market_filter_mode}|"
+                                                                                                                                f"pos_sl={sl_enabled}:{sl_pct}|sl_cash={stop_loss_cash_mode}|"
+                                                                                                                                f"sl_cd={stop_loss_cooldown_days}|dd_cut={dd_enabled}:{dd_pct}|dd_cd={cooldown}|"
+                                                                                                                                f"overheat={overheat_mode}|ret1d={ret_1d_mode}|ret5d={ret_5d_mode}|"
+                                                                                                                                f"range={range_mode}|volz={volz_mode}|surge={surge_mode}|"
+                                                                                                                                f"eq={entry_quality_mode}|eq_range={entry_range_mode}|eq_vol={entry_vol_mode}|"
+                                                                                                                                f"eq_r5m={entry_r5m_mode}|eq_r2r={entry_r2r_mode}|eq_v2m={entry_v2m_mode}|"
+                                                                                                                                f"eq_maxr={entry_range_pct}|eq_maxv={entry_vol20}|eq_minr5m={entry_r5m}|"
+                                                                                                                                f"eq_maxr2r={entry_r2r}|eq_maxv2m={entry_v2m}"
+                                                                                                                            ),
+                                                                                                                            top_n=top_n,
+                                                                                                                            min_holding_days=min_holding_days,
+                                                                                                                            keep_rank_offset=keep_offset,
+                                                                                                                            keep_rank_threshold=keep_threshold,
+                                                                                                                            scoring_version=scoring_version,
+                                                                                                                            market_scope=market_scope,
+                                                                                                                            entry_gate_mode=entry_mode,
+                                                                                                                            market_filter_mode=market_filter_mode,
+                                                                                                                            position_stop_loss_enabled=sl_enabled,
+                                                                                                                            position_stop_loss_pct=sl_pct,
+                                                                                                                            stop_loss_cash_mode=stop_loss_cash_mode,
+                                                                                                                            stop_loss_cooldown_days=stop_loss_cooldown_days,
+                                                                                                                            portfolio_dd_cut_enabled=dd_enabled,
+                                                                                                                            portfolio_dd_cut_pct=dd_pct,
+                                                                                                                            portfolio_dd_cooldown_days=cooldown,
+                                                                                                                            overheat_entry_gate_enabled=1 if overheat_mode == "on" else 0,
+                                                                                                                            overheat_ret_1d_rule_enabled=1 if ret_1d_mode == "on" else 0,
+                                                                                                                            overheat_ret_5d_rule_enabled=1 if ret_5d_mode == "on" else 0,
+                                                                                                                            overheat_range_rule_enabled=1 if range_mode == "on" else 0,
+                                                                                                                            overheat_volume_z20_rule_enabled=1 if volz_mode == "on" else 0,
+                                                                                                                            volume_surge_overheat_rule_enabled=1 if surge_mode == "on" else 0,
+                                                                                                                            entry_quality_gate_enabled=1 if entry_quality_mode == "on" else 0,
+                                                                                                                            entry_range_rule_enabled=1 if entry_range_mode == "on" else 0,
+                                                                                                                            entry_volatility_rule_enabled=1 if entry_vol_mode == "on" else 0,
+                                                                                                                            entry_ret5_minus_range_rule_enabled=1 if entry_r5m_mode == "on" else 0,
+                                                                                                                            entry_range_to_ret5_rule_enabled=1 if entry_r2r_mode == "on" else 0,
+                                                                                                                            entry_volatility_to_momentum20_rule_enabled=1 if entry_v2m_mode == "on" else 0,
+                                                                                                                            max_entry_volatility_20d=entry_vol20,
+                                                                                                                            max_entry_range_pct=entry_range_pct,
+                                                                                                                            min_entry_ret5_minus_range=entry_r5m,
+                                                                                                                            max_entry_range_to_ret5=entry_r2r,
+                                                                                                                            max_entry_volatility_to_momentum20=entry_v2m,
+                                                                                                                        )
+                configs.append(cfg)
 
     generated_profiles: set[tuple[str, str]] = set()
     batch_id = str(uuid.uuid4())
@@ -761,13 +911,24 @@ def main() -> None:
                             portfolio_dd_cut_pct=cfg.portfolio_dd_cut_pct,
                             portfolio_dd_cooldown_days=cfg.portfolio_dd_cooldown_days,
                             overheat_entry_gate_enabled=cfg.overheat_entry_gate_enabled,
+                            entry_quality_gate_enabled=cfg.entry_quality_gate_enabled,
                             max_entry_ret_1d=args.max_entry_ret_1d,
                             max_entry_ret_5d=args.max_entry_ret_5d,
-                            max_entry_range_pct=args.max_entry_range_pct,
+                            max_entry_range_pct=cfg.max_entry_range_pct,
                             max_entry_volume_z20=args.max_entry_volume_z20,
                             volume_surge_rule_enabled=cfg.volume_surge_overheat_rule_enabled,
                             volume_surge_threshold=args.volume_surge_threshold,
                             volume_surge_ret_5d_threshold=args.volume_surge_ret_5d_threshold,
+                            entry_quality_rejected_count=None,
+                            entry_quality_cash_days=None,
+                            rejected_by_range_pct=None,
+                            rejected_by_volatility_20d=None,
+                            rejected_by_ret5_minus_range=None,
+                            rejected_by_range_to_ret5=None,
+                            rejected_by_volatility_to_momentum20=None,
+                            average_cash_weight=None,
+                            average_exposure=None,
+                            max_single_position_weight=None,
                             overheat_rejected_count=None,
                             overheat_cash_days=None,
                             overheat_rejected_by_ret_1d=None,
@@ -823,15 +984,23 @@ def main() -> None:
                     portfolio_dd_cut_pct=cfg.portfolio_dd_cut_pct,
                     portfolio_dd_cooldown_days=cfg.portfolio_dd_cooldown_days,
                     overheat_entry_gate_enabled=cfg.overheat_entry_gate_enabled,
+                    entry_quality_gate_enabled=cfg.entry_quality_gate_enabled,
                     max_entry_ret_1d=args.max_entry_ret_1d,
                     max_entry_ret_5d=args.max_entry_ret_5d,
-                    max_entry_range_pct=args.max_entry_range_pct,
+                    max_entry_range_pct=cfg.max_entry_range_pct,
                     max_entry_volume_z20=args.max_entry_volume_z20,
                     volume_surge_rule_enabled=cfg.volume_surge_overheat_rule_enabled,
                     volume_surge_threshold=args.volume_surge_threshold,
                     volume_surge_ret_5d_threshold=args.volume_surge_ret_5d_threshold,
                 )
                 result_metric_kwargs = dict(
+                    entry_quality_rejected_count=None,
+                    entry_quality_cash_days=None,
+                    rejected_by_range_pct=None,
+                    rejected_by_volatility_20d=None,
+                    rejected_by_ret5_minus_range=None,
+                    rejected_by_range_to_ret5=None,
+                    rejected_by_volatility_to_momentum20=None,
                     overheat_rejected_count=None,
                     overheat_cash_days=None,
                     overheat_rejected_by_ret_1d=None,
@@ -846,6 +1015,9 @@ def main() -> None:
                     max_drawdown=None,
                     trade_count=None,
                     average_actual_position_count=None,
+                    average_cash_weight=None,
+                    average_exposure=None,
+                    max_single_position_weight=None,
                     position_stop_loss_count=None,
                     portfolio_dd_cut_count=None,
                     win_vs_benchmark=None,
@@ -954,6 +1126,17 @@ def main() -> None:
                         enable_volume_surge_overheat_rule=bool(cfg.volume_surge_overheat_rule_enabled),
                         volume_surge_threshold=args.volume_surge_threshold,
                         volume_surge_ret_5d_threshold=args.volume_surge_ret_5d_threshold,
+                        enable_entry_quality_gate=bool(cfg.entry_quality_gate_enabled),
+                        enable_entry_range_rule=bool(cfg.entry_range_rule_enabled),
+                        enable_entry_volatility_rule=bool(cfg.entry_volatility_rule_enabled),
+                        enable_entry_ret5_minus_range_rule=bool(cfg.entry_ret5_minus_range_rule_enabled),
+                        enable_entry_range_to_ret5_rule=bool(cfg.entry_range_to_ret5_rule_enabled),
+                        enable_entry_volatility_to_momentum20_rule=bool(cfg.entry_volatility_to_momentum20_rule_enabled),
+                        max_entry_quality_range_pct=cfg.max_entry_range_pct,
+                        max_entry_volatility_20d=cfg.max_entry_volatility_20d,
+                        min_entry_ret5_minus_range=cfg.min_entry_ret5_minus_range,
+                        max_entry_range_to_ret5=cfg.max_entry_range_to_ret5,
+                        max_entry_volatility_to_momentum20=cfg.max_entry_volatility_to_momentum20,
                     )
                 except Exception:
                     results.append(
@@ -995,7 +1178,12 @@ def main() -> None:
                            overheat_rejected_count, overheat_cash_days,
                            overheat_rejected_by_ret_1d, overheat_rejected_by_ret_5d,
                            overheat_rejected_by_range_pct, overheat_rejected_by_volume_z20,
-                           overheat_rejected_by_volume_surge_rule
+                           overheat_rejected_by_volume_surge_rule,
+                           entry_quality_rejected_count, entry_quality_cash_days,
+                           rejected_by_range_pct, rejected_by_volatility_20d,
+                           rejected_by_ret5_minus_range, rejected_by_range_to_ret5,
+                           rejected_by_volatility_to_momentum20,
+                           average_cash_weight, average_exposure, max_single_position_weight
                     FROM backtest_runs WHERE run_id=?
                     """,
                     (run_id,),
@@ -1025,6 +1213,16 @@ def main() -> None:
                         overheat_rejected_by_range_pct=int(bt_meta[9]) if bt_meta else None,
                         overheat_rejected_by_volume_z20=int(bt_meta[10]) if bt_meta else None,
                         overheat_rejected_by_volume_surge_rule=int(bt_meta[11]) if bt_meta else None,
+                        entry_quality_rejected_count=int(bt_meta[12]) if bt_meta else None,
+                        entry_quality_cash_days=int(bt_meta[13]) if bt_meta else None,
+                        rejected_by_range_pct=int(bt_meta[14]) if bt_meta else None,
+                        rejected_by_volatility_20d=int(bt_meta[15]) if bt_meta else None,
+                        rejected_by_ret5_minus_range=int(bt_meta[16]) if bt_meta else None,
+                        rejected_by_range_to_ret5=int(bt_meta[17]) if bt_meta else None,
+                        rejected_by_volatility_to_momentum20=int(bt_meta[18]) if bt_meta else None,
+                        average_cash_weight=float(bt_meta[19]) if bt_meta else None,
+                        average_exposure=float(bt_meta[20]) if bt_meta else None,
+                        max_single_position_weight=float(bt_meta[21]) if bt_meta else None,
                         win_vs_benchmark=(1 if (excess is not None and excess > 0) else (0 if excess is not None else None)),
                         cost_metadata_json=json.dumps(cost_meta, ensure_ascii=False),
                         skipped=0,
@@ -1058,6 +1256,20 @@ def main() -> None:
         overheat_range = [r.overheat_rejected_by_range_pct for r in valid if r.overheat_rejected_by_range_pct is not None]
         overheat_volz = [r.overheat_rejected_by_volume_z20 for r in valid if r.overheat_rejected_by_volume_z20 is not None]
         overheat_surge = [r.overheat_rejected_by_volume_surge_rule for r in valid if r.overheat_rejected_by_volume_surge_rule is not None]
+        quality_rejected = [r.entry_quality_rejected_count for r in valid if r.entry_quality_rejected_count is not None]
+        quality_cash = [r.entry_quality_cash_days for r in valid if r.entry_quality_cash_days is not None]
+        quality_range = [r.rejected_by_range_pct for r in valid if r.rejected_by_range_pct is not None]
+        quality_vol = [r.rejected_by_volatility_20d for r in valid if r.rejected_by_volatility_20d is not None]
+        quality_r5m = [r.rejected_by_ret5_minus_range for r in valid if r.rejected_by_ret5_minus_range is not None]
+        quality_r2r = [r.rejected_by_range_to_ret5 for r in valid if r.rejected_by_range_to_ret5 is not None]
+        quality_v2m = [
+            r.rejected_by_volatility_to_momentum20
+            for r in valid
+            if r.rejected_by_volatility_to_momentum20 is not None
+        ]
+        avg_cash = [r.average_cash_weight for r in valid if r.average_cash_weight is not None]
+        avg_exposure = [r.average_exposure for r in valid if r.average_exposure is not None]
+        max_single = [r.max_single_position_weight for r in valid if r.max_single_position_weight is not None]
 
         eval_counts = {h: len([r for r in valid if r.period_months == h]) for h in STABILITY_WEIGHTS}
         coverage = sum(1 for h in STABILITY_WEIGHTS if eval_counts[h] > 0) / len(STABILITY_WEIGHTS)
@@ -1105,6 +1317,17 @@ def main() -> None:
                 overheat_rejected_by_range_pct_mean=mean(overheat_range) if overheat_range else None,
                 overheat_rejected_by_volume_z20_mean=mean(overheat_volz) if overheat_volz else None,
                 overheat_rejected_by_volume_surge_rule_mean=mean(overheat_surge) if overheat_surge else None,
+                entry_quality_gate_enabled=cfg.entry_quality_gate_enabled,
+                entry_quality_rejected_count_mean=mean(quality_rejected) if quality_rejected else None,
+                entry_quality_cash_days_mean=mean(quality_cash) if quality_cash else None,
+                rejected_by_range_pct_mean=mean(quality_range) if quality_range else None,
+                rejected_by_volatility_20d_mean=mean(quality_vol) if quality_vol else None,
+                rejected_by_ret5_minus_range_mean=mean(quality_r5m) if quality_r5m else None,
+                rejected_by_range_to_ret5_mean=mean(quality_r2r) if quality_r2r else None,
+                rejected_by_volatility_to_momentum20_mean=mean(quality_v2m) if quality_v2m else None,
+                average_cash_weight_mean=mean(avg_cash) if avg_cash else None,
+                average_exposure_mean=mean(avg_exposure) if avg_exposure else None,
+                max_single_position_weight_mean=mean(max_single) if max_single else None,
                 num_windows=len(rows),
                 evaluated_windows=len(valid),
                 skipped_windows=len(rows) - len(valid),

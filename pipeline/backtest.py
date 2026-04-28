@@ -41,6 +41,17 @@ def _build_target_holdings(
     enable_volume_surge_overheat_rule: bool = False,
     volume_surge_threshold: float = 3.0,
     volume_surge_ret_5d_threshold: float = 0.10,
+    enable_entry_quality_gate: bool = False,
+    enable_entry_range_rule: bool = False,
+    enable_entry_volatility_rule: bool = False,
+    enable_entry_ret5_minus_range_rule: bool = False,
+    enable_entry_range_to_ret5_rule: bool = False,
+    enable_entry_volatility_to_momentum20_rule: bool = False,
+    max_entry_quality_range_pct: float = 0.16,
+    max_entry_volatility_20d: float = 0.06,
+    min_entry_ret5_minus_range: float = 0.0,
+    max_entry_range_to_ret5: float = 1.5,
+    max_entry_volatility_to_momentum20: float = 0.5,
 ) -> tuple[set[str], dict[str, int]]:
     blocked_new_entries = blocked_new_entries or set()
     keep_due_rank = {
@@ -63,6 +74,12 @@ def _build_target_holdings(
         "overheat_rejected_by_range_pct": 0,
         "overheat_rejected_by_volume_z20": 0,
         "overheat_rejected_by_volume_surge_rule": 0,
+        "entry_quality_rejected_count": 0,
+        "rejected_by_range_pct": 0,
+        "rejected_by_volatility_20d": 0,
+        "rejected_by_ret5_minus_range": 0,
+        "rejected_by_range_to_ret5": 0,
+        "rejected_by_volatility_to_momentum20": 0,
     }
     for row in ranked_rows:
         sym = row["symbol"]
@@ -117,6 +134,79 @@ def _build_target_holdings(
                 overheat_diag["overheat_rejected_by_volume_surge_rule"] += 1
             if rejected:
                 overheat_diag["overheat_rejected_count"] += 1
+                continue
+        if enable_entry_quality_gate:
+            ret_5d = row["ret_5d"]
+            range_pct = row["range_pct"]
+            volatility_20d = row["volatility_20d"]
+            momentum_20d = row["momentum_20d"]
+            ret_5d_val = float(ret_5d) if ret_5d is not None else None
+            range_pct_val = float(range_pct) if range_pct is not None else None
+            volatility_20d_val = float(volatility_20d) if volatility_20d is not None else None
+            momentum_20d_val = float(momentum_20d) if momentum_20d is not None else None
+            ret5_minus_range = (
+                (ret_5d_val - range_pct_val)
+                if ret_5d_val is not None and range_pct_val is not None
+                else None
+            )
+            range_to_ret5 = (
+                (range_pct_val / abs(ret_5d_val))
+                if range_pct_val is not None and ret_5d_val is not None and abs(ret_5d_val) > 0.0
+                else None
+            )
+            volatility_to_momentum20 = (
+                (volatility_20d_val / abs(momentum_20d_val))
+                if volatility_20d_val is not None and momentum_20d_val is not None and abs(momentum_20d_val) > 0.0
+                else None
+            )
+            quality_rejected = False
+            if (
+                enable_entry_range_rule
+                and (
+                    range_pct_val is None
+                    or range_pct_val > float(max_entry_quality_range_pct)
+                )
+            ):
+                quality_rejected = True
+                overheat_diag["rejected_by_range_pct"] += 1
+            if (
+                enable_entry_volatility_rule
+                and (
+                    volatility_20d_val is None
+                    or volatility_20d_val > float(max_entry_volatility_20d)
+                )
+            ):
+                quality_rejected = True
+                overheat_diag["rejected_by_volatility_20d"] += 1
+            if (
+                enable_entry_ret5_minus_range_rule
+                and (
+                    ret5_minus_range is None
+                    or ret5_minus_range < float(min_entry_ret5_minus_range)
+                )
+            ):
+                quality_rejected = True
+                overheat_diag["rejected_by_ret5_minus_range"] += 1
+            if (
+                enable_entry_range_to_ret5_rule
+                and (
+                    range_to_ret5 is None
+                    or range_to_ret5 > float(max_entry_range_to_ret5)
+                )
+            ):
+                quality_rejected = True
+                overheat_diag["rejected_by_range_to_ret5"] += 1
+            if (
+                enable_entry_volatility_to_momentum20_rule
+                and (
+                    volatility_to_momentum20 is None
+                    or volatility_to_momentum20 > float(max_entry_volatility_to_momentum20)
+                )
+            ):
+                quality_rejected = True
+                overheat_diag["rejected_by_volatility_to_momentum20"] += 1
+            if quality_rejected:
+                overheat_diag["entry_quality_rejected_count"] += 1
                 continue
         target.append(sym)
     return set(target), overheat_diag
@@ -203,6 +293,17 @@ def run_backtest(
     enable_volume_surge_overheat_rule: bool = False,
     volume_surge_threshold: float = 3.0,
     volume_surge_ret_5d_threshold: float = 0.10,
+    enable_entry_quality_gate: bool = False,
+    enable_entry_range_rule: bool = False,
+    enable_entry_volatility_rule: bool = False,
+    enable_entry_ret5_minus_range_rule: bool = False,
+    enable_entry_range_to_ret5_rule: bool = False,
+    enable_entry_volatility_to_momentum20_rule: bool = False,
+    max_entry_quality_range_pct: float = 0.16,
+    max_entry_volatility_20d: float = 0.06,
+    min_entry_ret5_minus_range: float = 0.0,
+    max_entry_range_to_ret5: float = 1.5,
+    max_entry_volatility_to_momentum20: float = 0.5,
 ) -> str:
     """Equal-weight long backtest using daily_scores and next-day close returns."""
     if rebalance_frequency not in {"daily", "weekly"}:
@@ -295,6 +396,24 @@ def run_backtest(
         int(bool(enable_volume_surge_overheat_rule)),
         float(volume_surge_threshold),
         float(volume_surge_ret_5d_threshold),
+        int(bool(enable_entry_quality_gate)),
+        int(bool(enable_entry_range_rule)),
+        int(bool(enable_entry_volatility_rule)),
+        int(bool(enable_entry_ret5_minus_range_rule)),
+        int(bool(enable_entry_range_to_ret5_rule)),
+        int(bool(enable_entry_volatility_to_momentum20_rule)),
+        float(max_entry_quality_range_pct),
+        float(max_entry_volatility_20d),
+        float(min_entry_ret5_minus_range),
+        float(max_entry_range_to_ret5),
+        float(max_entry_volatility_to_momentum20),
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
         0,
         0,
         0,
@@ -327,6 +446,14 @@ def run_backtest(
             enable_overheat_range_rule,enable_overheat_volume_z20_rule,
             max_entry_ret_1d,max_entry_ret_5d,max_entry_range_pct,max_entry_volume_z20,
             enable_volume_surge_overheat_rule,volume_surge_rule_enabled,volume_surge_threshold,volume_surge_ret_5d_threshold,
+            entry_quality_gate_enabled,
+            enable_entry_range_rule,enable_entry_volatility_rule,enable_entry_ret5_minus_range_rule,
+            enable_entry_range_to_ret5_rule,enable_entry_volatility_to_momentum20_rule,
+            max_entry_quality_range_pct,max_entry_volatility_20d,min_entry_ret5_minus_range,
+            max_entry_range_to_ret5,max_entry_volatility_to_momentum20,
+            entry_quality_rejected_count,entry_quality_cash_days,
+            rejected_by_range_pct,rejected_by_volatility_20d,rejected_by_ret5_minus_range,
+            rejected_by_range_to_ret5,rejected_by_volatility_to_momentum20,
             overheat_rejected_count,overheat_cash_days,
             overheat_rejected_by_ret_1d,overheat_rejected_by_ret_5d,overheat_rejected_by_range_pct,
             overheat_rejected_by_volume_z20,overheat_rejected_by_volume_surge_rule,
@@ -357,6 +484,13 @@ def run_backtest(
     overheat_rejected_by_range_pct = 0
     overheat_rejected_by_volume_z20 = 0
     overheat_rejected_by_volume_surge_rule = 0
+    entry_quality_rejected_count = 0
+    entry_quality_cash_days = 0
+    rejected_by_range_pct = 0
+    rejected_by_volatility_20d = 0
+    rejected_by_ret5_minus_range = 0
+    rejected_by_range_to_ret5 = 0
+    rejected_by_volatility_to_momentum20 = 0
     risk_event_rows: list[tuple] = []
     position_stop_loss_count = 0
     trailing_stop_count = 0
@@ -387,7 +521,7 @@ def run_backtest(
                 """
                 SELECT s.symbol, s.rank, s.score,
                        f.momentum_20d, f.momentum_60d, f.sma_20_gap, f.sma_60_gap,
-                       f.ret_1d, f.ret_5d, f.range_pct, f.volume_z20
+                       f.ret_1d, f.ret_5d, f.range_pct, f.volatility_20d, f.volume_z20
                 FROM daily_scores s
                 LEFT JOIN daily_features f
                   ON f.symbol = s.symbol AND f.date = s.date
@@ -461,6 +595,17 @@ def run_backtest(
                 enable_volume_surge_overheat_rule=enable_volume_surge_overheat_rule,
                 volume_surge_threshold=volume_surge_threshold,
                 volume_surge_ret_5d_threshold=volume_surge_ret_5d_threshold,
+                enable_entry_quality_gate=enable_entry_quality_gate,
+                enable_entry_range_rule=enable_entry_range_rule,
+                enable_entry_volatility_rule=enable_entry_volatility_rule,
+                enable_entry_ret5_minus_range_rule=enable_entry_ret5_minus_range_rule,
+                enable_entry_range_to_ret5_rule=enable_entry_range_to_ret5_rule,
+                enable_entry_volatility_to_momentum20_rule=enable_entry_volatility_to_momentum20_rule,
+                max_entry_quality_range_pct=max_entry_quality_range_pct,
+                max_entry_volatility_20d=max_entry_volatility_20d,
+                min_entry_ret5_minus_range=min_entry_ret5_minus_range,
+                max_entry_range_to_ret5=max_entry_range_to_ret5,
+                max_entry_volatility_to_momentum20=max_entry_volatility_to_momentum20,
             )
             overheat_rejected_count += int(overheat_diag["overheat_rejected_count"])
             overheat_rejected_by_ret_1d += int(overheat_diag["overheat_rejected_by_ret_1d"])
@@ -468,6 +613,12 @@ def run_backtest(
             overheat_rejected_by_range_pct += int(overheat_diag["overheat_rejected_by_range_pct"])
             overheat_rejected_by_volume_z20 += int(overheat_diag["overheat_rejected_by_volume_z20"])
             overheat_rejected_by_volume_surge_rule += int(overheat_diag["overheat_rejected_by_volume_surge_rule"])
+            entry_quality_rejected_count += int(overheat_diag["entry_quality_rejected_count"])
+            rejected_by_range_pct += int(overheat_diag["rejected_by_range_pct"])
+            rejected_by_volatility_20d += int(overheat_diag["rejected_by_volatility_20d"])
+            rejected_by_ret5_minus_range += int(overheat_diag["rejected_by_ret5_minus_range"])
+            rejected_by_range_to_ret5 += int(overheat_diag["rejected_by_range_to_ret5"])
+            rejected_by_volatility_to_momentum20 += int(overheat_diag["rejected_by_volatility_to_momentum20"])
             if block_new_buys:
                 target_holdings = target_holdings & current_holdings
             if entry_gate_enabled:
@@ -671,6 +822,8 @@ def run_backtest(
             entry_gate_cash_days += 1
         if enable_overheat_entry_gate and pos_count < int(top_n):
             overheat_cash_days += 1
+        if enable_entry_quality_gate and pos_count < int(top_n):
+            entry_quality_cash_days += 1
         if removed_by_risk_for_day and pos_count < int(top_n):
             risk_cut_cash_days += 1
 
@@ -760,6 +913,13 @@ def run_backtest(
             overheat_rejected_by_range_pct=?,
             overheat_rejected_by_volume_z20=?,
             overheat_rejected_by_volume_surge_rule=?,
+            entry_quality_rejected_count=?,
+            entry_quality_cash_days=?,
+            rejected_by_range_pct=?,
+            rejected_by_volatility_20d=?,
+            rejected_by_ret5_minus_range=?,
+            rejected_by_range_to_ret5=?,
+            rejected_by_volatility_to_momentum20=?,
             position_stop_loss_count=?,
             trailing_stop_count=?,
             portfolio_dd_cut_count=?,
@@ -789,6 +949,13 @@ def run_backtest(
             int(overheat_rejected_by_range_pct),
             int(overheat_rejected_by_volume_z20),
             int(overheat_rejected_by_volume_surge_rule),
+            int(entry_quality_rejected_count),
+            int(entry_quality_cash_days),
+            int(rejected_by_range_pct),
+            int(rejected_by_volatility_20d),
+            int(rejected_by_ret5_minus_range),
+            int(rejected_by_range_to_ret5),
+            int(rejected_by_volatility_to_momentum20),
             int(position_stop_loss_count),
             int(trailing_stop_count),
             int(portfolio_dd_cut_count),
