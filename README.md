@@ -1632,3 +1632,43 @@ python scripts/analyze_sector_attribution.py --sector-file data/kospi_sector_map
   - `daily_broad_sector_exposure.csv`
   - `broad_sector_comparison.csv`
   - `broad_sector_2024_stress_summary.csv`
+
+## Broad Sector Guardrail 실험 (Experiment 전용)
+
+> 이 실험은 **production rule이 아니라 실험 스크립트**입니다. 기존 baseline/prod 로직은 변경하지 않습니다.
+
+Quick 실행(기본: quarterly + 12개월):
+
+```bash
+python scripts/run_broad_sector_guardrail_experiment.py \
+  --db data/kospi_495_rolling_3y.db \
+  --universe-file data/kospi_valid_universe_495.csv \
+  --sector-file data/kospi_sector_map.csv \
+  --mode quick \
+  --outdir outputs/broad_sector_guardrail/quick
+```
+
+Full 실행(monthly,quarterly + 1,3,6,12개월):
+
+```bash
+python scripts/run_broad_sector_guardrail_experiment.py \
+  --db data/kospi_495_rolling_3y.db \
+  --universe-file data/kospi_valid_universe_495.csv \
+  --sector-file data/kospi_sector_map.csv \
+  --mode full \
+  --outdir outputs/broad_sector_guardrail/full
+```
+
+주요 산출물:
+
+- `manifest.json`
+- `guardrail_candidate_summary.csv`
+- `guardrail_window_results.csv`
+- `guardrail_worst_windows.csv`
+- `guardrail_monthly_returns.csv`
+- `guardrail_full_period_results.csv`
+- `guardrail_daily_broad_sector_exposure.csv`
+- `guardrail_sector_cap_compliance.csv`
+- `guardrail_report.md`
+- `equity_curve.csv`, `drawdown_curve.csv`
+- `equity_curve.png`, `drawdown_curve.png`, `broad_sector_exposure_heatmap.png`
