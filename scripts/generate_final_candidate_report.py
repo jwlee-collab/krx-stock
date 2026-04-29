@@ -777,6 +777,66 @@ def _write_csv(path: Path, rows: list[dict[str, object]], fieldnames: list[str] 
         writer.writerows(rows)
 
 
+def _table_columns(conn: sqlite3.Connection, table: str) -> list[str]:
+    return [str(r["name"]) for r in conn.execute(f"PRAGMA table_info({table})").fetchall()]
+
+
+def _export_baseline_old_details(conn: sqlite3.Connection, outdir: Path, run_id: str, benchmark_by_date: dict[str, float]) -> None:
+    bt_rows = conn.execute(
+        "SELECT date, equity, daily_return, position_count, max_single_position_weight FROM backtest_results WHERE run_id=? ORDER BY date",
+        (run_id,),
+    ).fetchall()
+    if not bt_rows:
+        return
+    init_eq = float(conn.execute("SELECT initial_equity FROM backtest_runs WHERE run_id=?", (run_id,)).fetchone()[0])
+    b_eq = init_eq
+    eq_rows: list[dict[str, object]] = []
+    dd_rows: list[dict[str, object]] = []
+    daily_rows: list[dict[str, object]] = []
+    s_peak = 0.0
+    b_peak = 0.0
+    prev_eq = None
+    for r in bt_rows:
+        d = str(r["date"])
+        eq = float(r["equity"])
+        br = float(benchmark_by_date.get(d, 0.0))
+        b_eq *= (1.0 + br)
+        s_peak = max(s_peak, eq)
+        b_peak = max(b_peak, b_eq)
+        eq_rows.append({"date": d, "equity": eq, "benchmark_equity": b_eq})
+        dd_rows.append({"date": d, "drawdown": _safe_div(eq - s_peak, s_peak), "benchmark_drawdown": _safe_div(b_eq - b_peak, b_peak)})
+        daily_rows.append({
+            "date": d, "equity": eq, "benchmark_equity": b_eq, "cash_weight": max(0.0, 1.0 - float(r["max_single_position_weight"] or 0.0)),
+            "position_count": int(r["position_count"] or 0), "max_single_weight": float(r["max_single_position_weight"] or 0.0),
+            "daily_return": float(r["daily_return"] or 0.0), "benchmark_return": br,
+        })
+        prev_eq = eq
+    _write_csv(outdir / "baseline_old_equity_curve.csv", eq_rows)
+    _write_csv(outdir / "baseline_old_drawdown_curve.csv", dd_rows)
+    _write_csv(outdir / "baseline_old_daily_state.csv", daily_rows)
+    monthly = _compute_monthly_returns(bt_rows, benchmark_by_date)
+    _write_csv(outdir / "baseline_old_monthly_returns.csv", [
+        {"month": m, "strategy_return": s, "benchmark_return": b, "excess_return": s - b} for m, (s, b) in sorted(monthly.items())
+    ])
+    for src, dst in [("window_results.csv", "baseline_old_window_results.csv"), ("full_period_results.csv", "baseline_old_full_period_results.csv")]:
+        pass
+    for table, out_name, preferred in [
+        ("backtest_holdings", "baseline_old_holdings.csv", ["date", "symbol", "weight", "shares", "quantity", "market_value", "entry_date", "holding_days", "stopped"]),
+        ("backtest_trades", "baseline_old_trades.csv", ["date", "symbol", "action", "weight_before", "weight_after", "trade_price", "reason", "cash_after"]),
+        ("backtest_risk_events", "baseline_old_risk_events.csv", ["date", "symbol", "event_type", "trigger_price", "exit_price", "weight", "cash_effect"]),
+    ]:
+        cols = _table_columns(conn, table)
+        if not cols:
+            continue
+        keep = [c for c in preferred if c in cols] + [c for c in cols if c not in preferred and c != "run_id"]
+        rows = [dict(r) for r in conn.execute(f"SELECT {', '.join(keep)} FROM {table} WHERE run_id=? ORDER BY date, symbol", (run_id,)).fetchall()]
+        _write_csv(outdir / out_name, rows, fieldnames=keep)
+    holdings_cols = _table_columns(conn, "backtest_holdings")
+    if holdings_cols and "date" in holdings_cols:
+        reb = [{"date": r["date"]} for r in conn.execute("SELECT DISTINCT date FROM backtest_holdings WHERE run_id=? ORDER BY date", (run_id,)).fetchall()]
+        _write_csv(outdir / "baseline_old_rebalance_dates.csv", reb, fieldnames=["date"])
+
+
 def _plot_outputs(
     outdir: Path,
     equity_curve_rows: list[dict[str, object]],
@@ -1280,6 +1340,14 @@ def main() -> None:
         "value",
         "details",
     ])
+    if args.export_baseline_old_details:
+        baseline_full = next((r for r in full_period_rows if str(r.get("candidate")) == "baseline_old"), None)
+        if baseline_full and baseline_full.get("run_id"):
+            _export_baseline_old_details(conn, outdir, str(baseline_full["run_id"]), benchmark_by_date)
+        _write_csv(
+            outdir / "baseline_old_window_results.csv",
+            [r for r in window_rows if str(r.get("candidate")) == "baseline_old"],
+        )
     if args.export_baseline_old_details:
         baseline_row = next((r for r in full_period_rows if str(r.get("candidate")) == "baseline_old"), None)
         if baseline_row and baseline_row.get("run_id"):
