@@ -591,6 +591,81 @@ def _first_divergence_diagnostic(
     }
 
 
+def _build_no_cap_path_audit(
+    *,
+    no_cap_result: dict[str, object],
+    no_cap_candidate: Candidate,
+    args: argparse.Namespace,
+) -> dict[str, object]:
+    selector_path = {
+        "baseline_selector_used": bool(no_cap_candidate.guardrail_type == "none"),
+        "sector_selector_used": bool(no_cap_candidate.guardrail_type != "none"),
+        "guardrail_selector_applied": bool(no_cap_candidate.guardrail_type != "none"),
+        "sector_mapping_used_for_selection": bool(no_cap_candidate.guardrail_type != "none"),
+        "sector_fill_logic_used": False,
+        "symbol_to_sector_affects_selection": bool(no_cap_candidate.guardrail_type != "none"),
+    }
+    guardrail_flags = {
+        "no_cap_mode": bool(no_cap_candidate.guardrail_type == "none"),
+        "guardrail_type": no_cap_candidate.guardrail_type,
+        "max_names_per_broad_sector": no_cap_candidate.max_names_per_broad_sector,
+        "soft_penalty_lambda": no_cap_candidate.soft_penalty_lambda,
+        "broad_sector_constraints_applied": bool(no_cap_candidate.guardrail_type != "none"),
+        "soft_penalty_applied": bool((no_cap_candidate.soft_penalty_lambda or 0.0) > 0.0),
+    }
+    config_snapshot = {
+        "ranking_config": {"top_n": 5, "rank_basis": "daily_scores.rank_asc", "sector_filtered_rank_used": False},
+        "keep_rule_config": {"min_holding_days": 10, "keep_rank_threshold": 9, "keep_rank_offset": None},
+        "rebalance_config": {
+            "rebalance_frequency": "weekly",
+            "rebalance_calendar_source": "daily_prices_dates",
+            "weekly_generation_method": "ISO week boundary change",
+            "trading_day_adjustment": "none(next available trading day iteration)",
+            "rebalance_dates_recorded": bool(no_cap_result.get("rebalance_dates") is not None),
+        },
+        "stop_loss_config": {
+            "position_stop_loss_threshold": 0.10,
+            "stop_loss_cash_mode": "keep_cash",
+            "keep_cash": True,
+            "rebalance_remaining": False,
+            "stop_loss_cooldown_days": 0,
+            "max_single_weight_cap": MAX_SINGLE_WEIGHT_LIMIT,
+            "cash_weight_tracking": True,
+        },
+        "universe_config": {
+            "candidate_universe_file": str(args.universe_csv) if args.universe_csv else None,
+            "rolling_liquidity_top_n": int(args.rolling_universe_top_n),
+            "date_range": {"start_date": args.start_date, "end_date": args.end_date},
+            "score_date_used_rule": "d0 rebalance snapshot",
+            "lookahead_check_mode": "rolling_universe_no_lookahead_validation",
+        },
+        "benchmark_config": {"benchmark_mode": "equal_weight_4_symbols", "benchmark_symbols": ["005930", "000660", "035420", "005380"]},
+    }
+    fail_reasons: list[str] = []
+    if not selector_path["baseline_selector_used"]:
+        fail_reasons.append("baseline_selector_used_must_be_true_in_no_cap")
+    if selector_path["guardrail_selector_applied"]:
+        fail_reasons.append("guardrail_selector_applied_in_no_cap")
+    if guardrail_flags["broad_sector_constraints_applied"]:
+        fail_reasons.append("broad_sector_constraints_applied_in_no_cap")
+    if guardrail_flags["soft_penalty_applied"]:
+        fail_reasons.append("soft_penalty_applied_in_no_cap")
+    if selector_path["sector_fill_logic_used"]:
+        fail_reasons.append("sector_fill_logic_used_in_no_cap")
+    if selector_path["sector_mapping_used_for_selection"]:
+        fail_reasons.append("sector_mapping_used_for_selection_in_no_cap")
+    no_cap_path_audit_pass = not fail_reasons
+    likely_suspects = [r.replace("_in_no_cap", "") for r in fail_reasons] if fail_reasons else []
+    return {
+        "no_cap_path_audit_pass": no_cap_path_audit_pass,
+        "no_cap_path_audit_fail_reasons": fail_reasons,
+        "likely_path_level_suspects": likely_suspects,
+        "selector_path": selector_path,
+        "guardrail_flags": guardrail_flags,
+        "config_snapshot": config_snapshot,
+    }
+
+
 def _simulate_candidate(
     conn: sqlite3.Connection,
     dates: list[str],
@@ -1156,6 +1231,11 @@ def main() -> None:
     if not no_cap_rows:
         raise ValueError("baseline_old_no_sector_guardrail result row is missing")
     no_cap_full = no_cap_rows[0]
+    no_cap_audit = _build_no_cap_path_audit(
+        no_cap_result=no_cap_result,
+        no_cap_candidate=Candidate("baseline_old_no_sector_guardrail", "old", "none", None, None),
+        args=args,
+    )
 
     parity_summary_json = outdir / "parity_summary.json"
     first_divergence_report_md = outdir / "first_divergence_report.md"
@@ -1466,6 +1546,9 @@ def main() -> None:
         parity_summary_payload["status"] = no_cap_baseline_parity_check["status"]
         parity_summary_payload["reference_final_report_dir"] = str(ref_dir)
         parity_summary_payload["analysis_status"] = "valid" if parity_summary_payload["parity_pass"] else "invalid_due_to_no_cap_parity_failure"
+        parity_summary_payload["no_cap_path_audit_pass"] = no_cap_audit["no_cap_path_audit_pass"]
+        parity_summary_payload["no_cap_path_audit_fail_reasons"] = no_cap_audit["no_cap_path_audit_fail_reasons"]
+        parity_summary_payload["no_cap_audit"] = no_cap_audit
         parity_summary_json.write_text(json.dumps(parity_summary_payload, ensure_ascii=False, indent=2), encoding="utf-8")
         first_divergence_report_md.write_text(
             "\n".join(
@@ -1481,6 +1564,11 @@ def main() -> None:
                     f"- likely_cause_hint: {parity_summary_payload['likely_cause_hint']}",
                     f"- unavailable_artifacts: {parity_summary_payload['unavailable_artifacts']}",
                     f"- compared_artifacts: {parity_summary_payload['compared_artifacts']}",
+                    f"- no_cap_path_audit_pass: {parity_summary_payload['no_cap_path_audit_pass']}",
+                    f"- no_cap_path_audit_fail_reasons: {parity_summary_payload['no_cap_path_audit_fail_reasons']}",
+                    f"- no_cap_selector_path: {parity_summary_payload['no_cap_audit']['selector_path']}",
+                    f"- no_cap_guardrail_flags: {parity_summary_payload['no_cap_audit']['guardrail_flags']}",
+                    f"- likely_path_level_suspects: {parity_summary_payload['no_cap_audit']['likely_path_level_suspects']}",
                     "- next_debug_recommendation: trace same date in holdings/daily_state/risk_events/rebalance artifacts.",
                 ]
             ),
@@ -1488,7 +1576,23 @@ def main() -> None:
         )
     else:
         no_cap_baseline_parity_check["message"] = "reference-final-report-dir not provided"
-        parity_summary_json.write_text(json.dumps({"parity_pass": False, "status": "skipped"}, ensure_ascii=False, indent=2), encoding="utf-8")
+        parity_summary_json.write_text(
+            json.dumps(
+                {
+                    "parity_pass": False,
+                    "status": "skipped",
+                    "analysis_status": "diagnostic_unavailable_no_reference_final_report_dir",
+                    "decision_usable": False,
+                    "cap_interpretation_allowed": False,
+                    "no_cap_path_audit_pass": no_cap_audit["no_cap_path_audit_pass"],
+                    "no_cap_path_audit_fail_reasons": no_cap_audit["no_cap_path_audit_fail_reasons"],
+                    "no_cap_audit": no_cap_audit,
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
         first_divergence_report_md.write_text("# First Divergence Report\n\nParity skipped (no canonical report).", encoding="utf-8")
 
     parity_pass = no_cap_baseline_parity_check.get("status") == "passed"
@@ -1546,6 +1650,9 @@ def main() -> None:
         "guardrail_selector_applied": False,
         "sector_file_used_for_no_cap": False,
         "broad_sector_constraints_applied": False,
+        "no_cap_path_audit_pass": no_cap_audit["no_cap_path_audit_pass"],
+        "no_cap_path_audit_fail_reasons": no_cap_audit["no_cap_path_audit_fail_reasons"],
+        "no_cap_audit": no_cap_audit,
         "candidates": [c.__dict__ for c in candidates],
         "files": {
             "summary_csv": str(summary_csv),
