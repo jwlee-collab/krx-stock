@@ -880,6 +880,49 @@ def _build_summary_row_from_window_rows(candidate: Candidate, eval_frequency: st
     }
 
 
+def _is_no_cap_diagnostic_only(args: argparse.Namespace) -> bool:
+    return bool(args.parity_only and args.only_no_cap)
+
+
+def _requires_sector_file(args: argparse.Namespace) -> bool:
+    return not _is_no_cap_diagnostic_only(args)
+
+
+def _resolve_sector_map_for_run(
+    args: argparse.Namespace,
+) -> tuple[dict[str, str], float | None, dict[str, object], list[str]]:
+    sector_file_required = _requires_sector_file(args)
+    sector_file_path = Path(args.sector_file) if args.sector_file else None
+    warnings: list[str] = []
+    metadata = {
+        "sector_file_path": str(sector_file_path) if sector_file_path else None,
+        "sector_file_required": sector_file_required,
+        "sector_file_status": None,
+        "sector_file_used_for_no_cap": False,
+        "sector_mapping_used_for_selection": bool(sector_file_required),
+    }
+    if sector_file_required:
+        if sector_file_path is None or not sector_file_path.exists():
+            raise FileNotFoundError(
+                f"sector file is required for cap/soft-penalty guardrail candidates: {sector_file_path if sector_file_path else '<missing>'}"
+            )
+        symbol_to_sector, unknown_ratio = _load_sector_map(sector_file_path)
+        metadata["sector_file_status"] = "loaded_required_for_guardrail_candidates"
+        metadata["sector_mapping_used_for_selection"] = True
+        if unknown_ratio > 0.05:
+            warnings.append(f"UNKNOWN broad_sector ratio is high: {unknown_ratio:.2%}")
+        return symbol_to_sector, unknown_ratio, metadata, warnings
+
+    if sector_file_path is None or not sector_file_path.exists():
+        metadata["sector_file_status"] = "unavailable_not_required_for_no_cap"
+        print("[info] sector file missing but not required for --parity-only --only-no-cap; continuing with empty sector map")
+    else:
+        metadata["sector_file_status"] = "available_not_used_for_no_cap"
+    metadata["sector_file_used_for_no_cap"] = False
+    metadata["sector_mapping_used_for_selection"] = False
+    return {}, None, metadata, warnings
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description="Run broad sector guardrail experiment for KOSPI final candidates")
     p.add_argument("--db", default="data/kospi_495_rolling_3y.db")
@@ -919,10 +962,7 @@ def main() -> None:
         shutil.rmtree(outdir)
     outdir.mkdir(parents=True, exist_ok=True)
 
-    warnings: list[str] = []
-    symbol_to_sector, unknown_ratio = _load_sector_map(Path(args.sector_file))
-    if unknown_ratio > 0.05:
-        warnings.append(f"UNKNOWN broad_sector ratio is high: {unknown_ratio:.2%}")
+    symbol_to_sector, unknown_ratio, sector_file_meta, warnings = _resolve_sector_map_for_run(args)
 
     conn = get_connection(args.db)
     init_db(conn)
@@ -1548,6 +1588,11 @@ def main() -> None:
         parity_summary_payload["analysis_status"] = "valid" if parity_summary_payload["parity_pass"] else "invalid_due_to_no_cap_parity_failure"
         parity_summary_payload["no_cap_path_audit_pass"] = no_cap_audit["no_cap_path_audit_pass"]
         parity_summary_payload["no_cap_path_audit_fail_reasons"] = no_cap_audit["no_cap_path_audit_fail_reasons"]
+        parity_summary_payload["sector_file_status"] = sector_file_meta["sector_file_status"]
+        parity_summary_payload["sector_file_path"] = sector_file_meta["sector_file_path"]
+        parity_summary_payload["sector_file_required"] = sector_file_meta["sector_file_required"]
+        parity_summary_payload["sector_file_used_for_no_cap"] = sector_file_meta["sector_file_used_for_no_cap"]
+        parity_summary_payload["sector_mapping_used_for_selection"] = sector_file_meta["sector_mapping_used_for_selection"]
         parity_summary_payload["no_cap_audit"] = no_cap_audit
         parity_summary_json.write_text(json.dumps(parity_summary_payload, ensure_ascii=False, indent=2), encoding="utf-8")
         first_divergence_report_md.write_text(
@@ -1566,6 +1611,11 @@ def main() -> None:
                     f"- compared_artifacts: {parity_summary_payload['compared_artifacts']}",
                     f"- no_cap_path_audit_pass: {parity_summary_payload['no_cap_path_audit_pass']}",
                     f"- no_cap_path_audit_fail_reasons: {parity_summary_payload['no_cap_path_audit_fail_reasons']}",
+                    f"- sector_file_status: {parity_summary_payload['sector_file_status']}",
+                    f"- sector_file_path: {parity_summary_payload['sector_file_path']}",
+                    f"- sector_file_required: {parity_summary_payload['sector_file_required']}",
+                    f"- sector_file_used_for_no_cap: {parity_summary_payload['sector_file_used_for_no_cap']}",
+                    f"- sector_mapping_used_for_selection: {parity_summary_payload['sector_mapping_used_for_selection']}",
                     f"- no_cap_selector_path: {parity_summary_payload['no_cap_audit']['selector_path']}",
                     f"- no_cap_guardrail_flags: {parity_summary_payload['no_cap_audit']['guardrail_flags']}",
                     f"- likely_path_level_suspects: {parity_summary_payload['no_cap_audit']['likely_path_level_suspects']}",
@@ -1584,6 +1634,11 @@ def main() -> None:
                     "analysis_status": "diagnostic_unavailable_no_reference_final_report_dir",
                     "decision_usable": False,
                     "cap_interpretation_allowed": False,
+                    "sector_file_status": sector_file_meta["sector_file_status"],
+                    "sector_file_path": sector_file_meta["sector_file_path"],
+                    "sector_file_required": sector_file_meta["sector_file_required"],
+                    "sector_file_used_for_no_cap": sector_file_meta["sector_file_used_for_no_cap"],
+                    "sector_mapping_used_for_selection": sector_file_meta["sector_mapping_used_for_selection"],
                     "no_cap_path_audit_pass": no_cap_audit["no_cap_path_audit_pass"],
                     "no_cap_path_audit_fail_reasons": no_cap_audit["no_cap_path_audit_fail_reasons"],
                     "no_cap_audit": no_cap_audit,
@@ -1648,7 +1703,11 @@ def main() -> None:
         "no_cap_baseline_parity_check": no_cap_baseline_parity_check,
         "no_cap_selector_path": "baseline_selector_direct",
         "guardrail_selector_applied": False,
-        "sector_file_used_for_no_cap": False,
+        "sector_file_status": sector_file_meta["sector_file_status"],
+        "sector_file_path": sector_file_meta["sector_file_path"],
+        "sector_file_required": sector_file_meta["sector_file_required"],
+        "sector_file_used_for_no_cap": sector_file_meta["sector_file_used_for_no_cap"],
+        "sector_mapping_used_for_selection": sector_file_meta["sector_mapping_used_for_selection"],
         "broad_sector_constraints_applied": False,
         "no_cap_path_audit_pass": no_cap_audit["no_cap_path_audit_pass"],
         "no_cap_path_audit_fail_reasons": no_cap_audit["no_cap_path_audit_fail_reasons"],
