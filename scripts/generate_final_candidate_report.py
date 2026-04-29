@@ -781,6 +781,21 @@ def _table_columns(conn: sqlite3.Connection, table: str) -> list[str]:
     return [str(r["name"]) for r in conn.execute(f"PRAGMA table_info({table})").fetchall()]
 
 
+def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? COLLATE NOCASE LIMIT 1",
+        (table,),
+    ).fetchone()
+    return row is not None
+
+
+def _warn_missing_table(outdir: Path, table: str, out_name: str, notes: list[dict[str, str]]) -> None:
+    warning = f"[warn] {table} missing; exported empty {out_name}"
+    print(warning, file=sys.stderr)
+    notes.append({"scope": "baseline_old_details", "table": table, "warning": warning})
+    _write_csv(outdir / "baseline_old_export_warnings.csv", notes, fieldnames=["scope", "table", "warning"])
+
+
 def _export_baseline_old_details(conn: sqlite3.Connection, outdir: Path, run_id: str, benchmark_by_date: dict[str, float]) -> None:
     bt_rows = conn.execute(
         "SELECT date, equity, daily_return, position_count, max_single_position_weight FROM backtest_results WHERE run_id=? ORDER BY date",
@@ -820,11 +835,16 @@ def _export_baseline_old_details(conn: sqlite3.Connection, outdir: Path, run_id:
     ])
     for src, dst in [("window_results.csv", "baseline_old_window_results.csv"), ("full_period_results.csv", "baseline_old_full_period_results.csv")]:
         pass
+    export_notes: list[dict[str, str]] = []
     for table, out_name, preferred in [
         ("backtest_holdings", "baseline_old_holdings.csv", ["date", "symbol", "weight", "shares", "quantity", "market_value", "entry_date", "holding_days", "stopped"]),
         ("backtest_trades", "baseline_old_trades.csv", ["date", "symbol", "action", "weight_before", "weight_after", "trade_price", "reason", "cash_after"]),
         ("backtest_risk_events", "baseline_old_risk_events.csv", ["date", "symbol", "event_type", "trigger_price", "exit_price", "weight", "cash_effect"]),
     ]:
+        if not _table_exists(conn, table):
+            _write_csv(outdir / out_name, [], fieldnames=preferred)
+            _warn_missing_table(outdir, table, out_name, export_notes)
+            continue
         cols = _table_columns(conn, table)
         if not cols:
             continue
@@ -1352,6 +1372,7 @@ def main() -> None:
         baseline_row = next((r for r in full_period_rows if str(r.get("candidate")) == "baseline_old"), None)
         if baseline_row and baseline_row.get("run_id"):
             run_id = baseline_row["run_id"]
+            export_notes: list[dict[str, str]] = []
             eq_rows = [dict(r) for r in conn.execute("SELECT date, equity FROM backtest_results WHERE run_id=? ORDER BY date", (run_id,)).fetchall()]
             peak = 0.0
             dd_rows_export: list[dict[str, object]] = []
@@ -1362,9 +1383,18 @@ def main() -> None:
             _write_csv(outdir / "baseline_old_equity_curve.csv", eq_rows)
             _write_csv(outdir / "baseline_old_drawdown_curve.csv", dd_rows_export)
             _write_csv(outdir / "baseline_old_daily_positions.csv", [dict(r) for r in conn.execute("SELECT date, symbol, weight FROM backtest_holdings WHERE run_id=? ORDER BY date, symbol", (run_id,)).fetchall()])
-            _write_csv(outdir / "baseline_old_trade_log.csv", [dict(r) for r in conn.execute("SELECT date, symbol, action, weight, price, reason FROM backtest_trades WHERE run_id=? ORDER BY date, symbol", (run_id,)).fetchall()])
-            _write_csv(outdir / "baseline_old_stop_loss_events.csv", [dict(r) for r in conn.execute("SELECT date, symbol, event_type FROM backtest_stop_loss_events WHERE run_id=? ORDER BY date, symbol", (run_id,)).fetchall()])
-            _write_csv(outdir / "baseline_old_rebalance_dates.csv", [dict(r) for r in conn.execute("SELECT DISTINCT date FROM backtest_trades WHERE run_id=? ORDER BY date", (run_id,)).fetchall()])
+            if _table_exists(conn, "backtest_trades"):
+                _write_csv(outdir / "baseline_old_trade_log.csv", [dict(r) for r in conn.execute("SELECT date, symbol, action, weight, price, reason FROM backtest_trades WHERE run_id=? ORDER BY date, symbol", (run_id,)).fetchall()])
+                _write_csv(outdir / "baseline_old_rebalance_dates.csv", [dict(r) for r in conn.execute("SELECT DISTINCT date FROM backtest_trades WHERE run_id=? ORDER BY date", (run_id,)).fetchall()], fieldnames=["date"])
+            else:
+                _write_csv(outdir / "baseline_old_trade_log.csv", [], fieldnames=["date", "symbol", "action", "weight", "price", "reason"])
+                _write_csv(outdir / "baseline_old_rebalance_dates.csv", [], fieldnames=["date"])
+                _warn_missing_table(outdir, "backtest_trades", "baseline_old_trade_log.csv", export_notes)
+            if _table_exists(conn, "backtest_stop_loss_events"):
+                _write_csv(outdir / "baseline_old_stop_loss_events.csv", [dict(r) for r in conn.execute("SELECT date, symbol, event_type FROM backtest_stop_loss_events WHERE run_id=? ORDER BY date, symbol", (run_id,)).fetchall()])
+            else:
+                _write_csv(outdir / "baseline_old_stop_loss_events.csv", [], fieldnames=["date", "symbol", "event_type"])
+                _warn_missing_table(outdir, "backtest_stop_loss_events", "baseline_old_stop_loss_events.csv", export_notes)
             _write_csv(outdir / "baseline_old_daily_cash.csv", [dict(r) for r in conn.execute("SELECT date, cash_weight, position_count FROM backtest_results WHERE run_id=? ORDER BY date", (run_id,)).fetchall()])
 
     plots = _plot_outputs(outdir, equity_curve_rows, drawdown_rows, monthly_rows)
