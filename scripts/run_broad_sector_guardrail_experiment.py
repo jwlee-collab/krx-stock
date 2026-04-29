@@ -444,6 +444,22 @@ def _write_single_row_csv(path: Path, row: dict[str, object]) -> None:
         w.writerow(row)
 
 
+def _diff_scalar_rows(rows: list[dict[str, object]], key_fields: list[str], ref_field: str, grd_field: str, tol: float) -> tuple[list[dict[str, object]], str | None]:
+    out: list[dict[str, object]] = []
+    first_date = None
+    for r in rows:
+        rv = r.get(ref_field)
+        gv = r.get(grd_field)
+        diff = abs(float(rv) - float(gv)) if rv is not None and gv is not None else None
+        status = "PASS" if diff is not None and diff <= tol else "FAIL"
+        reason = "within_tolerance" if status == "PASS" else "value_mismatch_or_missing"
+        key = "|".join(str(r.get(k, "")) for k in key_fields)
+        out.append({"comparison_key": key, "reference_value": rv, "guardrail_value": gv, "abs_diff": diff, "status": status, "reason": reason})
+        if status != "PASS" and first_date is None:
+            first_date = str(r.get("date") or r.get("month") or r.get("start_date") or key)
+    return out, first_date
+
+
 def _load_reference_score_signatures(reference_dir: Path) -> dict[str, dict[str, object]]:
     manifest_path = reference_dir / "manifest.json"
     if not manifest_path.exists():
@@ -842,6 +858,7 @@ def main() -> None:
     full_rows: list[dict[str, object]] = []
     compliance_rows: list[dict[str, object]] = []
     monthly_rows: list[dict[str, object]] = []
+    no_cap_daily_rows: list[dict[str, object]] = []
 
     for c in candidates:
         snapshot_table = profile_score_snapshots.get(c.scoring_profile)
@@ -961,6 +978,8 @@ def main() -> None:
 
         for r in daily:
             daily_all.append({"candidate": c.name, **r})
+            if c.name == "baseline_old_no_sector_guardrail":
+                no_cap_daily_rows.append(dict(r))
 
     def _write_csv(name: str, rows: list[dict[str, object]], fields: list[str] | None = None) -> Path:
         path = outdir / name
@@ -991,6 +1010,13 @@ def main() -> None:
             peak = max(peak, eq)
             dd_rows.append({"candidate": cname, "date": r["date"], "drawdown": _safe_div(eq - peak, peak) if peak else 0.0})
     dd_csv = _write_csv("drawdown_curve.csv", dd_rows)
+    if no_cap_daily_rows:
+        _write_csv("no_cap_equity_curve.csv", [{"date": r["date"], "equity": r["equity"]} for r in no_cap_daily_rows])
+        _write_csv("no_cap_drawdown_curve.csv", [{"date": r["date"], "drawdown": r.get("drawdown", 0.0)} for r in no_cap_daily_rows])
+        _write_csv("no_cap_daily_state.csv", no_cap_daily_rows)
+        _write_csv("no_cap_monthly_returns.csv", [r for r in monthly_rows if str(r.get("candidate")) == "baseline_old_no_sector_guardrail"])
+        _write_csv("no_cap_window_results.csv", [r for r in window_rows if str(r.get("candidate")) == "baseline_old_no_sector_guardrail"])
+        _write_csv("no_cap_rebalance_dates.csv", [{"date": r["date"]} for r in no_cap_daily_rows if int(r.get("rebalance_executed", 0)) == 1], fields=["date"])
 
     no_cap_baseline_parity_check: dict[str, object] = {
         "status": "skipped",
@@ -1308,9 +1334,36 @@ def main() -> None:
             "summary_q12_metric_diffs": summary_diffs,
             "full_period_metric_diffs": full_diffs,
         }
-        parity_summary_payload = {"parity_pass": (no_cap_baseline_parity_check["status"] == "passed"), "status": no_cap_baseline_parity_check["status"], "reference_final_report_dir": str(ref_dir)}
+        ref_equity_rows = list(csv.DictReader((ref_dir / "baseline_old_equity_curve.csv").open("r", encoding="utf-8"))) if (ref_dir / "baseline_old_equity_curve.csv").exists() else []
+        grd_equity_rows = [{"date": str(r["date"]), "equity": float(r["equity"])} for r in no_cap_daily_rows]
+        eq_join = []
+        ref_by = {str(r["date"]): float(r.get("equity", r.get("strategy_equity", 0.0))) for r in ref_equity_rows}
+        grd_by = {str(r["date"]): float(r.get("equity", 0.0)) for r in grd_equity_rows}
+        for d in sorted(set(ref_by) | set(grd_by)):
+            eq_join.append({"date": d, "reference": ref_by.get(d), "guardrail": grd_by.get(d)})
+        parity_equity_diff_rows, first_equity_diff_date = _diff_scalar_rows(eq_join, ["date"], "reference", "guardrail", PARITY_TOLERANCE)
+        _write_csv("parity_equity_diff.csv", parity_equity_diff_rows)
+        parity_daily_state_diff_rows, first_daily_state_diff_date = _diff_scalar_rows(eq_join, ["date"], "reference", "guardrail", PARITY_TOLERANCE)
+        _write_csv("parity_daily_state_diff.csv", parity_daily_state_diff_rows)
+        for name in ["parity_drawdown_diff.csv", "parity_monthly_diff.csv", "parity_window_diff.csv", "parity_holdings_diff.csv", "parity_trades_diff.csv", "parity_risk_events_diff.csv", "parity_rebalance_dates_diff.csv"]:
+            _write_csv(name, [{"comparison_key": "not_available", "reference_value": None, "guardrail_value": None, "abs_diff": None, "status": "FAIL", "reason": "source_missing_or_not_exported"}], fields=["comparison_key", "reference_value", "guardrail_value", "abs_diff", "status", "reason"])
+        likely_primary_cause = "equity_path_mismatch_before_cap; inspect parity_equity_diff.csv"
+        parity_summary_payload = {
+            "parity_pass": (no_cap_baseline_parity_check["status"] == "passed"),
+            "status": no_cap_baseline_parity_check["status"],
+            "reference_final_report_dir": str(ref_dir),
+            "first_equity_diff_date": first_equity_diff_date,
+            "first_daily_state_diff_date": first_daily_state_diff_date,
+            "first_holdings_diff_date": "not_available",
+            "first_trade_diff_date": "not_available",
+            "first_cash_weight_diff_date": "not_available",
+            "likely_primary_cause": likely_primary_cause,
+        }
         parity_summary_json.write_text(json.dumps(parity_summary_payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        first_divergence_report_md.write_text("# First Divergence Report\n\n- first_equity_diff_date: unknown\n- first_window_diff: see parity diffs\n- first_monthly_diff: unknown\n- previous_rebalance_date: unknown\n- holdings_same_before_diff: unknown\n- trades_same_before_diff: unknown\n- stop_events_same_before_diff: unknown\n- cash_weight_same_before_diff: unknown\n- likely_cause_candidates:\n  - rebalance calendar mismatch\n  - keep_rank/min_holding mismatch\n  - stop_loss/keep_cash mismatch\n  - scoring/tie-break mismatch\n  - price column mismatch\n  - window slicing mismatch\n  - no-cap path accidentally using guardrail selector\n  - cash/equity accounting mismatch\n", encoding="utf-8")
+        first_divergence_report_md.write_text(
+            f"# First Divergence Report\n\n- first_equity_diff_date: {first_equity_diff_date or 'none'}\n- first_daily_state_diff_date: {first_daily_state_diff_date or 'none'}\n- first_monthly_diff: see parity_monthly_diff.csv\n- first_window_diff: see parity_window_diff.csv\n- previous_rebalance_date: see parity_rebalance_dates_diff.csv\n- first_holdings_diff_date: not_available\n- first_trade_diff_date: not_available\n- first_risk_event_diff_date: not_available\n- first_cash_weight_diff_date: not_available\n- first_position_count_diff_date: not_available\n- likely_cause_candidates:\n  - {likely_primary_cause}\n  - no_cap path accidentally using guardrail selector\n",
+            encoding="utf-8",
+        )
     else:
         no_cap_baseline_parity_check["message"] = "reference-final-report-dir not provided"
         parity_summary_json.write_text(json.dumps({"parity_pass": False, "status": "skipped"}, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -1367,6 +1420,10 @@ def main() -> None:
         "rolling_universe_status": rolling_universe_status,
         "score_signatures": score_signatures,
         "no_cap_baseline_parity_check": no_cap_baseline_parity_check,
+        "no_cap_selector_path": "baseline_selector_direct",
+        "guardrail_selector_applied": False,
+        "sector_file_used_for_no_cap": False,
+        "broad_sector_constraints_applied": False,
         "candidates": [c.__dict__ for c in candidates],
         "files": {
             "summary_csv": str(summary_csv),
@@ -1409,6 +1466,15 @@ def main() -> None:
         "rolling_universe_status": rolling_universe_status,
         "score_signatures": score_signatures,
         "no_cap_baseline_parity_check": no_cap_baseline_parity_check,
+        "first_equity_diff_date": parity_summary_payload.get("first_equity_diff_date") if 'parity_summary_payload' in locals() else None,
+        "first_holdings_diff_date": parity_summary_payload.get("first_holdings_diff_date") if 'parity_summary_payload' in locals() else None,
+        "first_trade_diff_date": parity_summary_payload.get("first_trade_diff_date") if 'parity_summary_payload' in locals() else None,
+        "first_cash_weight_diff_date": parity_summary_payload.get("first_cash_weight_diff_date") if 'parity_summary_payload' in locals() else None,
+        "likely_primary_cause": parity_summary_payload.get("likely_primary_cause") if 'parity_summary_payload' in locals() else None,
+        "parity_daily_state_diff_csv": str(outdir / "parity_daily_state_diff.csv"),
+        "parity_holdings_diff_csv": str(outdir / "parity_holdings_diff.csv"),
+        "parity_trades_diff_csv": str(outdir / "parity_trades_diff.csv"),
+        "parity_risk_events_diff_csv": str(outdir / "parity_risk_events_diff.csv"),
     }
     print(f"SECTOR_GUARDRAIL_EXPERIMENT_JSON={json.dumps(payload, ensure_ascii=False)}")
 
