@@ -1692,3 +1692,42 @@ python scripts/run_broad_sector_guardrail_experiment.py \
   - `--reference-final-report-dir` 지정 시 strict final report의 `baseline_old`와 full-period/window metric parity를 검사합니다.
   - mismatch 시 스크립트는 실패하며 guardrail 결과를 invalid로 처리합니다.
 - rolling universe는 `daily_universe` 기존 데이터가 있으면 재사용하고, `--rebuild-rolling-universe` 지정 시에만 재생성합니다.
+
+### 4) 범용 일일 모의매매 러너 (Local/N100/VPS/Docker/Colab/Agent)
+
+`script/daily_paper_trading_runner.py`는 Colab 전용 경로 하드코딩 없이, 전달된 경로만 사용합니다.
+
+- 필수: `--db`, `--universe-file`, `--reports-dir`
+- 선택: `--restore-db-from`, `--backup-db`, `--backup-reports-dir`, `--force-restore`, `--display-html`, `--no-display`
+- `--display-html`일 때만 `IPython.display` 표시를 시도하고, 그렇지 않으면 HTML 파일 경로만 출력합니다.
+
+#### Local/N100/Agent
+
+```bash
+python scripts/daily_paper_trading_runner.py \
+  --db /home/user/krx-stock-persist/data/kospi_495_rolling_3y.db \
+  --universe-file /home/user/krx-stock-persist/data/kospi_valid_universe_495.csv \
+  --reports-dir /home/user/krx-stock-persist/reports/paper_trading
+```
+
+#### Colab
+
+```bash
+python scripts/daily_paper_trading_runner.py \
+  --db data/kospi_495_rolling_3y.db \
+  --universe-file data/kospi_valid_universe_495.csv \
+  --reports-dir data/reports/paper_trading \
+  --restore-db-from /content/drive/MyDrive/krx-stock-persist/data/kospi_495_rolling_3y.db \
+  --backup-db /content/drive/MyDrive/krx-stock-persist/data/kospi_495_rolling_3y.db \
+  --backup-reports-dir /content/drive/MyDrive/krx-stock-persist/reports/paper_trading \
+  --display-html
+```
+
+#### Docker/Agent
+
+```bash
+python scripts/daily_paper_trading_runner.py \
+  --db /data/krx-stock-persist/data/kospi_495_rolling_3y.db \
+  --universe-file /data/krx-stock-persist/data/kospi_valid_universe_495.csv \
+  --reports-dir /data/krx-stock-persist/reports/paper_trading
+```
