@@ -45,6 +45,32 @@ class Candidate:
     soft_penalty_lambda: float | None
 
 
+def _select_baseline_holdings_no_guardrail(
+    *,
+    ranked_rows: list[dict[str, object]],
+    rank_by_symbol: dict[str, int],
+    current_symbols: set[str],
+    entry_index_by_symbol: dict[str, int],
+    current_day_index: int,
+    top_n: int,
+    min_holding_days: int,
+    keep_rank_threshold: int,
+) -> set[str]:
+    target, _ = apply_broad_sector_guardrail(
+        ranked_rows=ranked_rows,
+        rank_by_symbol=rank_by_symbol,
+        current_symbols=current_symbols,
+        entry_index_by_symbol=entry_index_by_symbol,
+        current_day_index=current_day_index,
+        top_n=top_n,
+        min_holding_days=min_holding_days,
+        keep_rank_threshold=keep_rank_threshold,
+        symbol_to_sector={},
+        guardrail=GuardrailConfig(guardrail_type="none", max_names_per_broad_sector=None, soft_penalty_lambda=None),
+    )
+    return set(target)
+
+
 def _parse_csv_tokens(value: str) -> list[str]:
     return [v.strip() for v in value.split(",") if v.strip()]
 
@@ -455,6 +481,10 @@ def _simulate_candidate(
     equity = 100000.0
     result_rows: list[dict[str, object]] = []
     holdings_rows: list[dict[str, object]] = []
+    trade_rows: list[dict[str, object]] = []
+    stop_loss_rows: list[dict[str, object]] = []
+    cash_rows: list[dict[str, object]] = []
+    rebalance_dates: list[dict[str, object]] = []
     exposure_rows: list[dict[str, object]] = []
     prev_d0: str | None = None
     turnover_rows: list[float] = []
@@ -462,6 +492,11 @@ def _simulate_candidate(
     run_dates = [d for d in dates if (start_date is None or d >= start_date) and (end_date is None or d <= end_date)]
     for i in range(len(run_dates) - 1):
         d0 = run_dates[i]; d1 = run_dates[i + 1]
+        close_map = {
+            normalize_symbol(r["symbol"]): float(r["close"])
+            for r in conn.execute("SELECT symbol, close FROM daily_prices WHERE date=?", (d0,)).fetchall()
+            if r["close"] is not None
+        }
         curr_week = datetime.strptime(d0, "%Y-%m-%d").date().isocalendar()[:2]
         prev_week = datetime.strptime(prev_d0, "%Y-%m-%d").date().isocalendar()[:2] if prev_d0 else None
         should_rebalance = prev_week is None or curr_week != prev_week
@@ -486,20 +521,8 @@ def _simulate_candidate(
                 max_names_per_broad_sector=candidate.max_names_per_broad_sector,
                 soft_penalty_lambda=candidate.soft_penalty_lambda,
             )
-            target_holdings, _ = apply_broad_sector_guardrail(
-                ranked_rows=ranked_rows,
-                rank_by_symbol=rank_by_symbol,
-                current_symbols=current_holdings,
-                entry_index_by_symbol=entry_index_by_symbol,
-                current_day_index=i,
-                top_n=top_n,
-                min_holding_days=min_holding_days,
-                keep_rank_threshold=keep_rank_threshold,
-                symbol_to_sector=symbol_to_sector,
-                guardrail=gcfg,
-            )
             if candidate.guardrail_type == "none":
-                control_holdings, _ = apply_broad_sector_guardrail(
+                target_holdings = _select_baseline_holdings_no_guardrail(
                     ranked_rows=ranked_rows,
                     rank_by_symbol=rank_by_symbol,
                     current_symbols=current_holdings,
@@ -508,17 +531,25 @@ def _simulate_candidate(
                     top_n=top_n,
                     min_holding_days=min_holding_days,
                     keep_rank_threshold=keep_rank_threshold,
-                    symbol_to_sector={},
+                )
+            else:
+                target_holdings, _ = apply_broad_sector_guardrail(
+                    ranked_rows=ranked_rows,
+                    rank_by_symbol=rank_by_symbol,
+                    current_symbols=current_holdings,
+                    entry_index_by_symbol=entry_index_by_symbol,
+                    current_day_index=i,
+                    top_n=top_n,
+                    min_holding_days=min_holding_days,
+                    keep_rank_threshold=keep_rank_threshold,
+                    symbol_to_sector=symbol_to_sector,
                     guardrail=gcfg,
                 )
-                if set(target_holdings) != set(control_holdings):
-                    raise ValueError(
-                        f"guardrail_type=none must bypass sector map effects: candidate={candidate.name} date={d0}"
-                    )
 
             # stop_loss_cash_mode=keep_cash: when fewer than top_n, keep cash.
             entered = target_holdings - current_holdings
             exited = current_holdings - target_holdings
+            rebalance_dates.append({"date": d0})
             for sym in entered:
                 entry_index_by_symbol[sym] = i
             for sym in exited:
@@ -529,15 +560,13 @@ def _simulate_candidate(
             current_holdings = set(target_holdings)
             for sym in current_holdings:
                 holding_weight_by_symbol[sym] = 1.0 / denom
+            for sym in sorted(entered):
+                trade_rows.append({"date": d0, "symbol": sym, "action": "BUY", "weight": holding_weight_by_symbol.get(sym, 0.0), "price": close_map.get(sym), "reason": "rebalance"})
+            for sym in sorted(exited):
+                trade_rows.append({"date": d0, "symbol": sym, "action": "SELL", "weight": 0.0, "price": close_map.get(sym), "reason": "rebalance"})
 
             prev = len(target_holdings | exited)
             turnover_rows.append((len(entered) + len(exited)) / max(1, prev))
-
-        close_map = {
-            normalize_symbol(r["symbol"]): float(r["close"])
-            for r in conn.execute("SELECT symbol, close FROM daily_prices WHERE date=?", (d0,)).fetchall()
-            if r["close"] is not None
-        }
 
         risk_exits: set[str] = set()
         for sym in sorted(current_holdings):
@@ -552,6 +581,8 @@ def _simulate_candidate(
 
         if risk_exits:
             for sym in risk_exits:
+                trade_rows.append({"date": d0, "symbol": sym, "action": "SELL", "weight": 0.0, "price": close_map.get(sym), "reason": "stop_loss"})
+                stop_loss_rows.append({"date": d0, "symbol": sym, "event_type": "position_stop_loss"})
                 current_holdings.discard(sym)
                 entry_index_by_symbol.pop(sym, None)
                 entry_price_by_symbol.pop(sym, None)
@@ -567,6 +598,7 @@ def _simulate_candidate(
 
         exposure = sum(holding_weight_by_symbol.get(sym, 0.0) for sym in current_holdings)
         cash = max(0.0, 1.0 - exposure)
+        cash_rows.append({"date": d0, "cash_weight": cash, "position_count": len(current_holdings)})
         max_single = max((holding_weight_by_symbol.get(s, 0.0) for s in current_holdings), default=0.0)
         if max_single > MAX_SINGLE_WEIGHT_LIMIT:
             raise ValueError(f"max_single_position_weight breached: {max_single}")
@@ -598,6 +630,10 @@ def _simulate_candidate(
     return {
         "daily": result_rows,
         "holdings": holdings_rows,
+        "trades": trade_rows,
+        "stop_loss_events": stop_loss_rows,
+        "daily_cash": cash_rows,
+        "rebalance_dates": rebalance_dates,
         "exposure": exposure_rows,
         "mean_turnover": mean(turnover_rows) if turnover_rows else 0.0,
     }
@@ -658,6 +694,8 @@ def main() -> None:
     p.add_argument("--rebuild-rolling-universe", action="store_true")
     p.add_argument("--reference-final-report-dir", default=None)
     p.add_argument("--canonical-final-report-dir", default=None)
+    p.add_argument("--parity-only", action="store_true")
+    p.add_argument("--only-no-cap", action="store_true")
     args = p.parse_args()
 
     eval_freqs = _parse_csv_tokens(args.eval_frequencies)
@@ -726,15 +764,17 @@ def main() -> None:
     if args.mode == "quick":
         scoring_profiles = ["old"]
 
+    parity_only_mode = bool(args.parity_only or args.only_no_cap)
     candidates: list[Candidate] = []
     for sp in scoring_profiles:
         if args.include_no_cap:
             candidates.append(Candidate(f"baseline_{sp}_no_sector_guardrail", sp, "none", None, None))
-        for cap in _parse_int_tokens(args.max_names_per_broad_sector_list):
-            candidates.append(Candidate(f"baseline_{sp}_broad_cap{cap}", sp, "hard_cap", cap, None))
-        for lam in _parse_float_tokens(args.soft_penalty_list):
-            tag = f"{int(round(lam * 1000)):03d}"
-            candidates.append(Candidate(f"baseline_{sp}_broad_soft_penalty_{tag}", sp, "soft_penalty", None, lam))
+        if not parity_only_mode:
+            for cap in _parse_int_tokens(args.max_names_per_broad_sector_list):
+                candidates.append(Candidate(f"baseline_{sp}_broad_cap{cap}", sp, "hard_cap", cap, None))
+            for lam in _parse_float_tokens(args.soft_penalty_list):
+                tag = f"{int(round(lam * 1000)):03d}"
+                candidates.append(Candidate(f"baseline_{sp}_broad_soft_penalty_{tag}", sp, "soft_penalty", None, lam))
 
     dates = [
         r["date"]

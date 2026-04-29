@@ -951,6 +951,7 @@ def main() -> None:
     parser.add_argument("--lookahead-sample-size", type=int, default=50)
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--allow-smoke", action="store_true", help="Allow full-period only run without robustness windows")
+    parser.add_argument("--export-baseline-old-details", action="store_true")
     args = parser.parse_args()
 
     if args.output_dir_alias:
@@ -1279,6 +1280,24 @@ def main() -> None:
         "value",
         "details",
     ])
+    if args.export_baseline_old_details:
+        baseline_row = next((r for r in full_period_rows if str(r.get("candidate")) == "baseline_old"), None)
+        if baseline_row and baseline_row.get("run_id"):
+            run_id = baseline_row["run_id"]
+            eq_rows = [dict(r) for r in conn.execute("SELECT date, equity FROM backtest_results WHERE run_id=? ORDER BY date", (run_id,)).fetchall()]
+            peak = 0.0
+            dd_rows_export: list[dict[str, object]] = []
+            for r in eq_rows:
+                eq = float(r["equity"])
+                peak = max(peak, eq)
+                dd_rows_export.append({"date": r["date"], "drawdown": _safe_div(eq - peak, peak) if peak else 0.0})
+            _write_csv(outdir / "baseline_old_equity_curve.csv", eq_rows)
+            _write_csv(outdir / "baseline_old_drawdown_curve.csv", dd_rows_export)
+            _write_csv(outdir / "baseline_old_daily_positions.csv", [dict(r) for r in conn.execute("SELECT date, symbol, weight FROM backtest_holdings WHERE run_id=? ORDER BY date, symbol", (run_id,)).fetchall()])
+            _write_csv(outdir / "baseline_old_trade_log.csv", [dict(r) for r in conn.execute("SELECT date, symbol, action, weight, price, reason FROM backtest_trades WHERE run_id=? ORDER BY date, symbol", (run_id,)).fetchall()])
+            _write_csv(outdir / "baseline_old_stop_loss_events.csv", [dict(r) for r in conn.execute("SELECT date, symbol, event_type FROM backtest_stop_loss_events WHERE run_id=? ORDER BY date, symbol", (run_id,)).fetchall()])
+            _write_csv(outdir / "baseline_old_rebalance_dates.csv", [dict(r) for r in conn.execute("SELECT DISTINCT date FROM backtest_trades WHERE run_id=? ORDER BY date", (run_id,)).fetchall()])
+            _write_csv(outdir / "baseline_old_daily_cash.csv", [dict(r) for r in conn.execute("SELECT date, cash_weight, position_count FROM backtest_results WHERE run_id=? ORDER BY date", (run_id,)).fetchall()])
 
     plots = _plot_outputs(outdir, equity_curve_rows, drawdown_rows, monthly_rows)
 
