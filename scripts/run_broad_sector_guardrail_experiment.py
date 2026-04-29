@@ -32,7 +32,8 @@ from pipeline.universe_input import load_symbols_from_universe_csv
 
 MAX_SINGLE_WEIGHT_LIMIT = 0.200000001
 CAP_TOLERANCE = 1e-9
-PARITY_TOLERANCE = 1e-8
+PARITY_TOLERANCE = 1e-10
+PARITY_TOLERANCE_MAX = 1e-8
 
 
 @dataclass(frozen=True)
@@ -656,6 +657,7 @@ def main() -> None:
     p.add_argument("--scoring-profiles", default="old")
     p.add_argument("--rebuild-rolling-universe", action="store_true")
     p.add_argument("--reference-final-report-dir", default=None)
+    p.add_argument("--canonical-final-report-dir", default=None)
     args = p.parse_args()
 
     eval_freqs = _parse_csv_tokens(args.eval_frequencies)
@@ -760,8 +762,9 @@ def main() -> None:
             default_window_bounds[(ef, hz)] = bounds
 
     reference_window_bounds: dict[tuple[str, int], list[tuple[str, str]]] = {}
-    if args.reference_final_report_dir:
-        ref_dir_for_bounds = Path(args.reference_final_report_dir)
+    canonical_dir_arg = args.canonical_final_report_dir or args.reference_final_report_dir
+    if canonical_dir_arg:
+        ref_dir_for_bounds = Path(canonical_dir_arg)
         for ef in eval_freqs:
             for hz in horizons:
                 ref_rows = _resolve_reference_baseline_window_rows(
@@ -952,7 +955,7 @@ def main() -> None:
     no_cap_baseline_parity_check: dict[str, object] = {
         "status": "skipped",
         "candidate": "baseline_old_no_sector_guardrail",
-        "reference_final_report_dir": args.reference_final_report_dir,
+        "reference_final_report_dir": canonical_dir_arg,
         "tolerance": PARITY_TOLERANCE,
         "no_cap_window_parity_diff_csv": None,
         "no_cap_reference_window_results_csv": None,
@@ -972,8 +975,10 @@ def main() -> None:
         raise ValueError("baseline_old_no_sector_guardrail result row is missing")
     no_cap_full = no_cap_rows[0]
 
-    if args.reference_final_report_dir:
-        ref_dir = Path(args.reference_final_report_dir)
+    parity_summary_json = outdir / "parity_summary.json"
+    first_divergence_report_md = outdir / "first_divergence_report.md"
+    if canonical_dir_arg:
+        ref_dir = Path(canonical_dir_arg)
         ref_summary, ref_full_baseline = _resolve_reference_baseline_rows(
             ref_dir,
             eval_frequency="quarterly",
@@ -1263,16 +1268,28 @@ def main() -> None:
             "summary_q12_metric_diffs": summary_diffs,
             "full_period_metric_diffs": full_diffs,
         }
-        if no_cap_baseline_parity_check["status"] != "passed":
-            raise ValueError("no-cap baseline parity check failed; guardrail results are invalid")
+        parity_summary_payload = {"parity_pass": (no_cap_baseline_parity_check["status"] == "passed"), "status": no_cap_baseline_parity_check["status"], "reference_final_report_dir": str(ref_dir)}
+        parity_summary_json.write_text(json.dumps(parity_summary_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        first_divergence_report_md.write_text("# First Divergence Report\n\n- first_equity_diff_date: unknown\n- first_window_diff: see parity diffs\n- first_monthly_diff: unknown\n- previous_rebalance_date: unknown\n- holdings_same_before_diff: unknown\n- trades_same_before_diff: unknown\n- stop_events_same_before_diff: unknown\n- cash_weight_same_before_diff: unknown\n- likely_cause_candidates:\n  - rebalance calendar mismatch\n  - keep_rank/min_holding mismatch\n  - stop_loss/keep_cash mismatch\n  - scoring/tie-break mismatch\n  - price column mismatch\n  - window slicing mismatch\n  - no-cap path accidentally using guardrail selector\n  - cash/equity accounting mismatch\n", encoding="utf-8")
     else:
         no_cap_baseline_parity_check["message"] = "reference-final-report-dir not provided"
+        parity_summary_json.write_text(json.dumps({"parity_pass": False, "status": "skipped"}, ensure_ascii=False, indent=2), encoding="utf-8")
+        first_divergence_report_md.write_text("# First Divergence Report\n\nParity skipped (no canonical report).", encoding="utf-8")
 
+    parity_pass = no_cap_baseline_parity_check.get("status") == "passed"
+    analysis_status = "valid" if parity_pass else "invalid_due_to_no_cap_parity_failure"
+    decision_usable = bool(parity_pass)
     report_md = outdir / "guardrail_report.md"
     report_md.write_text(
         "\n".join(
             [
                 "# Broad Sector Guardrail Experiment",
+                "",
+                *( ["## INVALID DUE TO NO-CAP PARITY FAILURE", ""] if not parity_pass else [] ),
+                "- Sector guardrail results are not interpretable unless no-cap parity passes.",
+                "- No-cap must match canonical baseline_old.",
+                "- Cap2/cap3/soft penalty are experimental overlays only.",
+                "- baseline_old remains production baseline until validated otherwise.",
                 "",
                 "- Baseline 기준: baseline_old(no cap).",
                 "- 2024-07-01~2025-03-31 overlap 분석에서 sector concentration 문제가 확인되어 guardrail 실험을 수행.",
@@ -1302,6 +1319,9 @@ def main() -> None:
 
     manifest = {
         "created_at": datetime.now(timezone.utc).isoformat(),
+        "analysis_status": analysis_status,
+        "parity_pass": parity_pass,
+        "decision_usable": decision_usable,
         "outdir": str(outdir),
         "warnings": warnings,
         "rolling_universe_status": rolling_universe_status,
@@ -1319,6 +1339,8 @@ def main() -> None:
             "equity_curve_csv": str(equity_csv),
             "drawdown_curve_csv": str(dd_csv),
             "report_md": str(report_md),
+            "parity_summary_json": str(parity_summary_json),
+            "first_divergence_report_md": str(first_divergence_report_md),
             "plots": plots,
         },
     }
@@ -1327,6 +1349,11 @@ def main() -> None:
 
     payload = {
         "outdir": str(outdir),
+        "parity_pass": parity_pass,
+        "analysis_status": analysis_status,
+        "decision_usable": decision_usable,
+        "parity_summary_json": str(parity_summary_json),
+        "first_divergence_report_md": str(first_divergence_report_md),
         "manifest_path": str(manifest_path),
         "summary_csv": str(summary_csv),
         "window_results_csv": str(window_csv),
@@ -1343,7 +1370,7 @@ def main() -> None:
         "score_signatures": score_signatures,
         "no_cap_baseline_parity_check": no_cap_baseline_parity_check,
     }
-    print(f"BROAD_SECTOR_GUARDRAIL_EXPERIMENT_JSON={json.dumps(payload, ensure_ascii=False)}")
+    print(f"SECTOR_GUARDRAIL_EXPERIMENT_JSON={json.dumps(payload, ensure_ascii=False)}")
 
 
 if __name__ == "__main__":
