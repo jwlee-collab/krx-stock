@@ -475,6 +475,122 @@ def _load_reference_score_signatures(reference_dir: Path) -> dict[str, dict[str,
     return {}
 
 
+def _read_csv_rows(path: Path) -> list[dict[str, str]]:
+    with path.open("r", encoding="utf-8", newline="") as f:
+        return list(csv.DictReader(f))
+
+
+def _first_divergence_diagnostic(
+    *,
+    reference_dir: Path,
+    outdir: Path,
+    no_cap_daily_rows: list[dict[str, object]],
+    no_cap_holdings_rows: list[dict[str, object]],
+    no_cap_trade_rows: list[dict[str, object]],
+    no_cap_stop_loss_rows: list[dict[str, object]],
+    no_cap_rebalance_dates: list[dict[str, object]],
+    no_cap_window_rows: list[dict[str, object]],
+    no_cap_monthly_rows: list[dict[str, object]],
+    no_cap_full_row: dict[str, object],
+    parity_pass: bool,
+) -> dict[str, object]:
+    compared, unavailable, diffs = [], [], []
+
+    def _mark(name: str, available: bool) -> None:
+        (compared if available else unavailable).append(name)
+
+    ref_equity_path = reference_dir / "baseline_old_equity_curve.csv"
+    ref_holdings_path = reference_dir / "baseline_old_holdings.csv"
+    ref_daily_state_path = reference_dir / "baseline_old_daily_state.csv"
+    ref_risk_path = reference_dir / "baseline_old_risk_events.csv"
+    ref_window_path = reference_dir / "baseline_old_window_results.csv"
+    ref_monthly_path = reference_dir / "baseline_old_monthly_returns.csv"
+    ref_rebalance_path = reference_dir / "baseline_old_rebalance_dates.csv"
+    ref_trades_path = reference_dir / "baseline_old_trades.csv"
+    ref_full_path = reference_dir / "baseline_old_full_period.csv"
+
+    first_scope = None; first_date = None; baseline_value = None; no_cap_value = None
+    equity_first = None
+    if ref_equity_path.exists():
+        _mark("equity_curve", True)
+        ref_rows = _read_csv_rows(ref_equity_path)
+        ref_map = {str(r.get("date")): float(r.get("equity", r.get("strategy_equity", 0.0))) for r in ref_rows if r.get("date")}
+        grd_map = {str(r.get("date")): float(r.get("equity", 0.0)) for r in no_cap_daily_rows if r.get("date")}
+        joined = [{"date": d, "reference": ref_map.get(d), "guardrail": grd_map.get(d)} for d in sorted(set(ref_map) | set(grd_map))]
+        eq_diff_rows, equity_first = _diff_scalar_rows(joined, ["date"], "reference", "guardrail", PARITY_TOLERANCE)
+        with (outdir / "parity_equity_diff.csv").open("w", encoding="utf-8", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=list(eq_diff_rows[0].keys()) if eq_diff_rows else ["comparison_key", "status"])
+            w.writeheader(); w.writerows(eq_diff_rows)
+        if equity_first:
+            diffs.append("equity_curve")
+            first_scope, first_date = "equity_curve", equity_first
+            row = next((r for r in eq_diff_rows if r["status"] == "FAIL"), None)
+            if row:
+                baseline_value, no_cap_value = row.get("reference_value"), row.get("guardrail_value")
+    else:
+        _mark("equity_curve", False)
+
+    _mark("holdings", ref_holdings_path.exists())
+    if first_scope is None and ref_holdings_path.exists():
+        ref_rows = _read_csv_rows(ref_holdings_path)
+        ref_keys = {(r.get("date"), r.get("symbol")) for r in ref_rows}
+        grd_keys = {(str(r.get("date")), str(r.get("symbol"))) for r in no_cap_holdings_rows}
+        if ref_keys != grd_keys:
+            diffs.append("holdings")
+            first_scope = "holdings"
+            first_date = sorted({k[0] for k in (ref_keys ^ grd_keys) if k and k[0]})[0]
+
+    _mark("daily_state", ref_daily_state_path.exists())
+    if first_scope is None and ref_daily_state_path.exists():
+        cols = ["cash", "position_count", "max_single_weight", "daily_return", "equity"]
+        ref_by = {r.get("date"): r for r in _read_csv_rows(ref_daily_state_path) if r.get("date")}
+        grd_by = {str(r.get("date")): r for r in no_cap_daily_rows if r.get("date")}
+        for d in sorted(set(ref_by) | set(grd_by)):
+            rr = ref_by.get(d, {}); gr = grd_by.get(d, {})
+            for c in cols:
+                rv, gv = rr.get(c), gr.get(c if c != "equity" else "equity")
+                if rv is None or gv is None:
+                    continue
+                if abs(float(rv) - float(gv)) > PARITY_TOLERANCE:
+                    diffs.append("daily_state")
+                    first_scope, first_date, baseline_value, no_cap_value = "daily_state", d, rv, gv
+                    break
+            if first_scope:
+                break
+
+    for n, p in [("risk_events", ref_risk_path), ("window_results", ref_window_path), ("monthly_returns", ref_monthly_path), ("rebalance_dates", ref_rebalance_path), ("full_period_metrics", ref_full_path)]:
+        _mark(n, p.exists())
+    _mark("trades", ref_trades_path.exists())
+    if not ref_trades_path.exists():
+        unavailable.append("trades_comparison_unavailable_not_parity_failure")
+
+    likely = "no divergence"
+    if first_scope == "holdings":
+        likely = "selection / keep_rank / min_holding / rebalance calendar / universe 차이 가능성"
+    elif first_scope == "equity_curve":
+        likely = "holdings가 동일하면 price column / return calculation / cash accounting 차이 가능성"
+    elif first_scope == "window_results":
+        likely = "window slicing / inclusive-exclusive date 처리 차이 가능성"
+    elif first_scope == "rebalance_dates":
+        likely = "rebalance calendar / trading day adjustment 차이 가능성"
+    elif first_scope == "risk_events":
+        likely = "stop-loss trigger / exit price / keep_cash 처리 차이 가능성"
+
+    return {
+        "parity_pass": parity_pass,
+        "decision_usable": bool(parity_pass),
+        "first_mismatch_scope": first_scope,
+        "first_mismatch_date": first_date,
+        "baseline_value": baseline_value,
+        "no_cap_value": no_cap_value,
+        "likely_cause_hint": likely,
+        "compared_artifacts": sorted(set(compared)),
+        "unavailable_artifacts": sorted(set(unavailable)),
+        "diff_artifacts": sorted(set(diffs)),
+        "cap_interpretation_allowed": bool(parity_pass),
+    }
+
+
 def _simulate_candidate(
     conn: sqlite3.Connection,
     dates: list[str],
@@ -1334,34 +1450,40 @@ def main() -> None:
             "summary_q12_metric_diffs": summary_diffs,
             "full_period_metric_diffs": full_diffs,
         }
-        ref_equity_rows = list(csv.DictReader((ref_dir / "baseline_old_equity_curve.csv").open("r", encoding="utf-8"))) if (ref_dir / "baseline_old_equity_curve.csv").exists() else []
-        grd_equity_rows = [{"date": str(r["date"]), "equity": float(r["equity"])} for r in no_cap_daily_rows]
-        eq_join = []
-        ref_by = {str(r["date"]): float(r.get("equity", r.get("strategy_equity", 0.0))) for r in ref_equity_rows}
-        grd_by = {str(r["date"]): float(r.get("equity", 0.0)) for r in grd_equity_rows}
-        for d in sorted(set(ref_by) | set(grd_by)):
-            eq_join.append({"date": d, "reference": ref_by.get(d), "guardrail": grd_by.get(d)})
-        parity_equity_diff_rows, first_equity_diff_date = _diff_scalar_rows(eq_join, ["date"], "reference", "guardrail", PARITY_TOLERANCE)
-        _write_csv("parity_equity_diff.csv", parity_equity_diff_rows)
-        parity_daily_state_diff_rows, first_daily_state_diff_date = _diff_scalar_rows(eq_join, ["date"], "reference", "guardrail", PARITY_TOLERANCE)
-        _write_csv("parity_daily_state_diff.csv", parity_daily_state_diff_rows)
-        for name in ["parity_drawdown_diff.csv", "parity_monthly_diff.csv", "parity_window_diff.csv", "parity_holdings_diff.csv", "parity_trades_diff.csv", "parity_risk_events_diff.csv", "parity_rebalance_dates_diff.csv"]:
-            _write_csv(name, [{"comparison_key": "not_available", "reference_value": None, "guardrail_value": None, "abs_diff": None, "status": "FAIL", "reason": "source_missing_or_not_exported"}], fields=["comparison_key", "reference_value", "guardrail_value", "abs_diff", "status", "reason"])
-        likely_primary_cause = "equity_path_mismatch_before_cap; inspect parity_equity_diff.csv"
-        parity_summary_payload = {
-            "parity_pass": (no_cap_baseline_parity_check["status"] == "passed"),
-            "status": no_cap_baseline_parity_check["status"],
-            "reference_final_report_dir": str(ref_dir),
-            "first_equity_diff_date": first_equity_diff_date,
-            "first_daily_state_diff_date": first_daily_state_diff_date,
-            "first_holdings_diff_date": "not_available",
-            "first_trade_diff_date": "not_available",
-            "first_cash_weight_diff_date": "not_available",
-            "likely_primary_cause": likely_primary_cause,
-        }
+        parity_summary_payload = _first_divergence_diagnostic(
+            reference_dir=ref_dir,
+            outdir=outdir,
+            no_cap_daily_rows=no_cap_daily_rows,
+            no_cap_holdings_rows=no_cap_result["holdings_rows"],
+            no_cap_trade_rows=no_cap_result["trade_rows"],
+            no_cap_stop_loss_rows=no_cap_result["stop_loss_rows"],
+            no_cap_rebalance_dates=no_cap_result["rebalance_dates"],
+            no_cap_window_rows=no_cap_window_rows,
+            no_cap_monthly_rows=no_cap_monthly_rows,
+            no_cap_full_row=no_cap_result["full_metrics"],
+            parity_pass=(no_cap_baseline_parity_check["status"] == "passed"),
+        )
+        parity_summary_payload["status"] = no_cap_baseline_parity_check["status"]
+        parity_summary_payload["reference_final_report_dir"] = str(ref_dir)
+        parity_summary_payload["analysis_status"] = "valid" if parity_summary_payload["parity_pass"] else "invalid_due_to_no_cap_parity_failure"
         parity_summary_json.write_text(json.dumps(parity_summary_payload, ensure_ascii=False, indent=2), encoding="utf-8")
         first_divergence_report_md.write_text(
-            f"# First Divergence Report\n\n- first_equity_diff_date: {first_equity_diff_date or 'none'}\n- first_daily_state_diff_date: {first_daily_state_diff_date or 'none'}\n- first_monthly_diff: see parity_monthly_diff.csv\n- first_window_diff: see parity_window_diff.csv\n- previous_rebalance_date: see parity_rebalance_dates_diff.csv\n- first_holdings_diff_date: not_available\n- first_trade_diff_date: not_available\n- first_risk_event_diff_date: not_available\n- first_cash_weight_diff_date: not_available\n- first_position_count_diff_date: not_available\n- likely_cause_candidates:\n  - {likely_primary_cause}\n  - no_cap path accidentally using guardrail selector\n",
+            "\n".join(
+                [
+                    "# First Divergence Report",
+                    "",
+                    f"- parity_pass: {parity_summary_payload['parity_pass']}",
+                    f"- decision_usable: {parity_summary_payload['decision_usable']}",
+                    f"- first_mismatch_scope: {parity_summary_payload['first_mismatch_scope']}",
+                    f"- first_mismatch_date: {parity_summary_payload['first_mismatch_date']}",
+                    f"- baseline_value: {parity_summary_payload['baseline_value']}",
+                    f"- no_cap_value: {parity_summary_payload['no_cap_value']}",
+                    f"- likely_cause_hint: {parity_summary_payload['likely_cause_hint']}",
+                    f"- unavailable_artifacts: {parity_summary_payload['unavailable_artifacts']}",
+                    f"- compared_artifacts: {parity_summary_payload['compared_artifacts']}",
+                    "- next_debug_recommendation: trace same date in holdings/daily_state/risk_events/rebalance artifacts.",
+                ]
+            ),
             encoding="utf-8",
         )
     else:
