@@ -782,6 +782,8 @@ def _table_columns(conn: sqlite3.Connection, table: str) -> list[str]:
 
 
 def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
+    if not table:
+        return False
     row = conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? COLLATE NOCASE LIMIT 1",
         (table,),
@@ -796,13 +798,13 @@ def _warn_missing_table(outdir: Path, table: str, out_name: str, notes: list[dic
     _write_csv(outdir / "baseline_old_export_warnings.csv", notes, fieldnames=["scope", "table", "warning"])
 
 
-def _export_baseline_old_details(conn: sqlite3.Connection, outdir: Path, run_id: str, benchmark_by_date: dict[str, float]) -> None:
+def _export_baseline_old_details(conn: sqlite3.Connection, outdir: Path, run_id: str, benchmark_by_date: dict[str, float]) -> dict[str, dict[str, object]]:
     bt_rows = conn.execute(
         "SELECT date, equity, daily_return, position_count, max_single_position_weight FROM backtest_results WHERE run_id=? ORDER BY date",
         (run_id,),
     ).fetchall()
     if not bt_rows:
-        return
+        return {}
     init_eq = float(conn.execute("SELECT initial_equity FROM backtest_runs WHERE run_id=?", (run_id,)).fetchone()[0])
     b_eq = init_eq
     eq_rows: list[dict[str, object]] = []
@@ -836,6 +838,7 @@ def _export_baseline_old_details(conn: sqlite3.Connection, outdir: Path, run_id:
     for src, dst in [("window_results.csv", "baseline_old_window_results.csv"), ("full_period_results.csv", "baseline_old_full_period_results.csv")]:
         pass
     export_notes: list[dict[str, str]] = []
+    table_export_status: dict[str, dict[str, object]] = {}
     for table, out_name, preferred in [
         ("backtest_holdings", "baseline_old_holdings.csv", ["date", "symbol", "weight", "shares", "quantity", "market_value", "entry_date", "holding_days", "stopped"]),
         ("backtest_trades", "baseline_old_trades.csv", ["date", "symbol", "action", "weight_before", "weight_after", "trade_price", "reason", "cash_after"]),
@@ -844,6 +847,12 @@ def _export_baseline_old_details(conn: sqlite3.Connection, outdir: Path, run_id:
         if not _table_exists(conn, table):
             _write_csv(outdir / out_name, [], fieldnames=preferred)
             _warn_missing_table(outdir, table, out_name, export_notes)
+            table_export_status[table] = {
+                "status": "unavailable",
+                "unavailable_reason": f"{table} table does not exist",
+                "source_table": None,
+                "output_file": out_name,
+            }
             continue
         cols = _table_columns(conn, table)
         if not cols:
@@ -851,10 +860,17 @@ def _export_baseline_old_details(conn: sqlite3.Connection, outdir: Path, run_id:
         keep = [c for c in preferred if c in cols] + [c for c in cols if c not in preferred and c != "run_id"]
         rows = [dict(r) for r in conn.execute(f"SELECT {', '.join(keep)} FROM {table} WHERE run_id=? ORDER BY date, symbol", (run_id,)).fetchall()]
         _write_csv(outdir / out_name, rows, fieldnames=keep)
+        table_export_status[table] = {
+            "status": "available",
+            "unavailable_reason": None,
+            "source_table": table,
+            "output_file": out_name,
+        }
     holdings_cols = _table_columns(conn, "backtest_holdings")
     if holdings_cols and "date" in holdings_cols:
         reb = [{"date": r["date"]} for r in conn.execute("SELECT DISTINCT date FROM backtest_holdings WHERE run_id=? ORDER BY date", (run_id,)).fetchall()]
         _write_csv(outdir / "baseline_old_rebalance_dates.csv", reb, fieldnames=["date"])
+    return table_export_status
 
 
 def _plot_outputs(
@@ -1360,10 +1376,11 @@ def main() -> None:
         "value",
         "details",
     ])
+    baseline_old_details_export: dict[str, dict[str, object]] = {}
     if args.export_baseline_old_details:
         baseline_full = next((r for r in full_period_rows if str(r.get("candidate")) == "baseline_old"), None)
         if baseline_full and baseline_full.get("run_id"):
-            _export_baseline_old_details(conn, outdir, str(baseline_full["run_id"]), benchmark_by_date)
+            baseline_old_details_export = _export_baseline_old_details(conn, outdir, str(baseline_full["run_id"]), benchmark_by_date)
         _write_csv(
             outdir / "baseline_old_window_results.csv",
             [r for r in window_rows if str(r.get("candidate")) == "baseline_old"],
@@ -1661,6 +1678,12 @@ def main() -> None:
             ],
         },
         "warnings": warnings,
+        "baseline_old_details_export": {
+            "tables": baseline_old_details_export,
+            "trades_status": baseline_old_details_export.get("backtest_trades", {}).get("status"),
+            "trades_unavailable_reason": baseline_old_details_export.get("backtest_trades", {}).get("unavailable_reason"),
+            "source_table": baseline_old_details_export.get("backtest_trades", {}).get("source_table"),
+        },
     }
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
 
