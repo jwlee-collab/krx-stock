@@ -105,9 +105,12 @@ def main() -> None:
     )
     base["next_1d_return"] = pd.to_numeric(base["next_1d_return"], errors="coerce").fillna(0.0)
 
-    by_day = base.groupby("date", as_index=False).apply(lambda g: pd.Series({"daily_return": float((g["weight"] * g["next_1d_return"]).sum())}), include_groups=False)
+    base["baseline_weighted_return"] = base["weight"] * base["next_1d_return"]
+    by_day = base.groupby("date", as_index=False).agg(
+        reconstructed_baseline_daily_return=("baseline_weighted_return", "sum")
+    )
     by_day = by_day.sort_values("date")
-    by_day["reconstructed_baseline_nav"] = INITIAL_EQUITY * (1.0 + by_day["daily_return"]).cumprod()
+    by_day["reconstructed_baseline_nav"] = INITIAL_EQUITY * (1.0 + by_day["reconstructed_baseline_daily_return"]).cumprod()
 
     dbv = db_nav[["date", "daily_return"]].rename(columns={"daily_return": "db_daily_return"})
     aligned = by_day.merge(dbv, on="date", how="inner")
@@ -146,15 +149,15 @@ def main() -> None:
         for sym, sd, ed in intervals:
             m = (sim["symbol_norm"] == sym) & (sim["date"] >= sd) & (sim["date"] <= ed)
             sim.loc[m, "cash_flag"] = True
-        sim["adj_ret"] = sim["next_1d_return"].where(~sim["cash_flag"], 0.0)
+        sim["is_cash_treated"] = sim["cash_flag"]
+        sim["cash_weight_added"] = sim["weight"].where(sim["is_cash_treated"], 0.0)
+        sim["adjusted_position_return"] = sim["next_1d_return"].where(~sim["is_cash_treated"], 0.0)
+        sim["weighted_adjusted_return"] = sim["weight"] * sim["adjusted_position_return"]
         daily = sim.groupby("date", as_index=False).agg(
-            daily_return=("adj_ret", lambda s: float((s * sim.loc[s.index, "weight"]).sum())),
-            added_cash_weight=("weight", lambda s: float(sim.loc[s.index & sim.index, "weight"].sum())),
+            daily_return=("weighted_adjusted_return", "sum"),
+            added_cash_weight=("cash_weight_added", "sum"),
+            position_count=("symbol_norm", "count"),
         )
-        # recompute added cash safely
-        cw = sim[sim["cash_flag"]].groupby("date")["weight"].sum().rename("added_cash_weight")
-        daily = daily.drop(columns=["added_cash_weight"]).merge(cw, on="date", how="left")
-        daily["added_cash_weight"] = daily["added_cash_weight"].fillna(0.0)
         daily = daily.sort_values("date")
         daily["nav"] = INITIAL_EQUITY * (1.0 + daily["daily_return"]).cumprod()
         daily = daily.rename(columns={"daily_return": f"{rule_name}_daily_return", "nav": f"{rule_name}_nav", "added_cash_weight": f"{rule_name}_added_cash_weight"})
@@ -166,7 +169,11 @@ def main() -> None:
                 continue
             total = float((1.0 + part[f"{rule_name}_daily_return"]).prod() - 1.0)
             mdd = _mdd(part[f"{rule_name}_daily_return"])
-            rec_base_total, rec_base_mdd = _period_metrics(aligned.rename(columns={"daily_return": "daily_return"}), s, e)
+            rec_base_total, rec_base_mdd = _period_metrics(
+                aligned.rename(columns={"reconstructed_baseline_daily_return": "daily_return"}),
+                s,
+                e,
+            )
             db_total, db_mdd = _period_metrics(db_nav[["date", "daily_return"]], s, e)
             summary_rows.append({
                 "rule_name": rule_name, "period": period, "total_return": total,
@@ -184,7 +191,9 @@ def main() -> None:
             })
 
     rec_check = []
-    rec_nav = aligned[["date", "daily_return", "db_daily_return"]].rename(columns={"daily_return": "rec_daily_return"})
+    rec_nav = aligned[["date", "reconstructed_baseline_daily_return", "db_daily_return"]].rename(
+        columns={"reconstructed_baseline_daily_return": "rec_daily_return"}
+    )
     for period, (s, e) in SPLITS.items():
         rec_total, rec_mdd = _period_metrics(rec_nav.rename(columns={"rec_daily_return": "daily_return"}), s, e)
         db_total, db_mdd = _period_metrics(rec_nav.rename(columns={"db_daily_return": "daily_return"}), s, e)
