@@ -58,6 +58,17 @@ BASELINE_PARAMS: dict[str, Any] = {
 }
 
 
+def _table_columns(conn: sqlite3.Connection, table: str) -> list[str]:
+    return [str(r[1]) for r in conn.execute(f"PRAGMA table_info({table})").fetchall()]
+
+
+def _pick_first(columns: list[str], candidates: list[str]) -> str | None:
+    for c in candidates:
+        if c in columns:
+            return c
+    return None
+
+
 def _max_drawdown(equities: list[float]) -> float:
     if not equities:
         return float("nan")
@@ -76,13 +87,23 @@ def _period_rows(results: list[sqlite3.Row], start: str, end: str) -> list[sqlit
     return [r for r in results if start <= r["date"] <= end]
 
 
-def _period_metrics(name: str, period: str, rows: list[sqlite3.Row], monthly_map: dict[str, float], stop_loss_count: int, avg_exposure: float, turnover: float | None) -> dict[str, Any]:
+def _period_metrics(
+    name: str,
+    period: str,
+    rows: list[sqlite3.Row],
+    monthly_map: dict[str, float],
+    avg_exposure: float,
+    stop_loss_count: float,
+    turnover: float | None,
+    notes: list[str] | None = None,
+) -> dict[str, Any]:
+    period_notes = notes[:] if notes else []
     if not rows:
         return {
             "strategy_name": name, "period": period, "start_date": "", "end_date": "", "total_return": math.nan,
             "mdd": math.nan, "avg_exposure": avg_exposure, "stop_loss_count": stop_loss_count, "turnover": turnover,
             "worst_month_return": math.nan, "final_nav": math.nan, "trading_days": 0,
-            "notes": "no rows in date range",
+            "notes": "; ".join(period_notes + ["no rows in date range"]),
         }
     equities = [float(r["equity"]) for r in rows]
     start_date = rows[0]["date"]
@@ -104,7 +125,7 @@ def _period_metrics(name: str, period: str, rows: list[sqlite3.Row], monthly_map
         "worst_month_return": worst_month,
         "final_nav": equities[-1],
         "trading_days": len(rows),
-        "notes": "research-only reference",
+        "notes": "; ".join(period_notes + ["research-only reference"]),
     }
 
 
@@ -141,6 +162,31 @@ def main() -> None:
         universe_lookback_days=BASELINE_PARAMS["universe_lookback_days"],
     )
 
+    backtest_params = {
+        "scoring_version": BASELINE_PARAMS["scoring_version"],
+        "scoring_profile": BASELINE_PARAMS["scoring_profile"],
+        "universe_mode": BASELINE_PARAMS["universe_mode"],
+        "universe_size": BASELINE_PARAMS["universe_size"],
+        "universe_lookback_days": BASELINE_PARAMS["universe_lookback_days"],
+        "top_n": BASELINE_PARAMS["top_n"],
+        "rebalance_frequency": BASELINE_PARAMS["rebalance_frequency"],
+        "min_holding_days": BASELINE_PARAMS["min_holding_days"],
+        "keep_rank_threshold": BASELINE_PARAMS["keep_rank_threshold"],
+        "position_stop_loss": BASELINE_PARAMS["enable_position_stop_loss"],
+        "position_stop_loss_pct": BASELINE_PARAMS["position_stop_loss_pct"],
+        "stop_loss_cash_mode": BASELINE_PARAMS["stop_loss_cash_mode"],
+        "stop_loss_cooldown_days": BASELINE_PARAMS["stop_loss_cooldown_days"],
+        "trailing_stop": BASELINE_PARAMS["enable_trailing_stop"],
+        "market_filter": BASELINE_PARAMS["market_filter_enabled"],
+        "entry_gate": BASELINE_PARAMS["entry_gate_enabled"],
+        "overheat_entry_gate": BASELINE_PARAMS["enable_overheat_entry_gate"],
+        "entry_quality_gate": BASELINE_PARAMS["enable_entry_quality_gate"],
+        "start_date": None,
+        "end_date": None,
+        "initial_capital": None,
+    }
+    print("[Exp00] run_backtest parameters:", json.dumps(backtest_params, ensure_ascii=False))
+
     run_id = run_backtest(
         conn,
         top_n=BASELINE_PARAMS["top_n"],
@@ -158,11 +204,34 @@ def main() -> None:
         enable_overheat_entry_gate=BASELINE_PARAMS["enable_overheat_entry_gate"],
         enable_entry_quality_gate=BASELINE_PARAMS["enable_entry_quality_gate"],
     )
-
-    rows = conn.execute("SELECT date,equity,daily_return,exposure FROM backtest_results WHERE run_id=? ORDER BY date", (run_id,)).fetchall()
+    result_cols = _table_columns(conn, "backtest_results")
+    date_col = _pick_first(result_cols, ["date", "trading_date"])
+    nav_col = _pick_first(result_cols, ["equity", "nav", "portfolio_value"])
+    exposure_col = _pick_first(result_cols, ["exposure"])
+    daily_ret_col = _pick_first(result_cols, ["daily_return", "return"])
+    warnings: list[str] = []
+    if date_col is None or nav_col is None:
+        raise RuntimeError(f"Required columns not found in backtest_results. columns={result_cols}")
+    select_cols = [date_col, nav_col]
+    if daily_ret_col:
+        select_cols.append(daily_ret_col)
+    if exposure_col:
+        select_cols.append(exposure_col)
+    rows = conn.execute(
+        f"SELECT {','.join(select_cols)} FROM backtest_results WHERE run_id=? ORDER BY {date_col}",
+        (run_id,),
+    ).fetchall()
+    normalized_rows: list[dict[str, Any]] = []
+    for r in rows:
+        normalized_rows.append({
+            "date": r[date_col],
+            "equity": r[nav_col],
+            "daily_return": r[daily_ret_col] if daily_ret_col else None,
+            "exposure": r[exposure_col] if exposure_col else None,
+        })
+    rows = normalized_rows  # type: ignore[assignment]
     run_row = conn.execute("SELECT position_stop_loss_count, average_exposure FROM backtest_runs WHERE run_id=?", (run_id,)).fetchone()
-    stop_loss_count = int(run_row["position_stop_loss_count"]) if run_row else 0
-    avg_exposure = float(run_row["average_exposure"]) if run_row else math.nan
+    full_stop_loss_count = int(run_row["position_stop_loss_count"]) if run_row and run_row["position_stop_loss_count"] is not None else math.nan
 
     # Monthly/yearly returns from daily NAV.
     monthly: dict[str, list[float]] = {}
@@ -177,13 +246,55 @@ def main() -> None:
     monthly_map = {x["period"]: x["return"] for x in monthly_rows}
 
     first_date = rows[0]["date"] if rows else ""
-    split_rows = [
-        _period_metrics("baseline_old", "full_available_to_2026_03_31", _period_rows(rows, first_date, args.validation_end), monthly_map, stop_loss_count, avg_exposure, None),
-        _period_metrics("baseline_old", "main_backtest", _period_rows(rows, first_date, args.main_end), monthly_map, stop_loss_count, avg_exposure, None),
-        _period_metrics("baseline_old", "validation_2026_q1", _period_rows(rows, args.validation_start, args.validation_end), monthly_map, stop_loss_count, avg_exposure, None),
-        _period_metrics("baseline_old", "recent_shadow_2026_04", _period_rows(rows, args.recent_start, args.recent_end), monthly_map, stop_loss_count, avg_exposure, None),
-        _period_metrics("baseline_old", "stress_2024_07_09", _period_rows(rows, "2024-07-01", "2024-09-30"), monthly_map, stop_loss_count, avg_exposure, None),
+    def pavg_exposure(pr: list[dict[str, Any]]) -> tuple[float, list[str]]:
+        vals = [float(x["exposure"]) for x in pr if x["exposure"] is not None]
+        if not exposure_col:
+            return math.nan, ["exposure column not available"]
+        if not vals:
+            return math.nan, ["no exposure values in period"]
+        return sum(vals) / len(vals), []
+
+    def pstop_loss_count(start: str, end: str) -> tuple[float, list[str]]:
+        event_cols = _table_columns(conn, "backtest_events")
+        if event_cols and {"run_id", "date"}.issubset(set(event_cols)):
+            event_type_col = _pick_first(event_cols, ["event_type", "type", "action", "reason"])
+            if event_type_col:
+                q = f"SELECT COUNT(*) FROM backtest_events WHERE run_id=? AND date BETWEEN ? AND ? AND lower({event_type_col}) LIKE '%stop_loss%'"
+                return float(conn.execute(q, (run_id, start, end)).fetchone()[0]), []
+        trade_cols = _table_columns(conn, "backtest_trades")
+        if trade_cols and {"run_id", "date"}.issubset(set(trade_cols)):
+            reason_col = _pick_first(trade_cols, ["reason", "exit_reason", "trade_reason"])
+            if reason_col:
+                q = f"SELECT COUNT(*) FROM backtest_trades WHERE run_id=? AND date BETWEEN ? AND ? AND lower({reason_col}) LIKE '%stop_loss%'"
+                return float(conn.execute(q, (run_id, start, end)).fetchone()[0]), []
+        return math.nan, ["period-specific stop_loss_count unavailable (no usable event/trade table)"]
+
+    def pturnover(start: str, end: str) -> tuple[float | None, list[str]]:
+        trade_cols = _table_columns(conn, "backtest_trades")
+        if trade_cols and {"run_id", "date"}.issubset(set(trade_cols)):
+            qty_col = _pick_first(trade_cols, ["quantity", "qty", "shares"])
+            price_col = _pick_first(trade_cols, ["price", "fill_price", "execution_price"])
+            if qty_col and price_col:
+                notional = float(conn.execute(f"SELECT COALESCE(SUM(ABS({qty_col}*{price_col})),0) FROM backtest_trades WHERE run_id=? AND date BETWEEN ? AND ?", (run_id, start, end)).fetchone()[0])
+                pr = _period_rows(rows, start, end)
+                avg_nav = sum(float(r["equity"]) for r in pr) / len(pr) if pr else 0.0
+                return (notional / avg_nav) if avg_nav else math.nan, []
+        return math.nan, ["period-specific turnover unavailable (no quantity/price trade data)"]
+
+    period_defs = [
+        ("full_available_to_2026_03_31", first_date, args.validation_end),
+        ("main_backtest", first_date, args.main_end),
+        ("validation_2026_q1", args.validation_start, args.validation_end),
+        ("recent_shadow_2026_04", args.recent_start, args.recent_end),
+        ("stress_2024_07_09", "2024-07-01", "2024-09-30"),
     ]
+    split_rows = []
+    for pname, pstart, pend in period_defs:
+        pr = _period_rows(rows, pstart, pend)
+        avg_exp, n1 = pavg_exposure(pr)
+        sl_cnt, n2 = pstop_loss_count(pstart, pend)
+        tov, n3 = pturnover(pstart, pend)
+        split_rows.append(_period_metrics("baseline_old", pname, pr, monthly_map, avg_exp, sl_cnt, tov, n1 + n2 + n3))
     stress_rows = [r for r in split_rows if r["period"] == "stress_2024_07_09"]
 
     contribution_file = out_dir / f"exp00_baseline_old_position_contribution_{run_id}.csv"
@@ -197,6 +308,42 @@ def main() -> None:
     yearly_file = out_dir / f"exp00_baseline_old_yearly_returns_{run_id}.csv"
     stress_file = out_dir / f"exp00_baseline_old_stress_2024_07_09_{run_id}.csv"
     meta_file = out_dir / f"exp00_baseline_old_metadata_{run_id}.json"
+    nav_curve_file = out_dir / f"exp00_baseline_old_nav_curve_{run_id}.csv"
+    diagnostics_file = out_dir / f"exp00_baseline_old_backtest_run_diagnostics_{run_id}.csv"
+
+    with nav_curve_file.open("w", newline="", encoding="utf-8") as f:
+        cols = ["date", nav_col]
+        if exposure_col:
+            cols.append(exposure_col)
+        if daily_ret_col:
+            cols.append(daily_ret_col)
+        w = csv.DictWriter(f, fieldnames=cols)
+        w.writeheader()
+        for r in rows:
+            out = {"date": r["date"], nav_col: r["equity"]}
+            if exposure_col:
+                out[exposure_col] = r["exposure"]
+            if daily_ret_col:
+                out[daily_ret_col] = r["daily_return"]
+            w.writerow(out)
+
+    full_equities = [float(r["equity"]) for r in rows]
+    first_nav = full_equities[0] if full_equities else math.nan
+    final_nav = full_equities[-1] if full_equities else math.nan
+    full_total_return = (final_nav / first_nav - 1.0) if first_nav and not math.isnan(first_nav) else math.nan
+    if split_rows and split_rows[0]["total_return"] < 0:
+        warnings.append("WARNING: Exp00 reproduced a negative baseline_old total return. This conflicts with prior reference. Check strategy parameters, scoring table, and backtest output selection before using this report.")
+        print(warnings[-1])
+
+    with diagnostics_file.open("w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=["run_id", "output_table", "date_col", "nav_col", "min_date", "max_date", "n_rows", "first_nav", "final_nav", "total_return_full_loaded_curve", "warning_if_any"])
+        w.writeheader()
+        w.writerow({
+            "run_id": run_id, "output_table": "backtest_results", "date_col": date_col, "nav_col": nav_col,
+            "min_date": first_date if rows else "", "max_date": rows[-1]["date"] if rows else "", "n_rows": len(rows),
+            "first_nav": first_nav, "final_nav": final_nav, "total_return_full_loaded_curve": full_total_return,
+            "warning_if_any": " | ".join(warnings),
+        })
 
     for path, data in [
         (summary_file, split_rows),
@@ -229,10 +376,42 @@ def main() -> None:
         "output_files": {
             "summary": str(summary_file), "monthly": str(monthly_file), "yearly": str(yearly_file),
             "stress": str(stress_file), "position_contribution": str(contribution_file), "metadata": str(meta_file),
+            "nav_curve": str(nav_curve_file), "backtest_run_diagnostics": str(diagnostics_file),
         },
+        "run_backtest_parameters": backtest_params,
+        "backtest_output_diagnostics": {
+            "run_id": run_id,
+            "output_table": "backtest_results",
+            "selection_query": f"SELECT {','.join(select_cols)} FROM backtest_results WHERE run_id=? ORDER BY {date_col}",
+            "date_col": date_col,
+            "nav_col": nav_col,
+            "loaded_nav_rows": len(rows),
+            "nav_min_date": first_date if rows else "",
+            "nav_max_date": rows[-1]["date"] if rows else "",
+            "first_nav": first_nav,
+            "final_nav": final_nav,
+            "total_return_full_loaded_curve": full_total_return,
+            "warnings": warnings,
+            "run_row_position_stop_loss_count": full_stop_loss_count,
+        },
+        "db_coverage": {},
         "position_contribution": {"available": False, "reason": "position-level contribution not available from current backtest output"},
         "note": "research-only script; does not modify production/paper trading baseline behavior",
     }
+    for table in ["daily_prices", "daily_scores"]:
+        cols = _table_columns(conn, table)
+        dcol = _pick_first(cols, ["date", "trading_date"])
+        if not dcol:
+            metadata["db_coverage"][table] = {"warning": "date column not found"}
+            continue
+        stats = conn.execute(f"SELECT MIN({dcol}), MAX({dcol}), COUNT(DISTINCT {dcol}), COUNT(*) FROM {table}").fetchone()
+        metadata["db_coverage"][table] = {"min_date": stats[0], "max_date": stats[1], "distinct_dates": stats[2], "rows": stats[3]}
+        print(f"[Exp00] {table} coverage: min={stats[0]}, max={stats[1]}, distinct_dates={stats[2]}, rows={stats[3]}")
+        split_cov = {}
+        for pname, pstart, pend in period_defs:
+            c = conn.execute(f"SELECT COUNT(DISTINCT {dcol}), COUNT(*) FROM {table} WHERE {dcol} BETWEEN ? AND ?", (pstart, pend)).fetchone()
+            split_cov[pname] = {"distinct_dates": c[0], "rows": c[1], "start": pstart, "end": pend}
+        metadata["db_coverage"][f"{table}_by_split"] = split_cov
     meta_file.write_text(json.dumps(metadata, indent=2, ensure_ascii=False), encoding="utf-8")
 
     # concise console summary
