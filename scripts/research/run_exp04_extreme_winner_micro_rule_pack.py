@@ -43,7 +43,7 @@ def _load_snapshot(path: str) -> pd.DataFrame:
     missing = [c for c in REQUIRED_COLUMNS if c not in df.columns]
     if missing:
         raise ValueError(f"Missing required columns: {missing}")
-    df["date"] = pd.to_datetime(df["date"])
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
     df["is_stress_2024_07_09"] = df["is_stress_2024_07_09"].astype(str).str.lower().isin(["true", "1", "t", "yes"])
     num_cols = set(REQUIRED_COLUMNS + ["daily_score", "daily_rank", "ret_1d", "ret_5d", "momentum_20d", "momentum_60d", "sma_20_gap", "sma_60_gap", "range_pct", "volatility_20d", "intraday_range_pct", "close_to_open_return"])
     for c in num_cols:
@@ -58,7 +58,7 @@ def _load_nav(db_path: str, run_id: str) -> pd.DataFrame:
         wanted = [c for c in ["date", "equity", "daily_return", "exposure", "position_count", "cash_weight", "max_single_position_weight"] if c in cols]
         q = f"SELECT {', '.join(wanted)} FROM backtest_results WHERE run_id = ? ORDER BY date"
         nav = pd.read_sql_query(q, conn, params=[run_id])
-    nav["date"] = pd.to_datetime(nav["date"])
+    nav["date"] = pd.to_datetime(nav["date"], errors="coerce")
     for c in wanted:
         if c != "date":
             nav[c] = pd.to_numeric(nav[c], errors="coerce")
@@ -88,6 +88,16 @@ def _bucket_row(df: pd.DataFrame, name: str) -> dict[str, Any]:
         row[dst] = df[src].mean() if src in df.columns else None
     return row
 
+
+
+
+def _coerce_datetime_series(frame: pd.DataFrame, column: str) -> tuple[pd.Series, int]:
+    col = frame[column]
+    if isinstance(col, pd.DataFrame):
+        col = col.iloc[:, 0]
+    coerced = pd.to_datetime(col, errors="coerce")
+    nat_count = int(coerced.isna().sum())
+    return coerced, nat_count
 
 def main() -> None:
     p = argparse.ArgumentParser(description="Exp04 Extreme Winner Micro-Rule Research Pack (report-only)")
@@ -137,17 +147,24 @@ def main() -> None:
     nav_dates = nav["date"].drop_duplicates().sort_values().tolist()
     next_trade = {nav_dates[i]: nav_dates[i + 1] for i in range(len(nav_dates) - 1)}
     baseline = nav[["date", "daily_return"]].copy()
+    baseline["date"] = pd.to_datetime(baseline["date"], errors="coerce")
 
     event_rows, nav_rows, summary_rows, example_rows = [], [], [], []
+    dropped_event_nat_counts: dict[str, int] = {}
     for rule_key, (rule_name, fn) in RULES.items():
         mask = fn(df).fillna(False)
         events = df[mask].copy()
+        events = events.loc[:, ~events.columns.duplicated()].copy()
+        events["date"], dropped_nat_count = _coerce_datetime_series(events, "date")
+        events = events[events["date"].notna()].copy()
+        dropped_event_nat_counts[rule_name] = dropped_nat_count
         events["rule_name"] = rule_name
         events["adjustment_on_next_day"] = -(events["weight"].fillna(0.0) * events["next_1d_return"].fillna(0.0))
         events["next_trade_date"] = events["date"].map(next_trade)
         daily_adj = events.groupby("next_trade_date", dropna=True)["adjustment_on_next_day"].sum().rename("adj")
 
         cf = baseline.merge(daily_adj, how="left", left_on="date", right_index=True)
+        cf["date"] = pd.to_datetime(cf["date"], errors="coerce")
         cf["adj"] = cf["adj"].fillna(0.0)
         cf["counterfactual_daily_return"] = cf["daily_return"].fillna(0.0) + cf["adj"]
         cf["counterfactual_equity"] = (1.0 + cf["counterfactual_daily_return"]).cumprod()
@@ -163,6 +180,7 @@ def main() -> None:
             "avg_next_20d_return": events["next_20d_return"].mean(), "median_next_20d_return": events["next_20d_return"].median(),
             "severe_giveback_rate_next_20d": float((v20 <= -0.15).mean()) if len(v20) else None, "continuation_rate_next_20d": float((v20 >= 0.05).mean()) if len(v20) else None,
             "stress_event_count": int(events["is_stress_2024_07_09"].sum()), "events_by_period": json.dumps({str(k): int(v) for k, v in events.groupby("period_label").size().items()}, ensure_ascii=False),
+            "dropped_event_date_nat_count": dropped_nat_count,
         })
 
         keep_cols = ["rule_name", "date", "next_trade_date", "symbol", "symbol_norm", "period_label", "is_stress_2024_07_09", "weight", "unrealized_return", "next_1d_return", "next_5d_return", "next_20d_return", "daily_score", "daily_rank", "ret_5d", "momentum_20d", "momentum_60d", "range_pct", "volatility_20d", "intraday_range_pct", "close_to_open_return"]
@@ -210,6 +228,7 @@ def main() -> None:
         "rule_definitions": {k: v[0] for k, v in RULES.items()}, "counterfactual_approximation_formula": "adjustment_on_next_day = -sum(weight*next_1d_return); counterfactual_daily_return = baseline_daily_return + adjustment",
         "output_files": {k: str(v) for k, v in files.items()},
         "row_counts": {"snapshot_rows": int(len(df)), "nav_rows": int(len(nav)), "extreme_rows_unrealized_ge_0p50": int((df["unrealized_return"] >= 0.50).sum())},
+        "dropped_event_date_nat_counts": dropped_event_nat_counts,
         "notes": ["report-only", "no DB write", "no strategy change", "no backtest rerun", "no production change", "counterfactual is approximate", "this does not implement profit lock"],
     }
     files["metadata"].write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
