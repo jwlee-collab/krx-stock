@@ -40,6 +40,10 @@ def _require_columns(conn: sqlite3.Connection, table: str, required: list[str]) 
         raise RuntimeError(f"필수 컬럼 누락: table={table}, missing={missing}")
 
 
+def _col_expr(col: str, available_cols: set[str], fallback: str = "NULL") -> str:
+    return col if col in available_cols else fallback
+
+
 def _load_symbol_names(universe_csv: Path) -> dict[str, str]:
     if not universe_csv.exists():
         raise RuntimeError(f"유니버스 CSV 파일이 없습니다: {universe_csv}")
@@ -86,6 +90,47 @@ def _select_baseline_old_run(conn: sqlite3.Connection) -> RunSelection:
     return RunSelection(run_id=str(row[0]), created_at=str(row[1]))
 
 
+def _trading_days_between(conn: sqlite3.Connection, start_date: str, end_date: str) -> int | None:
+    row = conn.execute(
+        """
+        SELECT COUNT(*)
+        FROM (SELECT DISTINCT date FROM daily_prices WHERE date BETWEEN ? AND ?)
+        """,
+        (start_date, end_date),
+    ).fetchone()
+    return int(row[0]) if row is not None else None
+
+
+def _compute_holding_days(
+    conn: sqlite3.Connection,
+    run_id: str,
+    symbol: str,
+    latest_holdings_date: str,
+    holding_row: sqlite3.Row,
+    holdings_cols: set[str],
+) -> str:
+    if "holding_days" in holdings_cols and holding_row["holding_days"] is not None:
+        return str(holding_row["holding_days"])
+
+    for date_col in ["entry_date", "entry_signal_date", "opened_date", "buy_date"]:
+        if date_col in holdings_cols and holding_row[date_col]:
+            td = _trading_days_between(conn, str(holding_row[date_col]), latest_holdings_date)
+            return str(td) if td is not None else "계산 불가"
+
+    seq_row = conn.execute(
+        """
+        SELECT MIN(date)
+        FROM backtest_holdings
+        WHERE run_id=? AND symbol=? AND date<=?
+        """,
+        (run_id, symbol, latest_holdings_date),
+    ).fetchone()
+    if seq_row and seq_row[0]:
+        td = _trading_days_between(conn, str(seq_row[0]), latest_holdings_date)
+        return str(td) if td is not None else "계산 불가"
+    return "계산 불가"
+
+
 def _symbol_name(symbol_names: dict[str, str], symbol: str) -> str:
     return symbol_names.get(symbol) or f"{symbol} (종목명 미확인)"
 
@@ -113,10 +158,16 @@ def main() -> int:
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
 
-    _require_columns(conn, "daily_scores", ["date", "symbol", "rank", "score"])
+    _require_columns(conn, "daily_scores", ["date", "symbol"])
     _require_columns(conn, "daily_universe", ["date", "symbol"])
     _require_columns(conn, "backtest_runs", ["run_id", "created_at"])
     _require_columns(conn, "backtest_holdings", ["run_id", "date", "symbol", "weight"])
+    _require_columns(conn, "daily_prices", ["date"])
+
+    holdings_cols = set(_table_columns(conn, "backtest_holdings"))
+    scores_cols = set(_table_columns(conn, "daily_scores"))
+    results_cols = set(_table_columns(conn, "backtest_results"))
+    risk_cols = set(_table_columns(conn, "backtest_risk_events"))
 
     selected = _select_baseline_old_run(conn)
 
@@ -152,8 +203,22 @@ def main() -> int:
     ).fetchone()
     previous_holdings_date = prow[0]
 
+    holding_select = [
+        "symbol",
+        "weight",
+        f"{_col_expr('holding_days', holdings_cols)} AS holding_days",
+        f"{_col_expr('pnl_pct', holdings_cols)} AS pnl_pct",
+        f"{_col_expr('entry_date', holdings_cols)} AS entry_date",
+        f"{_col_expr('entry_signal_date', holdings_cols)} AS entry_signal_date",
+        f"{_col_expr('opened_date', holdings_cols)} AS opened_date",
+        f"{_col_expr('buy_date', holdings_cols)} AS buy_date",
+        f"{_col_expr('rank', holdings_cols)} AS holding_rank",
+        f"{_col_expr('score', holdings_cols)} AS holding_score",
+        f"{_col_expr('pnl', holdings_cols)} AS pnl",
+        f"{_col_expr('return', holdings_cols)} AS holding_return",
+    ]
     holdings = conn.execute(
-        "SELECT symbol, weight, holding_days, pnl_pct FROM backtest_holdings WHERE run_id=? AND date=? ORDER BY weight DESC, symbol ASC",
+        f"SELECT {', '.join(holding_select)} FROM backtest_holdings WHERE run_id=? AND date=? ORDER BY weight DESC, symbol ASC",
         (selected.run_id, latest_holdings_date),
     ).fetchall()
     if not holdings:
@@ -163,13 +228,18 @@ def main() -> int:
     actual_cash = 1.0 - actual_exposure
 
     current_symbols = {str(r["symbol"]) for r in holdings}
+    candidate_select = [
+        "ds.symbol",
+        f"{_col_expr('rank', scores_cols, '999999')} AS rank",
+        f"{_col_expr('score', scores_cols)} AS score",
+    ]
     candidates = conn.execute(
-        """
-        SELECT ds.symbol, ds.rank, ds.score
+        f"""
+        SELECT {', '.join(candidate_select)}
         FROM daily_scores ds
         JOIN daily_universe du ON du.date=ds.date AND du.symbol=ds.symbol
         WHERE ds.date=?
-        ORDER BY ds.rank ASC, ds.symbol ASC
+        ORDER BY rank ASC, ds.symbol ASC
         """,
         (latest_signal_date,),
     ).fetchall()
@@ -193,6 +263,10 @@ def main() -> int:
     logs_dir.mkdir(parents=True, exist_ok=True)
     log_path = logs_dir / f"mac_paper_report_{latest_signal_date}.log"
     logging.basicConfig(filename=str(log_path), level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    logging.info("table_columns backtest_holdings=%s", sorted(holdings_cols))
+    logging.info("table_columns daily_scores=%s", sorted(scores_cols))
+    logging.info("table_columns backtest_results=%s", sorted(results_cols))
+    logging.info("table_columns backtest_risk_events=%s", sorted(risk_cols))
 
     md_path = reports_dir / f"{latest_signal_date}_paper_report.md"
     summary_path = reports_dir / f"{latest_signal_date}_paper_report_summary.json"
@@ -222,14 +296,23 @@ def main() -> int:
     md.append("\n## 6. 현재 보유 종목")
     for r in holdings:
         sym = str(r["symbol"])
-        md.append(f"- {_symbol_name(symbol_names, sym)} | 판단 유지 | 비중 {float(r['weight']):.4f} | 보유일수 {r['holding_days']} | 손익 {r['pnl_pct']} | 최근순위 N/A | 과열도 N/A | 요약 기존보유 | 주의 N/A | 이유 baseline_old")
+        holding_days = _compute_holding_days(conn, selected.run_id, sym, latest_holdings_date, r, holdings_cols)
+        pnl_like = r["pnl_pct"]
+        if pnl_like is None:
+            pnl_like = r["holding_return"]
+        if pnl_like is None:
+            pnl_like = r["pnl"]
+        rank_like = r["holding_rank"]
+        md.append(
+            f"- {_symbol_name(symbol_names, sym)} | 판단 유지 | 비중 {float(r['weight']):.4f} | 보유일수 {holding_days} | 손익 {pnl_like if pnl_like is not None else 'N/A'} | 최근순위 {rank_like if rank_like is not None else 'N/A'} | 과열도 N/A | 요약 기존보유 | 주의 N/A | 이유 baseline_old"
+        )
     md.append("\n## 7. 신규 매수 후보")
     for r in eligible_new[:10]:
         sym = str(r["symbol"])
-        md.append(f"- {_symbol_name(symbol_names, sym)} | 제안비중 {suggested_weight:.4f} | 전체순위 {r['rank']} | 점수 {r['score']} | 과열도 N/A | 요약 후보 | 주의 N/A | 이유 유니버스+스코어")
+        md.append(f"- {_symbol_name(symbol_names, sym)} | 제안비중 {suggested_weight:.4f} | 전체순위 {r['rank'] if r['rank'] is not None else 'N/A'} | 점수 {r['score'] if r['score'] is not None else 'N/A'} | 과열도 N/A | 요약 후보 | 주의 N/A | 이유 유니버스+스코어")
     md.append("\n## 8. 참고용 후보 5개")
     for r in eligible_new[:5]:
-        md.append(f"- {_symbol_name(symbol_names, str(r['symbol']))} (rank={r['rank']}, score={r['score']})")
+        md.append(f"- {_symbol_name(symbol_names, str(r['symbol']))} (rank={r['rank'] if r['rank'] is not None else 'N/A'}, score={r['score'] if r['score'] is not None else 'N/A'})")
     md.append("\n## 9. 운영 규칙")
     md.append("- 본 스크립트는 DB 읽기 전용이며 주문/자동매매/DB업데이트를 수행하지 않습니다.")
     md.append("\n## 10. 손익 기준 설명")
