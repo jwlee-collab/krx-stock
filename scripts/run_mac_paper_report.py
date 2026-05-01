@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import html
 import json
 import logging
 import sqlite3
@@ -133,6 +134,26 @@ def _compute_holding_days(
 
 def _symbol_name(symbol_names: dict[str, str], symbol: str) -> str:
     return symbol_names.get(symbol) or f"{symbol} (종목명 미확인)"
+
+
+def _fmt_weight_pct(value: Any) -> str:
+    return f"{float(value) * 100:.1f}%" if value is not None else "N/A"
+
+
+def _fmt_signed_pct(value: Any) -> str:
+    if value is None:
+        return "N/A"
+    return f"{float(value) * 100:+.1f}%"
+
+
+def _html_table(headers: list[str], rows: list[list[str]]) -> str:
+    thead = "".join(f"<th>{html.escape(h)}</th>" for h in headers)
+    body_rows = []
+    for row in rows:
+        cells = "".join(f"<td>{html.escape(c)}</td>" for c in row)
+        body_rows.append(f"<tr>{cells}</tr>")
+    tbody = "".join(body_rows) if body_rows else f"<tr><td colspan='{len(headers)}'>없음</td></tr>"
+    return f"<table><thead><tr>{thead}</tr></thead><tbody>{tbody}</tbody></table>"
 
 
 def main() -> int:
@@ -269,6 +290,7 @@ def main() -> int:
     logging.info("table_columns backtest_risk_events=%s", sorted(risk_cols))
 
     md_path = reports_dir / f"{latest_signal_date}_paper_report.md"
+    html_path = reports_dir / f"{latest_signal_date}_paper_report.html"
     summary_path = reports_dir / f"{latest_signal_date}_paper_report_summary.json"
 
     md = []
@@ -320,6 +342,108 @@ def main() -> int:
     md.append("\n## 11. 과열도 설명")
     md.append("- 과열도 데이터가 없으면 N/A로 표시합니다.")
 
+    sold_rows = [
+        [
+            _symbol_name(symbol_names, sym),
+            latest_holdings_date,
+            "리밸런싱",
+            "N/A",
+            "N/A",
+            "risk_event 또는 평가손익 참고",
+        ]
+        for sym in sold_symbols
+    ]
+    added_rows = [[_symbol_name(symbol_names, sym)] for sym in added_symbols]
+    holdings_rows = []
+    for r in holdings:
+        sym = str(r["symbol"])
+        holding_days = _compute_holding_days(conn, selected.run_id, sym, latest_holdings_date, r, holdings_cols)
+        pnl_like = r["pnl_pct"]
+        if pnl_like is None:
+            pnl_like = r["holding_return"]
+        if pnl_like is None:
+            pnl_like = r["pnl"]
+        rank_like = r["holding_rank"]
+        holdings_rows.append(
+            [
+                _symbol_name(symbol_names, sym),
+                "유지",
+                _fmt_weight_pct(r["weight"]),
+                str(holding_days),
+                _fmt_signed_pct(pnl_like),
+                str(rank_like) if rank_like is not None else "N/A",
+                "N/A",
+                "기존보유",
+                "N/A",
+                "baseline_old",
+            ]
+        )
+    candidate_rows = [
+        [
+            _symbol_name(symbol_names, str(r["symbol"])),
+            _fmt_weight_pct(suggested_weight),
+            str(r["rank"]) if r["rank"] is not None else "N/A",
+            str(r["score"]) if r["score"] is not None else "N/A",
+            "N/A",
+            "후보",
+            "N/A",
+            "유니버스+스코어",
+        ]
+        for r in eligible_new[:10]
+    ]
+    ref_rows = [
+        [
+            _symbol_name(symbol_names, str(r["symbol"])),
+            str(r["rank"]) if r["rank"] is not None else "N/A",
+            str(r["score"]) if r["score"] is not None else "N/A",
+        ]
+        for r in eligible_new[:5]
+    ]
+
+    html_doc = f"""<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Paper Trading 리포트 ({html.escape(latest_signal_date)})</title>
+  <style>
+    body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 24px; line-height: 1.5; }}
+    h1, h2 {{ margin-top: 1.2em; }}
+    table {{ border-collapse: collapse; width: 100%; margin: 12px 0 16px; }}
+    th, td {{ border: 1px solid #ddd; padding: 8px 10px; text-align: left; }}
+    th {{ background: #f5f7fa; }}
+    .note {{ background: #fff8e1; border: 1px solid #f2d98b; padding: 10px; border-radius: 6px; margin: 10px 0 18px; }}
+  </style>
+</head>
+<body>
+  <h1>Paper Trading 리포트 ({html.escape(latest_signal_date)})</h1>
+  <h2>1. 오늘의 결론</h2>
+  <p>baseline_old run_id <code>{html.escape(selected.run_id)}</code> 기준으로 리포트를 생성했습니다.</p>
+  <h2>2. 현재 포트폴리오</h2>
+  {_html_table(["항목", "값"], [["보유 종목 수", str(len(holdings))], ["주식 비중", _fmt_weight_pct(actual_exposure)], ["현금 비중", _fmt_weight_pct(actual_cash)], ["종목당 기본 목표 비중", _fmt_weight_pct(actual_exposure/len(holdings))]])}
+  <h2>3. 전일 대비 변화</h2>
+  {_html_table(["항목", "값"], [["직전 보유일", previous_holdings_date or "N/A"], ["현재 보유일", latest_holdings_date], ["정리 종목 수", str(len(sold_symbols))], ["신규 편입 수", str(len(added_symbols))], ["유지 종목 수", str(len(kept_symbols))]])}
+  <h2>4. 정리/매도 내역</h2>
+  {_html_table(["종목", "정리일", "정리사유", "비중", "손익", "참고"], sold_rows)}
+  <div class="note">참고: 체결가 기반 확정손익이 아닐 수 있습니다.</div>
+  <h2>5. 신규 편입 내역</h2>
+  {_html_table(["종목"], added_rows)}
+  <h2>6. 현재 보유 종목</h2>
+  {_html_table(["종목", "판단", "비중", "보유일수", "손익", "최근순위", "과열도", "요약", "주의", "이유"], holdings_rows)}
+  <h2>7. 신규 매수 후보</h2>
+  {_html_table(["종목", "제안비중", "전체순위", "점수", "과열도", "요약", "주의", "이유"], candidate_rows)}
+  <h2>8. 참고용 후보 5개</h2>
+  {_html_table(["종목", "rank", "score"], ref_rows)}
+  <h2>9. 운영 규칙</h2>
+  <p>본 스크립트는 DB 읽기 전용이며 주문/자동매매/DB업데이트를 수행하지 않습니다.</p>
+  <h2>10. 손익 기준 설명</h2>
+  <div class="note">risk event가 있으면 event 수익률을 우선 참고하고, 없으면 직전 보유일 마지막 평가손익을 참고합니다.</div>
+  <h2>11. 과열도 설명</h2>
+  <div class="note">과열도 데이터가 없으면 N/A로 표시합니다.</div>
+</body>
+</html>
+"""
+
     summary = {
         "selected_run_id": selected.run_id,
         "selected_run_created_at": selected.created_at,
@@ -338,10 +462,12 @@ def main() -> int:
 
     if not args.dry_run:
         md_path.write_text("\n".join(md) + "\n", encoding="utf-8")
+        html_path.write_text(html_doc, encoding="utf-8")
         summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     logging.info("report generated: %s", summary)
 
     print(f"Markdown: {md_path}")
+    print(f"HTML: {html_path}")
     print(f"JSON: {summary_path}")
     print(f"Log: {log_path}")
     print("예시 실행: python scripts/run_mac_paper_report.py --as-of-date 2026-04-30 --dry-run")
