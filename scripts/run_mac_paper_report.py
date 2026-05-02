@@ -138,8 +138,14 @@ def main() -> int:
     prev={str(r[0]) for r in conn.execute("SELECT symbol FROM backtest_holdings WHERE run_id=? AND date=?",(selected.run_id,prev_date)).fetchall()} if prev_date else set()
     sold=sorted(prev-cur); added=sorted(cur-prev); kept=sorted(cur&prev)
     fmap={str(r['symbol']):r for r in conn.execute("SELECT symbol, ret_1d, ret_5d, range_pct, volume_z20 FROM daily_features WHERE date=?",(latest_signal_date,)).fetchall()}
-    md=[f"# Paper Trading 리포트 ({latest_signal_date})", "\n## 1. 오늘의 결론", f"- baseline_old run_id `{selected.run_id}` 기준으로 리포트를 생성했습니다."]
-    md += ["\n## 2. 현재 포트폴리오", f"- 보유 종목 수: {len(holdings)}", f"- 주식 비중: {_fmt_weight_pct(actual_exposure)}", f"- 현금 비중: {_fmt_weight_pct(actual_cash)}"]
+    has_new_candidates = len(eligible) > 0
+    conclusion = (
+        f"오늘 기준 신규 후보는 {'있으며' if has_new_candidates else '없으며'} "
+        f"현재 보유 {len(holdings)}종목은 유지 상태입니다. "
+        f"현재 주식 비중은 {_fmt_weight_pct(actual_exposure)}, 현금 비중은 {_fmt_weight_pct(actual_cash)}입니다."
+    )
+    md=[f"# Paper Trading 리포트 ({latest_signal_date})", "\n## 1. 오늘의 결론", f"- {conclusion}", f"- latest_signal_date: {latest_signal_date}", f"- latest_holdings_date: {latest_holdings_date}", f"- baseline_old run_id `{selected.run_id}` 기준으로 리포트를 생성했습니다."]
+    md += ["\n## 2. 현재 포트폴리오", f"- 현재 포트폴리오: 보유 {len(holdings)}종목 · 주식 {_fmt_weight_pct(actual_exposure)} · 현금 {_fmt_weight_pct(actual_cash)} · 종목당 기본 목표 {_fmt_weight_pct(actual_exposure/5 if actual_exposure>0 else 0.2)}"]
     md += ["\n## 3. 전일 대비 변화", f"- 직전 보유일: {prev_date or '데이터 부족'}", f"- 현재 보유일: {latest_holdings_date}", f"- 정리 종목 수: {len(sold)}", f"- 신규 편입 수: {len(added)}", f"- 유지 종목 수: {len(kept)}"]
     md += ["\n## 4. 정리/매도 내역", "- 참고: 체결가 기반 확정손익이 아닐 수 있습니다."]
     sold_rows=[]
@@ -151,6 +157,20 @@ def main() -> int:
             pnl,ref=(_fmt_signed_pct(pr['unrealized_return']) if pr else "데이터 부족"),"risk event 없음, 직전 보유일 평가손익 참고"
         md.append(f"- {_symbol_name(names,s)} | 정리일 {latest_holdings_date} | 정리사유 리밸런싱 | 손익 {pnl} | 참고 {ref}")
         sold_rows.append([_symbol_name(names,s),latest_holdings_date,"리밸런싱",pnl,ref])
+    if not sold:
+        md.append("- 없음")
+    md.append("\n## 5. 신규 편입 내역")
+    added_rows=[]
+    for s in added:
+        row = conn.execute("SELECT entry_date, weight, unrealized_return, rank FROM backtest_holdings WHERE run_id=? AND date=? AND symbol=?", (selected.run_id, latest_holdings_date, s)).fetchone()
+        entry_date = str(row["entry_date"]) if row and row["entry_date"] else latest_holdings_date
+        weight = _fmt_weight_pct(row["weight"]) if row else "데이터 부족"
+        pnl = _fmt_signed_pct(row["unrealized_return"]) if row else "데이터 부족"
+        rank = _fmt_rank(row["rank"]) if row else "데이터 부족"
+        md.append(f"- {_symbol_name(names,s)} | 편입일 {entry_date} | 비중 {weight} | 손익 {pnl} | 현재순위 {rank}")
+        added_rows.append([_symbol_name(names,s), entry_date, weight, pnl, rank])
+    if not added:
+        md.append("- 없음")
     holdings_rows=[]; md.append("\n## 6. 현재 보유 종목")
     for r in holdings:
         s=str(r['symbol']); td=_trading_days_between(conn,str(r['entry_date']),latest_holdings_date) if r['entry_date'] else None; days=f"{td}거래일" if td is not None else "데이터 부족"; oh=_overheat(fmap.get(s))
@@ -171,7 +191,33 @@ def main() -> int:
         reason=f"daily_universe eligible 후보 중 현재 보유 종목을 제외한 상위 후보입니다. 전체순위 {_fmt_rank(r['rank'])}, 점수 {_fmt_score_100(r['score'])}점으로 신규 편입 후보이며 과열도는 {oh}입니다."
         md.append(f"- {_symbol_name(names,s)} | 제안비중 {_fmt_weight_pct(actual_exposure/5 if actual_exposure>0 else 0.2)} | 전체순위 {_fmt_rank(r['rank'])} | 점수 {_fmt_score_100(r['score'])} | 과열도 {oh} | 주의 {warn} | 이유 {reason}")
         cand_rows.append([_symbol_name(names,s),_fmt_weight_pct(actual_exposure/5 if actual_exposure>0 else 0.2),_fmt_rank(r['rank']),_fmt_score_100(r['score']),oh,"후보",warn,reason])
-    md += ["\n## 10. 손익 기준 설명", "- 진입일(entry_date) 이후 latest_holdings_date까지의 평가손익이며, 체결가 기반 확정손익이 아닐 수 있음."]
+    md.append("\n## 8. 참고용 후보 5개")
+    ref_rows=[]
+    for r in eligible[10:15]:
+        s=str(r['symbol']); oh=_overheat(fmap.get(s))
+        note="메인 후보 다음 순위 참고용"
+        md.append(f"- {_symbol_name(names,s)} | 전체순위 {_fmt_rank(r['rank'])} | 점수 {_fmt_score_100(r['score'])} | 과열도 {oh} | 참고 {note}")
+        ref_rows.append([_symbol_name(names,s),_fmt_rank(r['rank']),_fmt_score_100(r['score']),oh,note])
+    if not ref_rows:
+        md.append("- 표시 가능한 참고 후보 없음")
+    md += ["\n## 9. 운영 규칙",
+           "- 새로 편입한 종목은 기본적으로 10거래일 보유",
+           "- 손실이 약 -10% 수준에 도달하면 최소보유기간 전이라도 매도 대상 가능",
+           "- 현재 고정 익절 기준 없음",
+           "- 수익 중인 종목은 점수 순위가 유지되는 동안 계속 보유",
+           "- trailing stop 또는 부분 익절은 현재 운영 전략에 적용하지 않음",
+           "- 실전 주문/자동매매가 아니라 paper trading/report 운영용"]
+    md += ["\n## 10. 손익 기준 설명",
+           "- 현재 보유 종목 손익은 진입일(entry_date) 이후 latest_holdings_date까지의 평가손익",
+           "- 체결가 기반 확정손익이 아닐 수 있음",
+           "- 정리/매도 내역의 손익은 risk event가 있으면 event return을 우선 사용하고, 없으면 직전 보유일 마지막 평가손익 기준"]
+    md += ["\n## 11. 과열도 설명",
+           "- ret_1d >= 8%: 1일 급등",
+           "- ret_5d >= 15%: 5일 급등",
+           "- range_pct >= 10%: 장중 변동성 확대",
+           "- volume_z20 >= 3.0: 거래량 급증",
+           "- 해당 조건이 없으면 낮음",
+           "- 과열도는 매수 금지 신호가 아니라 진입 전 주의 신호"]
 
     html_doc=f"""<!doctype html><html lang='ko'><head><meta charset='utf-8'/><style>
 body{{font-family:sans-serif;margin:24px}}
@@ -185,12 +231,21 @@ body{{font-family:sans-serif;margin:24px}}
 .report-table td.left,.report-table td.col-warn,.report-table td.col-reason{{text-align:left}}
 </style></head><body>
 <h1>Paper Trading 리포트 ({latest_signal_date})</h1>
+<h2>오늘의 결론</h2>
+<div class='summary-line'>{html.escape(conclusion)} (signal {latest_signal_date}, holdings {latest_holdings_date})</div>
+<h2>현재 포트폴리오</h2>
 <div class='summary-line'>현재 포트폴리오: 보유 {len(holdings)}종목 · 주식 {_fmt_weight_pct(actual_exposure)} · 현금 {_fmt_weight_pct(actual_cash)} · 종목당 기본 목표 {_fmt_weight_pct(actual_exposure/5 if actual_exposure>0 else 0.2)}</div>
-<h2>정리/매도</h2>{_html_table(['종목','정리일','정리사유','손익','참고'],sold_rows)}
+<h2>전일 대비 변화</h2>
+{_html_table(['직전 보유일','현재 보유일','정리 종목 수','신규 편입 수','유지 종목 수'], [[prev_date or '데이터 부족', latest_holdings_date, str(len(sold)), str(len(added)), str(len(kept))]])}
+<h2>정리/매도 내역</h2>{_html_table(['종목','정리일','정리사유','손익','참고'],sold_rows)}
 <div>참고: 체결가 기반 확정손익이 아닐 수 있습니다.</div>
+<h2>신규 편입 내역</h2>{_html_table(['종목','편입일','비중','손익','현재순위'],added_rows)}
 <h2>현재 보유</h2>{_html_table(['종목','판단','비중','보유일수','손익','최근순위','점수','과열도','요약','주의','이유'],holdings_rows,'holdings')}
 <h2>신규 후보</h2>{_html_table(['종목','제안비중','전체순위','점수','과열도','요약','주의','이유'],cand_rows,'candidates')}
-<div>현재 보유 종목 손익은 진입일(entry_date) 이후 latest_holdings_date까지의 평가손익이며, 체결가 기반 확정손익이 아닐 수 있음.</div></body></html>"""
+<h2>참고용 후보</h2>{_html_table(['종목','전체순위','점수','과열도','참고'],ref_rows)}
+<h2>운영 규칙</h2><ul><li>새로 편입한 종목은 기본적으로 10거래일 보유</li><li>손실이 약 -10% 수준에 도달하면 최소보유기간 전이라도 매도 대상 가능</li><li>현재 고정 익절 기준 없음</li><li>수익 중인 종목은 점수 순위가 유지되는 동안 계속 보유</li><li>trailing stop 또는 부분 익절은 현재 운영 전략에 적용하지 않음</li><li>실전 주문/자동매매가 아니라 paper trading/report 운영용</li></ul>
+<h2>손익 기준 설명</h2><ul><li>현재 보유 종목 손익은 진입일(entry_date) 이후 latest_holdings_date까지의 평가손익</li><li>체결가 기반 확정손익이 아닐 수 있음</li><li>정리/매도 내역의 손익은 risk event가 있으면 event return을 우선 사용하고, 없으면 직전 보유일 마지막 평가손익 기준</li></ul>
+<h2>과열도 설명</h2><ul><li>ret_1d &gt;= 8%: 1일 급등</li><li>ret_5d &gt;= 15%: 5일 급등</li><li>range_pct &gt;= 10%: 장중 변동성 확대</li><li>volume_z20 &gt;= 3.0: 거래량 급증</li><li>해당 조건이 없으면 낮음</li><li>과열도는 매수 금지 신호가 아니라 진입 전 주의 신호</li></ul></body></html>"""
 
     rep=_expand(args.reports_dir); rep.mkdir(parents=True, exist_ok=True)
     md_path=rep/f"{latest_signal_date}_paper_report.md"; html_path=rep/f"{latest_signal_date}_paper_report.html"; sum_path=rep/f"{latest_signal_date}_paper_report_summary.json"
