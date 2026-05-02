@@ -53,8 +53,67 @@ def _fmt_signed_pct(v: Any) -> str: return f"{float(v) * 100:+.1f}%" if v is not
 def _fmt_score_100(v: Any) -> str: return f"{float(v) * 100:.1f}" if v is not None else "데이터 부족"
 def _fmt_rank(v: Any) -> str: return f"{int(v)}위" if v is not None else "데이터 부족"
 def _symbol_name(m: dict[str,str], s: str) -> str: return m.get(s) or f"{s} (종목명 미확인)"
-def _html_table(headers: list[str], rows: list[list[str]]) -> str:
-    return "<table><thead><tr>" + "".join(f"<th>{html.escape(h)}</th>" for h in headers) + "</tr></thead><tbody>" + ("".join("<tr>"+"".join(f"<td>{html.escape(c)}</td>" for c in r)+"</tr>" for r in rows) if rows else f"<tr><td colspan='{len(headers)}'>없음</td></tr>") + "</tbody></table>"
+def _html_multiline_cell(text: str, col: str, table_kind: str) -> str:
+    raw = text or ""
+    if col == "과열도":
+        parts = [p.strip() for p in raw.split(",") if p.strip()]
+        lines = parts if parts else [raw.strip()]
+    elif col == "주의":
+        parts = [p.strip() for p in raw.split("/") if p.strip()]
+        lines = parts if parts else [raw.strip()]
+    elif col == "이유":
+        lines = [p.strip() for p in raw.replace(". ", ".\n").split("\n") if p.strip()]
+        key = "과열도" if table_kind == "holdings" else "장중 변동성"
+        expanded: list[str] = []
+        for line in lines:
+            idx = line.find(key)
+            if idx > 0:
+                head, tail = line[:idx].rstrip(" ,"), line[idx:].strip()
+                if head: expanded.append(head)
+                if tail: expanded.append(tail)
+            else:
+                expanded.append(line)
+        lines = expanded
+    else:
+        lines = [raw]
+    return "<br/>".join(html.escape(line) for line in lines if line) or html.escape(raw)
+
+def _html_table(headers: list[str], rows: list[list[str]], table_kind: str = "generic") -> str:
+    display_headers = list(headers)
+    display_rows = [list(r) for r in rows]
+    if table_kind == "candidates":
+        remove = {"요약", "제안비중"}
+        keep_idx = [i for i, h in enumerate(headers) if h not in remove]
+        display_headers = [headers[i] for i in keep_idx]
+        display_rows = [[r[i] for i in keep_idx] for r in rows]
+    class_map = {
+        "종목": "col-symbol short center", "종목명": "col-symbol short center", "판단": "short center", "비중": "short center",
+        "보유일수": "short center", "손익": "short center", "최근순위": "short center", "전체순위": "short center", "현재순위": "short center",
+        "점수": "short center", "과열도": "col-overheat center", "요약": "center", "주의": "col-warn long left", "이유": "col-reason long left",
+        "정리일": "short center", "정리사유": "center", "참고": "long left",
+    }
+    width_map = {
+        "holdings": {"종목": "10%", "종목명": "10%", "판단": "5%", "비중": "5%", "보유일수": "6%", "손익": "5%", "최근순위": "5%", "점수": "5%", "과열도": "8%", "요약": "6%", "주의": "17%", "이유": "28%"},
+        "candidates": {"종목": "11%", "종목명": "11%", "전체순위": "8%", "현재순위": "8%", "점수": "8%", "과열도": "13%", "주의": "22%", "이유": "30%"},
+    }
+    colgroup = ""
+    if table_kind in width_map:
+        colgroup = "<colgroup>" + "".join(f"<col style='width:{width_map[table_kind].get(h, 'auto')}'/>" for h in display_headers) + "</colgroup>"
+    thead = "<thead><tr>" + "".join(f"<th class='{class_map.get(h, 'center')}'>{html.escape(h)}</th>" for h in display_headers) + "</tr></thead>"
+    if display_rows:
+        body_rows = []
+        for r in display_rows:
+            tds = []
+            for i, c in enumerate(r):
+                h = display_headers[i]
+                classes = class_map.get(h, "")
+                text = _html_multiline_cell(c, h, table_kind)
+                tds.append(f"<td class='{classes}'>{text}</td>")
+            body_rows.append("<tr>" + "".join(tds) + "</tr>")
+        tbody = "<tbody>" + "".join(body_rows) + "</tbody>"
+    else:
+        tbody = f"<tbody><tr><td colspan='{len(display_headers)}' class='center'>없음</td></tr></tbody>"
+    return f"<div class='table-wrap'><table class='report-table {table_kind}'>{colgroup}{thead}{tbody}</table></div>"
 def _overheat(f: sqlite3.Row | None) -> str:
     if not f: return "낮음"
     out=[]
@@ -114,13 +173,23 @@ def main() -> int:
         cand_rows.append([_symbol_name(names,s),_fmt_weight_pct(actual_exposure/5 if actual_exposure>0 else 0.2),_fmt_rank(r['rank']),_fmt_score_100(r['score']),oh,"후보",warn,reason])
     md += ["\n## 10. 손익 기준 설명", "- 진입일(entry_date) 이후 latest_holdings_date까지의 평가손익이며, 체결가 기반 확정손익이 아닐 수 있음."]
 
-    html_doc=f"""<!doctype html><html lang='ko'><head><meta charset='utf-8'/><style>body{{font-family:sans-serif;margin:24px}}table{{border-collapse:collapse;width:100%}}th,td{{border:1px solid #ddd;padding:8px;vertical-align:top;white-space:normal;word-break:break-word}}th{{background:#f5f7fa}}</style></head><body>
+    html_doc=f"""<!doctype html><html lang='ko'><head><meta charset='utf-8'/><style>
+body{{font-family:sans-serif;margin:24px}}
+.summary-line{{margin:8px 0 18px;padding:10px 12px;background:#f5f7fa;border:1px solid #e2e6ea;border-radius:8px;font-size:14px}}
+.table-wrap{{overflow-x:auto;margin-bottom:12px}}
+.report-table{{width:100%;table-layout:fixed;border-collapse:collapse}}
+.report-table th,.report-table td{{border:1px solid #ddd;padding:8px;vertical-align:top}}
+.report-table th{{background:#f5f7fa;text-align:center}}
+.report-table td.long{{word-break:keep-all;overflow-wrap:break-word;line-height:1.55}}
+.report-table td.center,.report-table td.short,.report-table td.col-overheat,.report-table td.col-symbol{{text-align:center}}
+.report-table td.left,.report-table td.col-warn,.report-table td.col-reason{{text-align:left}}
+</style></head><body>
 <h1>Paper Trading 리포트 ({latest_signal_date})</h1>
-{_html_table(['항목','값'],[['보유 종목 수',str(len(holdings))],['주식 비중',_fmt_weight_pct(actual_exposure)],['현금 비중',_fmt_weight_pct(actual_cash)]])}
+<div class='summary-line'>현재 포트폴리오: 보유 {len(holdings)}종목 · 주식 {_fmt_weight_pct(actual_exposure)} · 현금 {_fmt_weight_pct(actual_cash)} · 종목당 기본 목표 {_fmt_weight_pct(actual_exposure/5 if actual_exposure>0 else 0.2)}</div>
 <h2>정리/매도</h2>{_html_table(['종목','정리일','정리사유','손익','참고'],sold_rows)}
 <div>참고: 체결가 기반 확정손익이 아닐 수 있습니다.</div>
-<h2>현재 보유</h2>{_html_table(['종목','판단','비중','보유일수','손익','최근순위','점수','과열도','요약','주의','이유'],holdings_rows)}
-<h2>신규 후보</h2>{_html_table(['종목','제안비중','전체순위','점수','과열도','요약','주의','이유'],cand_rows)}
+<h2>현재 보유</h2>{_html_table(['종목','판단','비중','보유일수','손익','최근순위','점수','과열도','요약','주의','이유'],holdings_rows,'holdings')}
+<h2>신규 후보</h2>{_html_table(['종목','제안비중','전체순위','점수','과열도','요약','주의','이유'],cand_rows,'candidates')}
 <div>현재 보유 종목 손익은 진입일(entry_date) 이후 latest_holdings_date까지의 평가손익이며, 체결가 기반 확정손익이 아닐 수 있음.</div></body></html>"""
 
     rep=_expand(args.reports_dir); rep.mkdir(parents=True, exist_ok=True)
