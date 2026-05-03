@@ -10,7 +10,7 @@ import sqlite3
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
@@ -24,6 +24,60 @@ from pipeline.ingest import ingest_krx_prices, normalize_krx_symbol
 from pipeline.scoring import generate_daily_scores
 
 DEFAULT_REFERENCE_RUN_ID = "3f3cc4bf-bbe4-4cb7-b0ef-cdc2d8020316"
+
+
+RESEARCH_RESET_TABLES_IN_ORDER = [
+    "backtest_holdings",
+    "backtest_results",
+    "backtest_risk_events",
+    "backtest_market_filter_events",
+    "backtest_runs",
+    "robustness_experiment_results",
+    "robustness_experiment_stability",
+    "robustness_experiment_batches",
+    "start_window_robustness_results",
+    "start_window_robustness_period_summary",
+    "start_window_robustness_strategy_summary",
+    "start_window_robustness_batches",
+    "performance_report_curve",
+    "performance_report_monthly",
+    "performance_report_summary",
+    "performance_report_runs",
+    "paper_orders",
+    "paper_positions",
+    "paper_rebalance_log",
+    "daily_scores",
+    "daily_universe",
+    "daily_features",
+    "daily_prices",
+]
+
+
+def _existing_tables(conn: sqlite3.Connection) -> set[str]:
+    rows = conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+    return {r[0] for r in rows}
+
+
+def clear_research_outputs_and_dependent_tables(conn: sqlite3.Connection) -> list[str]:
+    existing = _existing_tables(conn)
+    cleared: list[str] = []
+    for table in RESEARCH_RESET_TABLES_IN_ORDER:
+        if table in existing:
+            conn.execute(f"DELETE FROM {table}")
+            cleared.append(table)
+    conn.commit()
+    return cleared
+
+
+def filter_research_db_to_symbols(conn: sqlite3.Connection, symbols: Iterable[str]) -> None:
+    symbol_list = list(symbols)
+    if not symbol_list:
+        raise RuntimeError("No symbols available for research DB filtering")
+    placeholders = ','.join('?' for _ in symbol_list)
+    conn.execute(f"DELETE FROM daily_prices WHERE symbol NOT IN ({placeholders})", symbol_list)
+    conn.commit()
+
+
 
 BASELINE_PARAMS: dict[str, Any] = {
     "scoring_profile": "old",
@@ -145,13 +199,22 @@ def main() -> None:
     if not symbols:
         raise RuntimeError("No symbols loaded from universe csv")
 
+    is_smoke = args.symbols_limit is not None
+    if args.force_rebuild or is_smoke:
+        cleared = clear_research_outputs_and_dependent_tables(conn)
+        print(f"[INFO] cleared research tables (FK-safe order): {', '.join(cleared)}")
+
     cov_price = _coverage(conn, "daily_prices")
-    needs_ingest = (cov_price["min_date"] is None or cov_price["min_date"] > args.start_date or cov_price["max_date"] < args.end_date or cov_price["symbol_count"] < len(symbols))
+    needs_ingest = (
+        cov_price["min_date"] is None
+        or cov_price["min_date"] > args.start_date
+        or cov_price["max_date"] < args.end_date
+        or cov_price["symbol_count"] < len(symbols)
+    )
     if needs_ingest and not args.skip_ingest:
         ingest_krx_prices(conn, symbols, args.start_date, args.end_date)
 
-    conn.execute(f"DELETE FROM daily_prices WHERE symbol NOT IN ({','.join('?' for _ in symbols)})", symbols)
-    conn.commit()
+    filter_research_db_to_symbols(conn, symbols)
 
     generate_daily_features(conn, start_date=args.start_date, end_date=args.end_date)
     build_rolling_liquidity_universe(conn, universe_size=BASELINE_PARAMS["universe_size"], lookback_days=BASELINE_PARAMS["universe_lookback_days"])
