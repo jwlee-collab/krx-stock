@@ -504,6 +504,54 @@ def run_backtest(
     portfolio_peak_equity = float(initial_equity)
     dd_cooldown_until_idx = -1
 
+    def _append_holdings_snapshot(snapshot_date: str) -> None:
+        if not current_holdings:
+            return
+        score_rows = conn.execute(
+            f"""
+            SELECT symbol, rank, score
+            FROM daily_scores
+            WHERE date=? AND symbol IN ({",".join("?" for _ in current_holdings)})
+            """,
+            (snapshot_date, *sorted(current_holdings)),
+        ).fetchall()
+        score_by_symbol = {
+            r["symbol"]: (
+                int(r["rank"]) if r["rank"] is not None else None,
+                float(r["score"]) if r["score"] is not None else None,
+            )
+            for r in score_rows
+        }
+        current_close_rows = conn.execute(
+            "SELECT symbol, close FROM daily_prices WHERE date=?",
+            (snapshot_date,),
+        ).fetchall()
+        close_by_symbol = {r["symbol"]: float(r["close"]) for r in current_close_rows if r["close"] is not None}
+        for sym in sorted(current_holdings):
+            weight = holding_weight_by_symbol.get(sym, 0.0)
+            close_px = close_by_symbol.get(sym)
+            entry_px = entry_price_by_symbol.get(sym)
+            entry_idx = entry_index_by_symbol.get(sym)
+            entry_date = all_dates[entry_idx] if entry_idx is not None and 0 <= entry_idx < len(all_dates) else None
+            unrealized_return = None
+            if close_px is not None and entry_px is not None and entry_px > 0:
+                unrealized_return = (close_px - entry_px) / entry_px
+            rank_score = score_by_symbol.get(sym, (None, None))
+            holdings_rows.append(
+                (
+                    run_id,
+                    snapshot_date,
+                    sym,
+                    weight,
+                    entry_date,
+                    entry_px,
+                    close_px,
+                    unrealized_return,
+                    rank_score[0],
+                    rank_score[1],
+                )
+            )
+
     for i in range(len(all_dates) - 1):
         d0 = all_dates[i]
         d1 = all_dates[i + 1]
@@ -765,46 +813,7 @@ def run_backtest(
             daily_ret = 0.0
             pos_count = 0
         else:
-            score_rows = conn.execute(
-                f"""
-                SELECT symbol, rank, score
-                FROM daily_scores
-                WHERE date=? AND symbol IN ({",".join("?" for _ in current_holdings)})
-                """,
-                (d0, *sorted(current_holdings)),
-            ).fetchall()
-            score_by_symbol = {
-                r["symbol"]: (
-                    int(r["rank"]) if r["rank"] is not None else None,
-                    float(r["score"]) if r["score"] is not None else None,
-                )
-                for r in score_rows
-            }
-            for sym in sorted(current_holdings):
-                weight = holding_weight_by_symbol.get(sym, 0.0)
-                close_px = close_by_symbol.get(sym)
-                entry_px = entry_price_by_symbol.get(sym)
-                entry_idx = entry_index_by_symbol.get(sym)
-                entry_date = all_dates[entry_idx] if entry_idx is not None and 0 <= entry_idx < len(all_dates) else None
-                unrealized_return = None
-                if close_px is not None and entry_px is not None and entry_px > 0:
-                    unrealized_return = (close_px - entry_px) / entry_px
-                rank_score = score_by_symbol.get(sym, (None, None))
-                holdings_rows.append(
-                    (
-                        run_id,
-                        d0,
-                        sym,
-                        weight,
-                        entry_date,
-                        entry_px,
-                        close_px,
-                        unrealized_return,
-                        rank_score[0],
-                        rank_score[1],
-                    )
-                )
-
+            _append_holdings_snapshot(d0)
             weighted_ret = 0.0
             for sym in sorted(current_holdings):
                 row0 = conn.execute(
@@ -854,6 +863,9 @@ def run_backtest(
 
         if enable_portfolio_dd_cut and i < dd_cooldown_until_idx:
             risk_cut_cash_days += 1
+
+    if all_dates:
+        _append_holdings_snapshot(all_dates[-1])
 
     conn.executemany(
         """
