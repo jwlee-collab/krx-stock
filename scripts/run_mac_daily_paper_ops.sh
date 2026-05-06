@@ -39,7 +39,13 @@ fi
 
 cd "${REPO_DIR}"
 
-git pull --ff-only
+if ! git pull --ff-only; then
+  echo "WARN: git pull failed. Continuing with local code."
+fi
+
+"${PYTHON_BIN}" scripts/update_mac_market_db.py \
+  --db "${DB_PATH}" \
+  --logs-dir "${LOGS_DIR}"
 
 "${PYTHON_BIN}" scripts/run_mac_paper_report.py \
   --db "${DB_PATH}" \
