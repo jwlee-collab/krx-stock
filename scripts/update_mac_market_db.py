@@ -44,6 +44,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--start-date", default=None)
     p.add_argument("--end-date", default=None)
     p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--force", action="store_true", help="Run pipeline even when DB is already up to date")
     return p.parse_args()
 
 
@@ -159,6 +160,35 @@ def main() -> None:
         if before_signal:
             print(f"[before] latest_signal_date={before_signal}")
 
+        precheck_selected = fetch_latest_baseline_run(conn)
+        precheck_run_id = precheck_selected["run_id"] if precheck_selected else None
+        precheck_results_date = (
+            latest_results_date_for_run(conn, precheck_run_id) if precheck_run_id else None
+        )
+        precheck_holdings_date = (
+            latest_holdings_date_for_run(conn, precheck_run_id) if precheck_run_id else None
+        )
+
+    print(f"[precheck] latest_signal_date={before_signal}")
+    print(f"[precheck] latest_baseline_run_id={precheck_run_id}")
+    print(f"[precheck] latest_results_date={precheck_results_date}")
+    print(f"[precheck] latest_holdings_date={precheck_holdings_date}")
+
+    is_noop_ready = (
+        before_signal is not None
+        and precheck_run_id is not None
+        and precheck_results_date == before_signal
+        and precheck_holdings_date == before_signal
+        and precheck_results_date == precheck_holdings_date
+    )
+
+    if is_noop_ready and not args.force:
+        print("PASS: Mac market DB update completed. Database was already up to date.")
+        print(f"Latest signal date: {before_signal}")
+        print(f"Latest results date: {precheck_results_date}")
+        print(f"Latest holdings date: {precheck_holdings_date}")
+        return
+
     cmd = [
         sys.executable,
         str(repo_root / "scripts" / "run_pipeline.py"),
@@ -234,6 +264,7 @@ def main() -> None:
     else:
         print("PASS: Mac market DB update completed.")
     print(f"Latest signal date: {after_signal}")
+    print(f"Latest results date: {latest_results_date}")
     print(f"Latest holdings date: {latest_holdings_date}")
 
 
