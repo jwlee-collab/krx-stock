@@ -131,6 +131,14 @@ def latest_holdings_date_for_run(conn: sqlite3.Connection, run_id: str) -> str |
     return row["latest_holdings_date"] if row else None
 
 
+def latest_results_date_for_run(conn: sqlite3.Connection, run_id: str) -> str | None:
+    row = conn.execute(
+        "SELECT MAX(date) AS latest_results_date FROM backtest_results WHERE run_id = ?",
+        (run_id,),
+    ).fetchone()
+    return row["latest_results_date"] if row else None
+
+
 def main() -> None:
     args = parse_args()
     db_path = Path(args.db).expanduser()
@@ -187,18 +195,44 @@ def main() -> None:
 
         print(f"latest_signal_date using daily_scores JOIN daily_universe={after_signal}")
 
-        if not args.dry_run and before_signal and after_signal <= before_signal:
+        if before_signal and after_signal < before_signal:
             fail(
-                f"latest_signal_date was not updated (before={before_signal}, after={after_signal})"
+                f"latest_signal_date moved backward (before={before_signal}, after={after_signal})"
             )
+
+        latest_results_date = latest_results_date_for_run(conn, selected_run_id)
+        if not latest_results_date:
+            fail(f"latest_results_date missing for selected run_id={selected_run_id}")
 
         latest_holdings_date = latest_holdings_date_for_run(conn, selected_run_id)
         if not latest_holdings_date:
             fail(f"latest_holdings_date missing for selected run_id={selected_run_id}")
 
+        print(f"latest_results_date using selected_run_id backtest_results={latest_results_date}")
         print(f"latest_holdings_date using selected_run_id backtest_holdings={latest_holdings_date}")
 
-    print("PASS: Mac market DB update completed.")
+        if latest_holdings_date != latest_results_date:
+            fail(
+                "selected run has mismatched max date between backtest_results and backtest_holdings "
+                f"(results={latest_results_date}, holdings={latest_holdings_date})"
+            )
+
+        if latest_results_date < after_signal:
+            fail(
+                "selected run backtest_results max date is older than latest_signal_date "
+                f"(latest_signal_date={after_signal}, results_max={latest_results_date})"
+            )
+
+        if args.end_date and after_signal < args.end_date:
+            print(
+                "WARN: latest_signal_date is older than requested end-date "
+                f"(end-date={args.end_date}, latest_signal_date={after_signal})"
+            )
+
+    if before_signal and after_signal == before_signal:
+        print("PASS: Mac market DB update completed. Database was already up to date.")
+    else:
+        print("PASS: Mac market DB update completed.")
     print(f"Latest signal date: {after_signal}")
     print(f"Latest holdings date: {latest_holdings_date}")
 
