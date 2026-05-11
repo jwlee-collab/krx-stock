@@ -39,6 +39,21 @@ def _run_json_command(args: list[str]) -> tuple[int, dict[str, Any], str]:
     return proc.returncode, payload, proc.stderr[-4000:]
 
 
+def _append_paper_account_args(command: list[str], args: argparse.Namespace) -> None:
+    mappings = [
+        ("--paper-initial-cash-krw", "paper_initial_cash_krw"),
+        ("--paper-notional-per-trade-krw", "paper_notional_per_trade_krw"),
+        ("--paper-max-total-exposure-krw", "paper_max_total_exposure_krw"),
+        ("--paper-max-position-value-krw", "paper_max_position_value_krw"),
+        ("--paper-daily-loss-limit-krw", "paper_daily_loss_limit_krw"),
+        ("--paper-daily-loss-limit-pct", "paper_daily_loss_limit_pct"),
+    ]
+    for option, attr in mappings:
+        value = getattr(args, attr, None)
+        if value is not None:
+            command.extend([option, str(value)])
+
+
 def _auto_trade_date() -> str:
     return datetime.now(ZoneInfo("Asia/Seoul")).date().isoformat()
 
@@ -271,6 +286,12 @@ def main() -> None:
     parser.add_argument("--require-full-top-n-coverage", action="store_true")
     parser.add_argument("--zero-volume-bar-policy", default="strict_invalid", choices=["strict_invalid", "no_trade_context", "drop_no_trade"])
     parser.add_argument("--compare-zero-volume-policies", action="store_true")
+    parser.add_argument("--paper-initial-cash-krw", dest="paper_initial_cash_krw", type=float, default=None)
+    parser.add_argument("--paper-notional-per-trade-krw", dest="paper_notional_per_trade_krw", type=float, default=None)
+    parser.add_argument("--paper-max-total-exposure-krw", dest="paper_max_total_exposure_krw", type=float, default=None)
+    parser.add_argument("--paper-max-position-value-krw", dest="paper_max_position_value_krw", type=float, default=None)
+    parser.add_argument("--paper-daily-loss-limit-krw", dest="paper_daily_loss_limit_krw", type=float, default=None)
+    parser.add_argument("--paper-daily-loss-limit-pct", dest="paper_daily_loss_limit_pct", type=float, default=None)
     parser.add_argument("--rolling-windows", default="3,5,20,60")
     parser.add_argument("--output-dir", default="reports/daily_ops")
     parser.add_argument("--data-output-dir", default="data/intraday")
@@ -410,6 +431,7 @@ def main() -> None:
             daily_ops_args.append("--force-refresh")
         if args.dry_run:
             daily_ops_args.append("--dry-run")
+        _append_paper_account_args(daily_ops_args, args)
         payload["operation_order"].append("intraday_replay_before_daily_refresh")
         code, daily_payload, stderr_tail = _run_json_command(daily_ops_args)
         payload["intraday_ops_returncode"] = code

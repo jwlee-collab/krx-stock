@@ -19,6 +19,9 @@ class DayPositionTracker:
         entry_price: float,
         opened_at: datetime,
         entry_cost: float = 0.0,
+        entry_reference_price: float = 0.0,
+        entry_fee_krw: float | None = None,
+        entry_slippage_cost_krw: float = 0.0,
     ) -> DayPosition:
         key = (signal.strategy_id, signal.symbol)
         if key in self._open:
@@ -33,6 +36,9 @@ class DayPositionTracker:
             opened_at=opened_at,
             trade_date=opened_at.date().isoformat(),
             entry_cost=float(entry_cost),
+            entry_reference_price=float(entry_reference_price or entry_price),
+            entry_fee_krw=float(entry_fee_krw if entry_fee_krw is not None else entry_cost),
+            entry_slippage_cost_krw=float(entry_slippage_cost_krw),
             signal_reason_codes=list(signal.signal_reason_codes),
             raw_metrics=dict(signal.raw_metrics),
         )
@@ -53,25 +59,41 @@ class DayPositionTracker:
         closed_at: datetime,
         reason: str,
         exit_cost: float = 0.0,
+        exit_reference_price: float | None = None,
+        exit_fee_krw: float | None = None,
+        exit_tax_krw: float = 0.0,
+        exit_slippage_cost_krw: float = 0.0,
     ) -> DayTradeResult | None:
         key = (strategy_id, symbol)
         position = self._open.get(key)
         if position is None:
             return None
-        gross_pnl = (float(exit_price) - position.entry_price) * position.qty
-        total_costs = position.entry_cost + float(exit_cost)
+        exit_price = float(exit_price)
+        qty = float(position.qty)
+        reference_entry_price = float(position.entry_reference_price or position.entry_price)
+        reference_exit_price = float(exit_reference_price if exit_reference_price is not None else exit_price)
+        entry_fee = float(position.entry_fee_krw if position.entry_fee_krw else position.entry_cost)
+        exit_tax = float(exit_tax_krw)
+        exit_fee = float(exit_fee_krw if exit_fee_krw is not None else max(0.0, float(exit_cost) - exit_tax))
+        entry_slippage = float(position.entry_slippage_cost_krw)
+        exit_slippage = float(exit_slippage_cost_krw)
+        fees = entry_fee + exit_fee
+        tax = exit_tax
+        slippage_cost = entry_slippage + exit_slippage
+        total_costs = fees + tax + slippage_cost
+        gross_pnl = (reference_exit_price - reference_entry_price) * qty
         net_pnl = gross_pnl - total_costs
-        basis = position.entry_price * position.qty
+        basis = reference_entry_price * qty
         gross_return_pct = gross_pnl / basis if basis > 0.0 else 0.0
         net_return_pct = net_pnl / basis if basis > 0.0 else 0.0
         result = DayTradeResult(
             strategy_id=strategy_id,
             symbol=symbol,
-            qty=position.qty,
+            qty=qty,
             entry_time=position.opened_at,
             exit_time=closed_at,
             entry_price=position.entry_price,
-            exit_price=float(exit_price),
+            exit_price=exit_price,
             gross_pnl=gross_pnl,
             net_pnl=net_pnl,
             gross_return_pct=gross_return_pct,
@@ -79,6 +101,16 @@ class DayPositionTracker:
             costs=total_costs,
             exit_reason=reason,
             signal_reason_codes=list(position.signal_reason_codes),
+            entry_notional_krw=position.entry_price * qty,
+            exit_notional_krw=exit_price * qty,
+            fees_krw=fees,
+            tax_krw=tax,
+            slippage_cost_krw=slippage_cost,
+            entry_fee_krw=entry_fee,
+            exit_fee_krw=exit_fee,
+            exit_tax_krw=tax,
+            entry_slippage_cost_krw=entry_slippage,
+            exit_slippage_cost_krw=exit_slippage,
         )
         position.status = "CLOSED"
         self.closed_trades.append(result)

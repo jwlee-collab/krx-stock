@@ -18,6 +18,7 @@ from pipeline.day_trading.models import (
     IntradayContext,
     UniverseSelection,
 )
+from pipeline.day_trading.paper_account import PaperAccount
 from pipeline.day_trading.performance import CostModel, DayPerformanceAnalyzer
 from pipeline.day_trading.positions import DayPositionTracker
 from pipeline.day_trading.risk import DayRiskManager
@@ -46,6 +47,7 @@ __all__ = [
     "IntradayBar",
     "IntradayFilter",
     "IntradayMarketContext",
+    "PaperAccount",
     "StaticDayUniverseProvider",
     "UniverseSelection",
     "load_intraday_prices_csv",

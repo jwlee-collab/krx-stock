@@ -13,6 +13,7 @@ from pipeline.day_trading.engine import DayTradingEngine
 from pipeline.day_trading.filters import _drop_no_trade_bars, _is_no_trade_bar
 from pipeline.day_trading.logging import DayTradeLogger
 from pipeline.day_trading.models import IntradayBar
+from pipeline.day_trading.paper_account import PaperAccount
 from pipeline.day_trading.performance import CostModel, DayPerformanceAnalyzer
 from pipeline.day_trading.positions import DayPositionTracker
 from pipeline.day_trading.signals import DaySignalGenerator
@@ -234,6 +235,34 @@ def _parse_hhmm(value: str) -> time:
     return time(hour=int(hour), minute=int(minute))
 
 
+def _trade_details(trades: list[Any]) -> list[dict[str, Any]]:
+    details: list[dict[str, Any]] = []
+    for trade in trades:
+        details.append(
+            {
+                "strategy_id": trade.strategy_id,
+                "symbol": trade.symbol,
+                "entry_time": trade.entry_time.isoformat(),
+                "entry_price": trade.entry_price,
+                "quantity": int(trade.qty) if float(trade.qty).is_integer() else trade.qty,
+                "notional_krw": trade.entry_notional_krw,
+                "exit_time": trade.exit_time.isoformat(),
+                "exit_price": trade.exit_price,
+                "exit_reason": trade.exit_reason,
+                "gross_pnl_krw": trade.gross_pnl,
+                "net_pnl_krw": trade.net_pnl,
+                "gross_return_pct": trade.gross_return_pct,
+                "net_return_pct": trade.net_return_pct,
+                "fees_krw": trade.fees_krw,
+                "tax_krw": trade.tax_krw,
+                "slippage_cost_krw": trade.slippage_cost_krw,
+                "total_cost_krw": trade.costs,
+                "signal_reason_codes": list(trade.signal_reason_codes),
+            }
+        )
+    return details
+
+
 class ReplayUniverseProvider:
     def __init__(self, base_provider: DayUniverseProvider, candidate_overrides_by_date: dict[str, list[str]] | None = None):
         self.base_provider = base_provider
@@ -274,9 +303,10 @@ def run_day_backtest(
     bars_by_symbol = _apply_zero_volume_bar_policy_to_loaded_data(bars_by_symbol, cfg.zero_volume_bar_policy)
     tracker = DayPositionTracker()
     logger = DayTradeLogger()
-    initial = float(initial_equity if initial_equity is not None else cfg.initial_equity)
+    initial = float(initial_equity if initial_equity is not None else cfg.paper_initial_cash_krw)
     equity = initial
     cost_model = CostModel(cfg.commission_pct, cfg.transaction_tax_pct, cfg.slippage_pct)
+    paper_account = PaperAccount(cfg)
 
     timestamps_by_date: dict[str, list[datetime]] = defaultdict(list)
     for bars_by_timeframe in bars_by_symbol.values():
@@ -292,6 +322,7 @@ def run_day_backtest(
             position_tracker=tracker,
             logger=logger,
             cost_model=cost_model,
+            paper_account=paper_account,
         )
         day_start_equity = equity
         for ts in sorted(set(timestamps_by_date.get(trade_date, []))):
@@ -316,12 +347,15 @@ def run_day_backtest(
             equity = initial + sum(t.net_pnl for t in tracker.closed_trades)
 
     analyzer = DayPerformanceAnalyzer(initial_equity=initial, cost_model=cost_model)
+    paper_account_summary = paper_account.summary(tracker.closed_trades)
     return {
         "status": "ok",
         "trade_count": len(tracker.closed_trades),
         "trades": tracker.closed_trades,
+        "trade_details": _trade_details(tracker.closed_trades),
         "log_events": logger.events,
         "performance": analyzer.analyze(tracker.closed_trades, logger.events),
+        "paper_account": paper_account_summary,
         "zero_volume_policy_summary": _zero_volume_policy_summary(bars_by_symbol, cfg.zero_volume_bar_policy, events=logger.events),
     }
 
@@ -346,6 +380,7 @@ def run_day_replay_backtest(
     tracker = DayPositionTracker()
     logger = DayTradeLogger()
     cost_model = CostModel(cfg.commission_pct, cfg.transaction_tax_pct, cfg.slippage_pct)
+    paper_account = PaperAccount(cfg)
     context_builder = IntradayMarketContext(cfg, conn)
     signal_generator = DaySignalGenerator(cfg, context_builder=context_builder)
     engine = DayTradingEngine(
@@ -355,8 +390,9 @@ def run_day_replay_backtest(
         position_tracker=tracker,
         logger=logger,
         cost_model=cost_model,
+        paper_account=paper_account,
     )
-    initial = float(initial_equity if initial_equity is not None else cfg.initial_equity)
+    initial = float(initial_equity if initial_equity is not None else cfg.paper_initial_cash_krw)
     equity = initial
     all_dates = [
         str(r["d"])
@@ -495,6 +531,12 @@ def run_day_replay_backtest(
             "gross_return_sum": sum(t.gross_return_pct for t in day_trades),
             "net_return_sum": sum(t.net_return_pct for t in day_trades),
             "cost_impact": sum(t.gross_return_pct for t in day_trades) - sum(t.net_return_pct for t in day_trades),
+            "gross_pnl_krw": sum(t.gross_pnl for t in day_trades),
+            "net_pnl_krw": sum(t.net_pnl for t in day_trades),
+            "fees_krw": sum(t.fees_krw for t in day_trades),
+            "tax_krw": sum(t.tax_krw for t in day_trades),
+            "slippage_cost_krw": sum(t.slippage_cost_krw for t in day_trades),
+            "trade_details": _trade_details(day_trades),
             "top_rejection_reasons": dict(day_rejections.most_common(10)),
             "top_signal_zero_blocking_reasons": dict(day_rejections.most_common(5))
             if int(day_event_counts.get("SIGNAL_CREATED", 0)) == 0
@@ -506,6 +548,7 @@ def run_day_replay_backtest(
         }
 
     analyzer = DayPerformanceAnalyzer(initial_equity=initial, cost_model=cost_model)
+    paper_account_summary = paper_account.summary(tracker.closed_trades)
     event_counts = Counter(event.event_type for event in logger.events)
     exit_reason_counts = Counter(trade.exit_reason for trade in tracker.closed_trades)
     open_positions = tracker.get_open_positions(cfg.strategy_id)
@@ -605,6 +648,7 @@ def run_day_replay_backtest(
         "candidate_counts": candidate_counts,
         "score_dates": score_dates,
         "trades": tracker.closed_trades,
+        "trade_details": _trade_details(tracker.closed_trades),
         "trade_count": len(tracker.closed_trades),
         "log_events": logger.events,
         "event_counts": dict(event_counts),
@@ -636,6 +680,7 @@ def run_day_replay_backtest(
             },
         },
         "performance": analyzer.analyze(tracker.closed_trades, logger.events),
+        "paper_account": paper_account_summary,
         "lookahead_validation": replay_validation,
         "execution_assumption": "PAPER uses adverse slippage on entry/exit plus commission and transaction tax; no perfect fills assumed.",
     }

@@ -20,6 +20,14 @@ from pipeline.db import get_connection, init_db
 
 
 ZERO_VOLUME_POLICIES = ["strict_invalid", "no_trade_context", "drop_no_trade"]
+PAPER_ACCOUNT_ARG_NAMES = [
+    "paper_initial_cash_krw",
+    "paper_notional_per_trade_krw",
+    "paper_max_total_exposure_krw",
+    "paper_max_position_value_krw",
+    "paper_daily_loss_limit_krw",
+    "paper_daily_loss_limit_pct",
+]
 
 
 def _fail_json(message: str, **extra: object) -> None:
@@ -56,6 +64,14 @@ def _policy_metric_counts(replay: dict[str, object]) -> dict[str, int]:
     return counts
 
 
+def _paper_config_kwargs(args: argparse.Namespace) -> dict[str, float]:
+    return {
+        name: float(value)
+        for name in PAPER_ACCOUNT_ARG_NAMES
+        if (value := getattr(args, name, None)) is not None
+    }
+
+
 def _evaluate_gate(replay: dict[str, object], quality: dict[str, object]) -> dict[str, object]:
     lookahead = replay.get("lookahead_validation", {}) or {}
     audit = replay.get("session_audit", {}) or {}
@@ -81,8 +97,8 @@ def _build_policy_comparison_markdown(summary: dict[str, object]) -> str:
         "",
         "This report compares data-quality policies for KIS zero-volume bars. It is not a profitability claim.",
         "",
-        "| policy | signals | entries | exits | gross | net | cost | invalid_5m | invalid_15m | no_trade_5m | no_trade_15m | positive_bars | no_trade_bars | open_end | session_complete | promotion_stage |",
-        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |",
+        "| policy | signals | entries | exits | gross | net | cost | account_pnl_krw | account_return_pct | invalid_5m | invalid_15m | no_trade_5m | no_trade_15m | positive_bars | no_trade_bars | open_end | session_complete | promotion_stage |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |",
     ]
     for row in rows:
         lines.append(
@@ -96,6 +112,8 @@ def _build_policy_comparison_markdown(summary: dict[str, object]) -> str:
                     str(row.get("gross_return_sum", 0.0)),
                     str(row.get("net_return_sum", 0.0)),
                     str(row.get("cost_impact", 0.0)),
+                    str((row.get("paper_account") or {}).get("realized_pnl_krw", 0.0)),
+                    str((row.get("paper_account") or {}).get("daily_return_pct", 0.0)),
                     str(row.get("INVALID_5M_BAR", 0)),
                     str(row.get("INVALID_15M_BAR", 0)),
                     str(row.get("NO_TRADE_5M_BAR", 0)),
@@ -121,6 +139,7 @@ def _build_policy_comparison_markdown(summary: dict[str, object]) -> str:
                 f"### {row.get('policy')}",
                 f"- top_rejection_reasons: {row.get('top_rejection_reasons', {})}",
                 f"- zero_volume_policy_summary: {row.get('zero_volume_policy_summary', {})}",
+                f"- paper_account: {row.get('paper_account', {})}",
                 f"- vwap_available_count: {row.get('vwap_available_count', 0)}",
                 f"- liquidity_pass_count: {row.get('liquidity_pass_count', 0)}",
                 f"- breakout_pass_count: {row.get('breakout_pass_count', 0)}",
@@ -157,6 +176,8 @@ def _summarize_policy_result(policy: str, replay: dict[str, object], gate: dict[
         "session_complete": audit.get("session_complete"),
         "top_rejection_reasons": dict(list((reasons or {}).items())[:10]) if isinstance(reasons, dict) else {},
         "zero_volume_policy_summary": zero_summary,
+        "paper_account": replay.get("paper_account", {}),
+        "trade_details": replay.get("trade_details", []),
         "promotion_gate": gate,
         **metric_counts,
     }
@@ -174,6 +195,12 @@ def main() -> None:
     parser.add_argument("--score-date-override", default=None)
     parser.add_argument("--zero-volume-bar-policy", choices=ZERO_VOLUME_POLICIES, default="strict_invalid")
     parser.add_argument("--compare-zero-volume-policies", action="store_true", help="Run strict_invalid, no_trade_context, and drop_no_trade on the same replay range")
+    parser.add_argument("--paper-initial-cash-krw", dest="paper_initial_cash_krw", type=float, default=None)
+    parser.add_argument("--paper-notional-per-trade-krw", dest="paper_notional_per_trade_krw", type=float, default=None)
+    parser.add_argument("--paper-max-total-exposure-krw", dest="paper_max_total_exposure_krw", type=float, default=None)
+    parser.add_argument("--paper-max-position-value-krw", dest="paper_max_position_value_krw", type=float, default=None)
+    parser.add_argument("--paper-daily-loss-limit-krw", dest="paper_daily_loss_limit_krw", type=float, default=None)
+    parser.add_argument("--paper-daily-loss-limit-pct", dest="paper_daily_loss_limit_pct", type=float, default=None)
     parser.add_argument("--report-md", default=None)
     args = parser.parse_args()
 
@@ -213,6 +240,7 @@ def main() -> None:
                 allow_same_day_scores=bool(args.allow_same_day_scores),
                 score_date_override=args.score_date_override,
                 zero_volume_bar_policy=policy,
+                **_paper_config_kwargs(args),
             )
             replay = run_day_replay_backtest(conn, args.start_date, args.end_date, config=cfg)
             replay["data_availability"] = {
@@ -258,6 +286,7 @@ def main() -> None:
         allow_same_day_scores=bool(args.allow_same_day_scores),
         score_date_override=args.score_date_override,
         zero_volume_bar_policy=args.zero_volume_bar_policy,
+        **_paper_config_kwargs(args),
     )
     replay = run_day_replay_backtest(conn, args.start_date, args.end_date, config=cfg)
     replay["data_availability"] = {

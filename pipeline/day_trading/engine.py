@@ -8,6 +8,7 @@ from pipeline.day_trading.exits import DayExitManager
 from pipeline.day_trading.filters import _is_no_trade_bar, _sort_bars
 from pipeline.day_trading.logging import DayTradeLogger
 from pipeline.day_trading.models import IntradayBar
+from pipeline.day_trading.paper_account import PaperAccount
 from pipeline.day_trading.performance import CostModel
 from pipeline.day_trading.positions import DayPositionTracker
 from pipeline.day_trading.risk import DayRiskManager
@@ -25,6 +26,7 @@ class DayTradingEngine:
         exit_manager: DayExitManager | None = None,
         logger: DayTradeLogger | None = None,
         cost_model: CostModel | None = None,
+        paper_account: PaperAccount | None = None,
     ):
         self.config = config
         self.universe_provider = universe_provider
@@ -38,6 +40,7 @@ class DayTradingEngine:
             transaction_tax_pct=config.transaction_tax_pct,
             slippage_pct=config.slippage_pct,
         )
+        self.paper_account = paper_account or PaperAccount(config)
 
     def run_once(
         self,
@@ -161,10 +164,42 @@ class DayTradingEngine:
             if mode == "SIGNAL_ONLY":
                 continue
 
-            entry_price = self.cost_model.entry_fill_price(evaluation.signal.expected_entry_price)
-            qty = decision.notional / entry_price if entry_price > 0.0 else 0.0
-            entry_cost = self.cost_model.entry_cost(qty, entry_price)
-            position = self.position_tracker.open_position(evaluation.signal, qty, entry_price, current_time, entry_cost)
+            entry_reference_price = float(evaluation.signal.expected_entry_price)
+            entry_price = self.cost_model.entry_fill_price(entry_reference_price)
+            qty = int(float(decision.notional) // entry_price) if entry_price > 0.0 else 0
+            entry_fee = self.cost_model.entry_commission(qty, entry_price)
+            entry_slippage_cost = self.cost_model.entry_slippage_cost(qty, entry_reference_price, entry_price)
+            account_check = self.paper_account.validate_entry(
+                symbol=symbol,
+                strategy_id=cfg.strategy_id,
+                qty=qty,
+                entry_price=entry_price,
+                entry_fee_krw=entry_fee,
+                now=current_time,
+            )
+            if not account_check.approved:
+                self.logger.log_event(
+                    "RISK_REJECTED",
+                    strategy_id=cfg.strategy_id,
+                    mode=mode,
+                    symbol=symbol,
+                    created_at=current_time,
+                    reason_codes=[account_check.reason_code],
+                    raw_metrics=account_check.raw_metrics,
+                    message="DAY paper account rejected entry",
+                )
+                continue
+            position = self.position_tracker.open_position(
+                evaluation.signal,
+                qty,
+                entry_price,
+                current_time,
+                entry_fee,
+                entry_reference_price=entry_reference_price,
+                entry_fee_krw=entry_fee,
+                entry_slippage_cost_krw=entry_slippage_cost,
+            )
+            self.paper_account.record_entry(position)
             self.logger.log_paper_entry(position)
             pending_order_symbols.add(symbol)
             orders.append(
@@ -175,11 +210,14 @@ class DayTradingEngine:
                     "side": "BUY",
                     "qty": qty,
                     "price": entry_price,
-                    "cost": entry_cost,
+                    "cost": entry_fee,
+                    "entry_reference_price": entry_reference_price,
+                    "notional_krw": position.notional,
                     "reason": "DAY_ENTRY",
                 }
             )
 
+        self._mark_paper_account(intraday_data)
         summary = {
             "status": "ok",
             "candidate_count": len(candidates),
@@ -187,6 +225,7 @@ class DayTradingEngine:
             "orders": orders,
             "closed": closed,
             "open_positions": self.position_tracker.count_open(cfg.strategy_id),
+            "paper_account": self.paper_account.summary(self.position_tracker.closed_trades),
         }
         self.logger.log_daily_summary(cfg.strategy_id, mode, summary)
         return summary
@@ -230,18 +269,26 @@ class DayTradingEngine:
                     message="DAY exit signal generated",
                 )
                 continue
-            exit_price = self.cost_model.exit_fill_price(exit_signal.expected_exit_price)
-            exit_cost = self.cost_model.exit_cost(position.qty, exit_price)
+            exit_reference_price = float(exit_signal.expected_exit_price)
+            exit_price = self.cost_model.exit_fill_price(exit_reference_price)
+            exit_fee = self.cost_model.exit_commission(position.qty, exit_price)
+            exit_tax = self.cost_model.exit_tax(position.qty, exit_price)
+            exit_slippage_cost = self.cost_model.exit_slippage_cost(position.qty, exit_reference_price, exit_price)
             trade = self.position_tracker.close_position(
                 cfg.strategy_id,
                 position.symbol,
                 exit_price,
                 exit_signal.timestamp,
                 exit_signal.reason,
-                exit_cost=exit_cost,
+                exit_cost=exit_fee + exit_tax,
+                exit_reference_price=exit_reference_price,
+                exit_fee_krw=exit_fee,
+                exit_tax_krw=exit_tax,
+                exit_slippage_cost_krw=exit_slippage_cost,
             )
             if trade is None:
                 continue
+            self.paper_account.record_exit(trade)
             self.logger.log_paper_exit(trade)
             closed.append(
                 {
@@ -250,6 +297,18 @@ class DayTradingEngine:
                     "exit_reason": trade.exit_reason,
                     "exit_price": trade.exit_price,
                     "net_pnl": trade.net_pnl,
+                    "net_pnl_krw": trade.net_pnl,
+                    "fees_krw": trade.fees_krw,
+                    "tax_krw": trade.tax_krw,
+                    "slippage_cost_krw": trade.slippage_cost_krw,
                 }
             )
         return closed
+
+    def _mark_paper_account(self, intraday_data: dict[str, dict[str, list[IntradayBar]]]) -> None:
+        latest_price_by_symbol: dict[str, float] = {}
+        for symbol, bars_by_timeframe in intraday_data.items():
+            primary = _sort_bars(bars_by_timeframe.get(self.config.timeframe_primary, []))
+            if primary:
+                latest_price_by_symbol[symbol] = float(primary[-1].close)
+        self.paper_account.mark_to_market(self.position_tracker.get_open_positions(self.config.strategy_id), latest_price_by_symbol)

@@ -582,6 +582,38 @@ python3 scripts/run_day_replay_backtest.py \
   --report-md reports/day_replay_zero_volume_policy_compare_2026-05-11.md
 ```
 
+DAY PAPER account capital model:
+
+DAY replay의 `gross_return_sum`과 `net_return_sum`은 거래별 수익률 합계입니다. 실제 모의 계좌 기준 일일 수익률은 `Paper Account Summary`의 `daily_return_pct`를 사용하세요. PAPER replay는 주문/계좌 API를 호출하지 않고, 내부 장부에서만 현금, 노출, 수수료, 거래세, 슬리피지, 원화 손익을 계산합니다.
+
+기본값은 보수적인 검증용입니다.
+
+- `paper_initial_cash_krw`: 10,000,000
+- `paper_notional_per_trade_krw`: 1,500,000
+- `paper_max_position_value_krw`: 1,500,000
+- `paper_max_total_exposure_krw`: 4,000,000
+- `paper_max_open_positions`: DAY 기본 최대 포지션과 일관되게 제한
+- 현금 부족, 총 노출 초과, 일일 손실 한도 초과 시 PAPER 진입을 거절합니다.
+- 소수점 주식은 허용하지 않고 정수 수량만 사용합니다.
+
+예시:
+
+```bash
+python3 scripts/run_day_replay_backtest.py \
+  --db data/market_pipeline.db \
+  --start-date 2026-05-11 \
+  --end-date 2026-05-11 \
+  --enable-day-trading \
+  --market-symbol 069500 \
+  --max-universe-symbols 20 \
+  --zero-volume-bar-policy strict_invalid \
+  --paper-initial-cash-krw 10000000 \
+  --paper-notional-per-trade-krw 1000000 \
+  --paper-max-total-exposure-krw 3000000 \
+  --paper-max-position-value-krw 1000000 \
+  --report-md reports/day_replay_paper_account_2026-05-11.md
+```
+
 데이터 품질 검증:
 
 ```bash

@@ -20,11 +20,25 @@ class CostModel:
         return float(reference_price) * (1.0 - self.slippage_pct)
 
     def entry_cost(self, qty: float, entry_price: float) -> float:
-        return abs(float(qty) * float(entry_price)) * self.commission_pct
+        return self.entry_commission(qty, entry_price)
 
     def exit_cost(self, qty: float, exit_price: float) -> float:
-        notional = abs(float(qty) * float(exit_price))
-        return notional * (self.commission_pct + self.transaction_tax_pct)
+        return self.exit_commission(qty, exit_price) + self.exit_tax(qty, exit_price)
+
+    def entry_commission(self, qty: float, entry_price: float) -> float:
+        return abs(float(qty) * float(entry_price)) * self.commission_pct
+
+    def exit_commission(self, qty: float, exit_price: float) -> float:
+        return abs(float(qty) * float(exit_price)) * self.commission_pct
+
+    def exit_tax(self, qty: float, exit_price: float) -> float:
+        return abs(float(qty) * float(exit_price)) * self.transaction_tax_pct
+
+    def entry_slippage_cost(self, qty: float, reference_price: float, fill_price: float) -> float:
+        return max(0.0, (float(fill_price) - float(reference_price)) * abs(float(qty)))
+
+    def exit_slippage_cost(self, qty: float, reference_price: float, fill_price: float) -> float:
+        return max(0.0, (float(reference_price) - float(fill_price)) * abs(float(qty)))
 
     def round_trip_cost_pct(self) -> float:
         return (2.0 * self.commission_pct) + self.transaction_tax_pct + (2.0 * self.slippage_pct)
@@ -119,5 +133,11 @@ class DayPerformanceAnalyzer:
             "gross_return_sum": sum(gross_returns),
             "net_return_sum": sum(net_returns),
             "cost_impact": sum(gross_returns) - sum(net_returns),
+            "gross_pnl_krw": sum(t.gross_pnl for t in trades),
+            "net_pnl_krw": sum(t.net_pnl for t in trades),
+            "fees_krw": sum(getattr(t, "fees_krw", 0.0) for t in trades),
+            "tax_krw": sum(getattr(t, "tax_krw", 0.0) for t in trades),
+            "slippage_cost_krw": sum(getattr(t, "slippage_cost_krw", 0.0) for t in trades),
+            "total_cost_krw": sum(getattr(t, "costs", 0.0) for t in trades),
             "slippage_sensitivity": slippage_sensitivity,
         }

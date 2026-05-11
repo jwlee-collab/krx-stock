@@ -33,7 +33,8 @@ class DayRiskManager:
             return DayEntryDecision(False, "DUPLICATE_PENDING_ORDER")
         if tracker.has_open_position(cfg.strategy_id, signal.symbol):
             return DayEntryDecision(False, "DUPLICATE_DAY_POSITION")
-        if tracker.count_open(cfg.strategy_id) >= cfg.max_open_positions:
+        max_open_positions = min(int(cfg.max_open_positions), int(cfg.paper_max_open_positions))
+        if tracker.count_open(cfg.strategy_id) >= max_open_positions:
             return DayEntryDecision(False, "MAX_OPEN_POSITIONS")
         if tracker.count_entries(trade_date, cfg.strategy_id) >= cfg.max_trades_per_day:
             return DayEntryDecision(False, "MAX_TRADES_PER_DAY")
@@ -43,17 +44,25 @@ class DayRiskManager:
         daily_pnl = tracker.realized_pnl_for_date(trade_date, cfg.strategy_id)
         if day_start > 0.0 and daily_pnl / day_start <= -cfg.daily_loss_limit_pct:
             return DayEntryDecision(False, "DAILY_LOSS_LIMIT")
+        if daily_pnl <= -float(cfg.paper_daily_loss_limit_krw):
+            return DayEntryDecision(False, "PAPER_DAILY_LOSS_LIMIT_KRW")
+        if day_start > 0.0 and daily_pnl / day_start <= -float(cfg.paper_daily_loss_limit_pct):
+            return DayEntryDecision(False, "PAPER_DAILY_LOSS_LIMIT_PCT")
         if tracker.consecutive_losses(cfg.strategy_id) >= cfg.consecutive_loss_limit:
             return DayEntryDecision(False, "CONSECUTIVE_LOSS_LIMIT")
         if cfg.block_reentry_after_loss and tracker.had_loss_for_symbol_on_date(trade_date, cfg.strategy_id, signal.symbol):
             return DayEntryDecision(False, "LOSS_REENTRY_BLOCKED")
 
-        notional = float(cfg.notional_per_trade)
+        notional = min(float(cfg.paper_notional_per_trade_krw), float(cfg.paper_max_position_value_krw))
         projected_total = tracker.open_notional(cfg.strategy_id) + notional
         if equity_value > 0.0 and notional / equity_value > cfg.max_symbol_exposure_pct + 1e-12:
             return DayEntryDecision(False, "MAX_SYMBOL_EXPOSURE")
         if equity_value > 0.0 and projected_total / equity_value > cfg.max_total_exposure_pct + 1e-12:
             return DayEntryDecision(False, "MAX_TOTAL_EXPOSURE")
+        if cfg.paper_reject_if_exposure_exceeded and notional > float(cfg.paper_max_position_value_krw) + 1e-12:
+            return DayEntryDecision(False, "PAPER_MAX_POSITION_VALUE")
+        if cfg.paper_reject_if_exposure_exceeded and projected_total > float(cfg.paper_max_total_exposure_krw) + 1e-12:
+            return DayEntryDecision(False, "PAPER_EXPOSURE_EXCEEDED")
 
         return DayEntryDecision(
             True,
@@ -63,6 +72,10 @@ class DayRiskManager:
                 "trade_date": trade_date,
                 "open_positions": tracker.count_open(cfg.strategy_id),
                 "entries_today": tracker.count_entries(trade_date, cfg.strategy_id),
+                "paper_notional_per_trade_krw": notional,
+                "paper_max_position_value_krw": cfg.paper_max_position_value_krw,
+                "paper_max_total_exposure_krw": cfg.paper_max_total_exposure_krw,
                 "projected_total_exposure_pct": projected_total / equity_value if equity_value > 0.0 else None,
+                "projected_total_exposure_krw": projected_total,
             },
         )

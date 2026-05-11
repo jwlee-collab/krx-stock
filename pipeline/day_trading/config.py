@@ -32,6 +32,16 @@ class DayTradingConfig:
     notional_per_trade: float = 1_000_000.0
     initial_equity: float = 10_000_000.0
 
+    paper_initial_cash_krw: float = 10_000_000.0
+    paper_notional_per_trade_krw: float = 1_500_000.0
+    paper_max_position_value_krw: float = 1_500_000.0
+    paper_max_total_exposure_krw: float = 4_000_000.0
+    paper_max_open_positions: int = 2
+    paper_daily_loss_limit_krw: float = 200_000.0
+    paper_daily_loss_limit_pct: float = 0.020
+    paper_reject_if_cash_insufficient: bool = True
+    paper_reject_if_exposure_exceeded: bool = True
+
     force_exit_time: str = "15:10"
     stop_loss_pct: float = 0.012
     take_profit_pct: float = 0.024
@@ -106,6 +116,16 @@ class DayTradingConfig:
             raise ValueError("daily_loss_limit_pct must be > 0")
         if self.notional_per_trade <= 0.0 or self.initial_equity <= 0.0:
             raise ValueError("notional_per_trade and initial_equity must be > 0")
+        if self.paper_initial_cash_krw <= 0.0:
+            raise ValueError("paper_initial_cash_krw must be > 0")
+        if self.paper_notional_per_trade_krw <= 0.0:
+            raise ValueError("paper_notional_per_trade_krw must be > 0")
+        if self.paper_max_position_value_krw <= 0.0 or self.paper_max_total_exposure_krw <= 0.0:
+            raise ValueError("paper position and exposure limits must be > 0")
+        if self.paper_max_open_positions <= 0:
+            raise ValueError("paper_max_open_positions must be > 0")
+        if self.paper_daily_loss_limit_krw <= 0.0 or self.paper_daily_loss_limit_pct <= 0.0:
+            raise ValueError("paper daily loss limits must be > 0")
 
     @property
     def normalized_mode(self) -> str:

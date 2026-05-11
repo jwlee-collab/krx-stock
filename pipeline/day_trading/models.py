@@ -154,6 +154,9 @@ class DayPosition:
     highest_price: float = 0.0
     status: str = "OPEN"
     entry_cost: float = 0.0
+    entry_reference_price: float = 0.0
+    entry_fee_krw: float = 0.0
+    entry_slippage_cost_krw: float = 0.0
     signal_reason_codes: list[str] = field(default_factory=list)
     raw_metrics: dict[str, Any] = field(default_factory=dict)
 
@@ -192,6 +195,16 @@ class DayTradeResult:
     costs: float
     exit_reason: str
     signal_reason_codes: list[str]
+    entry_notional_krw: float = 0.0
+    exit_notional_krw: float = 0.0
+    fees_krw: float = 0.0
+    tax_krw: float = 0.0
+    slippage_cost_krw: float = 0.0
+    entry_fee_krw: float = 0.0
+    exit_fee_krw: float = 0.0
+    exit_tax_krw: float = 0.0
+    entry_slippage_cost_krw: float = 0.0
+    exit_slippage_cost_krw: float = 0.0
 
 
 @dataclass(frozen=True)

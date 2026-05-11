@@ -62,6 +62,11 @@ def main() -> None:
         max_open_positions=args.max_open_positions,
         notional_per_trade=args.notional_per_trade,
         initial_equity=args.initial_equity,
+        paper_initial_cash_krw=args.initial_equity,
+        paper_notional_per_trade_krw=args.notional_per_trade,
+        paper_max_position_value_krw=args.notional_per_trade,
+        paper_max_open_positions=args.max_open_positions,
+        paper_max_total_exposure_krw=args.initial_equity * 0.40,
         min_avg_trade_value=args.min_avg_trade_value,
         min_latest_trade_value=args.min_latest_trade_value,
         market_proxy_symbol=args.market_symbol,
@@ -97,8 +102,8 @@ def main() -> None:
         intraday_data=intraday_data,
         now=current_time,
         market_bars=market_bars,
-        equity=config.initial_equity,
-        day_start_equity=config.initial_equity,
+        equity=config.paper_initial_cash_krw,
+        day_start_equity=config.paper_initial_cash_krw,
     )
     print(json.dumps(summary, indent=2, ensure_ascii=False, default=str))
 

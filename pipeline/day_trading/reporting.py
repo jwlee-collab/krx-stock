@@ -33,6 +33,8 @@ def build_day_validation_markdown(
     coverage = replay_result.get("coverage_audit", {})
     invalid_bar_analysis = replay_result.get("invalid_bar_analysis", {})
     zero_policy = replay_result.get("zero_volume_policy_summary", {})
+    paper_account = replay_result.get("paper_account", {}) or {}
+    trade_details = replay_result.get("trade_details", []) or []
     lines = [
         f"# DAY Strategy Validation Report ({replay_result.get('start_date')} ~ {replay_result.get('end_date')})",
         "",
@@ -167,6 +169,62 @@ def build_day_validation_markdown(
     )
     lines.extend(
         [
+            "",
+            "## Paper Account Summary",
+            f"- initial_cash_krw: {paper_account.get('initial_cash_krw', 0.0)}",
+            f"- ending_cash_krw: {paper_account.get('ending_cash_krw', 0.0)}",
+            f"- ending_equity_krw: {paper_account.get('ending_equity_krw', 0.0)}",
+            f"- realized_pnl_krw: {paper_account.get('realized_pnl_krw', 0.0)}",
+            f"- unrealized_pnl_krw: {paper_account.get('unrealized_pnl_krw', 0.0)}",
+            f"- daily_return_pct: {paper_account.get('daily_return_pct', 0.0)}",
+            f"- total_trades: {paper_account.get('total_trades', perf.get('total_trades', 0))}",
+            f"- winning_trades: {paper_account.get('winning_trades', 0)}",
+            f"- losing_trades: {paper_account.get('losing_trades', 0)}",
+            f"- fees_krw: {paper_account.get('fees_krw', perf.get('fees_krw', 0.0))}",
+            f"- tax_krw: {paper_account.get('tax_krw', perf.get('tax_krw', 0.0))}",
+            f"- slippage_cost_krw: {paper_account.get('slippage_cost_krw', perf.get('slippage_cost_krw', 0.0))}",
+            f"- total_cost_krw: {paper_account.get('total_cost_krw', perf.get('total_cost_krw', 0.0))}",
+            f"- max_exposure_krw: {paper_account.get('max_exposure_krw', 0.0)}",
+            f"- exposure_limit_krw: {paper_account.get('exposure_limit_krw', 0.0)}",
+            f"- cash_rejection_count: {paper_account.get('cash_rejection_count', 0)}",
+            f"- exposure_rejection_count: {paper_account.get('exposure_rejection_count', 0)}",
+            f"- daily_loss_rejection_count: {paper_account.get('daily_loss_rejection_count', 0)}",
+            "",
+            "## Trade Details",
+        ]
+    )
+    if trade_details:
+        lines.append("| symbol | entry_time | entry_price | quantity | notional_krw | exit_time | exit_price | exit_reason | gross_pnl_krw | net_pnl_krw | gross_return_pct | net_return_pct | fees_krw | tax_krw | slippage_cost_krw | signal_reason_codes |")
+        lines.append("| --- | --- | ---: | ---: | ---: | --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |")
+        for trade in trade_details:
+            lines.append(
+                "| "
+                + " | ".join(
+                    [
+                        str(trade.get("symbol")),
+                        str(trade.get("entry_time")),
+                        str(trade.get("entry_price")),
+                        str(trade.get("quantity")),
+                        str(trade.get("notional_krw")),
+                        str(trade.get("exit_time")),
+                        str(trade.get("exit_price")),
+                        str(trade.get("exit_reason")),
+                        str(trade.get("gross_pnl_krw")),
+                        str(trade.get("net_pnl_krw")),
+                        str(trade.get("gross_return_pct")),
+                        str(trade.get("net_return_pct")),
+                        str(trade.get("fees_krw")),
+                        str(trade.get("tax_krw")),
+                        str(trade.get("slippage_cost_krw")),
+                        str(trade.get("signal_reason_codes", [])),
+                    ]
+                )
+                + " |"
+            )
+    else:
+        lines.append("- no closed PAPER trades")
+    lines.extend(
+        [
         "",
         "## Session Audit",
         f"- session_complete: {audit.get('session_complete')}",
@@ -194,11 +252,18 @@ def build_day_validation_markdown(
         f"- max_drawdown: {perf.get('max_drawdown', 0.0)}",
         f"- max_consecutive_losses: {perf.get('max_consecutive_losses', 0)}",
         f"- average_holding_minutes: {perf.get('average_holding_minutes', 0.0)}",
+        "- return_basis_note: gross_return_sum/net_return_sum are trade return aggregates; daily_return_pct is account-equity based.",
         f"- gross_return: {perf.get('gross_return_sum', 0.0)}",
         f"- net_return: {perf.get('net_return_sum', 0.0)}",
         f"- gross_return_sum: {perf.get('gross_return_sum', 0.0)}",
         f"- net_return_sum: {perf.get('net_return_sum', 0.0)}",
         f"- cost_impact: {perf.get('cost_impact', 0.0)}",
+        f"- gross_pnl_krw: {perf.get('gross_pnl_krw', 0.0)}",
+        f"- net_pnl_krw: {perf.get('net_pnl_krw', 0.0)}",
+        f"- fees_krw: {perf.get('fees_krw', 0.0)}",
+        f"- tax_krw: {perf.get('tax_krw', 0.0)}",
+        f"- slippage_cost_krw: {perf.get('slippage_cost_krw', 0.0)}",
+        f"- total_cost_krw: {perf.get('total_cost_krw', 0.0)}",
         f"- slippage_sensitivity: {perf.get('slippage_sensitivity', {})}",
         ]
     )

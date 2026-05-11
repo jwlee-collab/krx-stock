@@ -19,6 +19,7 @@ from pipeline.day_trading.data_quality import validate_intraday_prices  # noqa: 
 from pipeline.day_trading.reporting import build_day_validation_markdown, write_day_validation_report  # noqa: E402
 from pipeline.db import get_connection, init_db  # noqa: E402
 from scripts.run_day_replay_backtest import (  # noqa: E402
+    PAPER_ACCOUNT_ARG_NAMES,
     ZERO_VOLUME_POLICIES,
     _build_policy_comparison_markdown,
     _evaluate_gate,
@@ -38,6 +39,14 @@ def _parse_windows(raw: str) -> list[int]:
             continue
         windows.append(int(value))
     return sorted(dict.fromkeys(windows))
+
+
+def _paper_config_kwargs(args: argparse.Namespace) -> dict[str, float]:
+    return {
+        name: float(value)
+        for name in PAPER_ACCOUNT_ARG_NAMES
+        if (value := getattr(args, name, None)) is not None
+    }
 
 
 def _intraday_dates(conn, end_date: str) -> list[str]:
@@ -63,6 +72,7 @@ def _compact_replay_summary(replay: dict[str, Any], gate: dict[str, Any]) -> dic
     audit = replay.get("session_audit", {})
     rejection = replay.get("rejection_analysis", {}).get("overall_rejection_reasons", {})
     zero_policy = replay.get("zero_volume_policy_summary", {})
+    paper_account = replay.get("paper_account", {})
     return {
         "status": replay.get("status"),
         "signal_count": int(event_counts.get("SIGNAL_CREATED", 0)),
@@ -75,6 +85,7 @@ def _compact_replay_summary(replay: dict[str, Any], gate: dict[str, Any]) -> dic
         "profit_factor": perf.get("profit_factor", 0.0),
         "max_drawdown": perf.get("max_drawdown", 0.0),
         "average_trade_return": perf.get("expectancy_per_trade", 0.0),
+        "paper_account": paper_account,
         "top_rejection_reasons": dict(list(rejection.items())[:10]),
         "open_position_count_at_end": audit.get("open_position_count_at_end"),
         "session_complete": audit.get("session_complete"),
@@ -119,6 +130,7 @@ def _probe_session_status(
     trade_date: str,
     market_symbol: str,
     top_n: int,
+    paper_config: dict[str, float] | None,
     cache: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
     if trade_date in cache:
@@ -129,6 +141,7 @@ def _probe_session_status(
         market_proxy_symbol=market_symbol,
         max_universe_symbols=top_n,
         zero_volume_bar_policy="strict_invalid",
+        **(paper_config or {}),
     )
     replay = run_day_replay_backtest(conn, trade_date, trade_date, config=cfg)
     audit = replay.get("session_audit", {}) or {}
@@ -157,6 +170,7 @@ def _session_filter(
     market_symbol: str,
     top_n: int,
     include_partial_sessions: bool,
+    paper_config: dict[str, float] | None,
     cache: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
     statuses = {
@@ -165,6 +179,7 @@ def _session_filter(
             trade_date=trade_date,
             market_symbol=market_symbol,
             top_n=top_n,
+            paper_config=paper_config,
             cache=cache,
         )
         for trade_date in replayable_dates
@@ -277,6 +292,7 @@ def _run_window(
     output_dir: Path,
     dry_run: bool,
     session_cache: dict[str, dict[str, Any]],
+    paper_config: dict[str, float] | None,
 ) -> dict[str, Any]:
     available_dates = _intraday_dates(conn, end_date)
     selected_dates = available_dates[-window:]
@@ -295,6 +311,7 @@ def _run_window(
         market_symbol=market_symbol,
         top_n=top_n,
         include_partial_sessions=include_partial_sessions,
+        paper_config=paper_config,
         cache=session_cache,
     )
     replayable_dates = session_filter["included_replayable_dates"]
@@ -352,6 +369,7 @@ def _run_window(
                 market_proxy_symbol=market_symbol,
                 max_universe_symbols=top_n,
                 zero_volume_bar_policy=policy,
+                **(paper_config or {}),
             )
             replay = run_day_replay_backtest(conn, start_date, end_date, config=cfg, trade_dates=list(replayable_dates))
             quality = validate_intraday_prices(conn, start_date=start_date, end_date=end_date, market_proxy_symbol=market_symbol)
@@ -377,6 +395,7 @@ def _run_window(
         market_proxy_symbol=market_symbol,
         max_universe_symbols=top_n,
         zero_volume_bar_policy=zero_volume_policy,
+        **(paper_config or {}),
     )
     replay = run_day_replay_backtest(conn, start_date, end_date, config=cfg, trade_dates=list(replayable_dates))
     quality = validate_intraday_prices(conn, start_date=start_date, end_date=end_date, market_proxy_symbol=market_symbol)
@@ -406,6 +425,12 @@ def main() -> None:
     parser.add_argument("--top-n", type=int, default=20)
     parser.add_argument("--zero-volume-bar-policy", choices=ZERO_VOLUME_POLICIES, default="strict_invalid")
     parser.add_argument("--compare-zero-volume-policies", action="store_true")
+    parser.add_argument("--paper-initial-cash-krw", dest="paper_initial_cash_krw", type=float, default=None)
+    parser.add_argument("--paper-notional-per-trade-krw", dest="paper_notional_per_trade_krw", type=float, default=None)
+    parser.add_argument("--paper-max-total-exposure-krw", dest="paper_max_total_exposure_krw", type=float, default=None)
+    parser.add_argument("--paper-max-position-value-krw", dest="paper_max_position_value_krw", type=float, default=None)
+    parser.add_argument("--paper-daily-loss-limit-krw", dest="paper_daily_loss_limit_krw", type=float, default=None)
+    parser.add_argument("--paper-daily-loss-limit-pct", dest="paper_daily_loss_limit_pct", type=float, default=None)
     parser.set_defaults(include_partial_sessions=False)
     parser.add_argument("--include-partial-sessions", dest="include_partial_sessions", action="store_true", help="Include partial sessions for debugging only; profitability assessment remains invalid")
     parser.add_argument("--exclude-partial-sessions", dest="include_partial_sessions", action="store_false", help="Exclude partial sessions from rolling replay (default)")
@@ -437,6 +462,7 @@ def main() -> None:
         "windows": [],
     }
     session_cache: dict[str, dict[str, Any]] = {}
+    paper_config = _paper_config_kwargs(args)
     for window in payload["windows_requested"]:
         payload["windows"].append(
             _run_window(
@@ -452,6 +478,7 @@ def main() -> None:
                 output_dir=output_dir,
                 dry_run=bool(args.dry_run),
                 session_cache=session_cache,
+                paper_config=paper_config,
             )
         )
     conn.close()

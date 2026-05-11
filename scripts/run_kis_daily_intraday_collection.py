@@ -39,10 +39,26 @@ from scripts.run_day_replay_backtest import _build_policy_comparison_markdown, _
 from scripts.fetch_kis_intraday_prices import _collect_stock_symbol, _redact, _remap_symbol  # noqa: E402
 
 ZERO_VOLUME_POLICIES = ["strict_invalid", "no_trade_context", "drop_no_trade"]
+PAPER_ACCOUNT_ARG_NAMES = [
+    "paper_initial_cash_krw",
+    "paper_notional_per_trade_krw",
+    "paper_max_total_exposure_krw",
+    "paper_max_position_value_krw",
+    "paper_daily_loss_limit_krw",
+    "paper_daily_loss_limit_pct",
+]
 
 
 def _json_dump(payload: dict[str, Any], *, stream: Any = None) -> None:
     print(json.dumps(payload, ensure_ascii=False, indent=2, default=str), file=stream or sys.stdout)
+
+
+def _paper_config_kwargs(args: argparse.Namespace) -> dict[str, float]:
+    return {
+        name: float(value)
+        for name in PAPER_ACCOUNT_ARG_NAMES
+        if (value := getattr(args, name, None)) is not None
+    }
 
 
 def _fail(status_code: int, payload: dict[str, Any]) -> None:
@@ -482,6 +498,7 @@ def _run_replay_and_gate(conn, args: argparse.Namespace) -> dict[str, Any]:
         market_proxy_symbol=args.market_symbol,
         max_universe_symbols=replay_top_n,
         zero_volume_bar_policy=args.zero_volume_bar_policy,
+        **_paper_config_kwargs(args),
     )
     quality = validate_intraday_prices(
         conn,
@@ -558,6 +575,12 @@ def main() -> None:
     parser.add_argument("--require-full-top-n-coverage", action="store_true", help="Block replay unless every requested top-n candidate has intraday coverage")
     parser.add_argument("--zero-volume-bar-policy", choices=ZERO_VOLUME_POLICIES, default="strict_invalid")
     parser.add_argument("--compare-zero-volume-policies", action="store_true", help="Replay the collected day under all zero-volume policies")
+    parser.add_argument("--paper-initial-cash-krw", dest="paper_initial_cash_krw", type=float, default=None)
+    parser.add_argument("--paper-notional-per-trade-krw", dest="paper_notional_per_trade_krw", type=float, default=None)
+    parser.add_argument("--paper-max-total-exposure-krw", dest="paper_max_total_exposure_krw", type=float, default=None)
+    parser.add_argument("--paper-max-position-value-krw", dest="paper_max_position_value_krw", type=float, default=None)
+    parser.add_argument("--paper-daily-loss-limit-krw", dest="paper_daily_loss_limit_krw", type=float, default=None)
+    parser.add_argument("--paper-daily-loss-limit-pct", dest="paper_daily_loss_limit_pct", type=float, default=None)
     parser.add_argument("--env", choices=["paper", "real"], default=None)
     parser.add_argument("--env-file", default=".env")
     parser.add_argument("--input-hour", default="153000")
@@ -793,6 +816,8 @@ def main() -> None:
                     "event_counts": bundle["replay"].get("event_counts", {}),
                     "session_audit": bundle["replay"].get("session_audit", {}),
                     "performance": bundle["replay"].get("performance", {}),
+                    "paper_account": bundle["replay"].get("paper_account", {}),
+                    "trade_details": bundle["replay"].get("trade_details", []),
                     "rejection_analysis": bundle["replay"].get("rejection_analysis", {}),
                     "zero_volume_policy_summary": bundle["replay"].get("zero_volume_policy_summary", {}),
                     "promotion_gate": bundle["promotion_gate"],
@@ -826,6 +851,8 @@ def main() -> None:
                 "per_date_summary": replay_bundle["replay"].get("per_date_summary", {}),
                 "rejection_analysis": replay_bundle["replay"].get("rejection_analysis", {}),
                 "performance": replay_bundle["replay"].get("performance", {}),
+                "paper_account": replay_bundle["replay"].get("paper_account", {}),
+                "trade_details": replay_bundle["replay"].get("trade_details", []),
                 "coverage_audit": coverage_audit,
                 "invalid_bar_analysis": invalid_breakdown,
                 "zero_volume_policy_summary": replay_bundle["replay"].get("zero_volume_policy_summary", {}),

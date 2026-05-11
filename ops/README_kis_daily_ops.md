@@ -12,6 +12,7 @@ Safety rules:
 - Rolling replay excludes partial sessions by default.
 - Partial sessions are for smoke/debug only and must not be used for profitability assessment.
 - Daily and rolling reports are data-quality and replay-readiness checks, not profitability claims.
+- PAPER account accounting is internal only: no broker/account endpoint is called. Use `daily_return_pct` for account-equity return and keep it separate from trade-return aggregates.
 - The job should run after the close, e.g. after 15:45 KST. The template uses 16:10 KST.
 - End-of-day ops runs DAY replay first with `score_date < D`, then refreshes D daily prices/scores for D+1 readiness.
 - D post-close scores must never be used for D intraday replay.
@@ -28,6 +29,10 @@ Example manual run:
   --max-symbols 20 \
   --require-full-top-n-coverage \
   --zero-volume-bar-policy strict_invalid \
+  --paper-initial-cash-krw 10000000 \
+  --paper-notional-per-trade-krw 1000000 \
+  --paper-max-total-exposure-krw 3000000 \
+  --paper-max-position-value-krw 1000000 \
   --compare-zero-volume-policies \
   --exclude-partial-sessions \
   --max-score-staleness-days 3 \
