@@ -1,9 +1,23 @@
 __pycache__/
+.DS_Store
 *.pyc
 *.pyo
 *.pyd
 *.db
 *.sqlite
+.venv/
+/scripts/local/
 
 # Generated data
 /data/*.csv
+
+# Local generated reports
+/reports/
+/reports/*.md
+/reports/*.csv
+/reports/*.json
+.env
+.env.*
+.kis_token_cache*.json
+/data/.kis_token_cache*.json
+/data/intraday/

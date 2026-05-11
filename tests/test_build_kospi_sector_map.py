@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import json
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -38,7 +39,7 @@ class BuildKospiSectorMapTest(unittest.TestCase):
                 w.writerow({"symbol": "000660", "name": "SK하이닉스"})
 
             cmd = [
-                "python",
+                sys.executable,
                 "scripts/build_kospi_sector_map.py",
                 "--universe-file",
                 str(universe),

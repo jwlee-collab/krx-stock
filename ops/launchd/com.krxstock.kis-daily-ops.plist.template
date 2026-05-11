@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.krxstock.kis-daily-ops</string>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/jwlee/Projects/krx-stock</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/jwlee/Projects/krx-stock/.venv/bin/python</string>
+    <string>/Users/jwlee/Projects/krx-stock/scripts/run_kis_end_of_day_ops.py</string>
+    <string>--db</string>
+    <string>/Users/jwlee/Projects/krx-stock/data/market_pipeline.db</string>
+    <string>--auto-trade-date</string>
+    <string>--market-symbol</string>
+    <string>069500</string>
+    <string>--top-n</string>
+    <string>20</string>
+    <string>--max-symbols</string>
+    <string>20</string>
+    <string>--require-full-top-n-coverage</string>
+    <string>--zero-volume-bar-policy</string>
+    <string>strict_invalid</string>
+    <string>--compare-zero-volume-policies</string>
+    <string>--exclude-partial-sessions</string>
+    <string>--max-score-staleness-days</string>
+    <string>3</string>
+    <string>--refresh-daily-after-replay</string>
+    <string>--daily-prices-output</string>
+    <string>/Users/jwlee/Projects/krx-stock/data/public_daily_prices_eod.csv</string>
+    <string>--universe-csv</string>
+    <string>/Users/jwlee/Projects/krx-stock/data/krx_source_universe_500.csv</string>
+    <string>--rolling-windows</string>
+    <string>3,5,20,60</string>
+    <string>--env-file</string>
+    <string>/Users/jwlee/Projects/krx-stock/.env</string>
+    <string>--token-cache</string>
+    <string>/Users/jwlee/Projects/krx-stock/data/.kis_token_cache.json</string>
+  </array>
+
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>16</integer>
+    <key>Minute</key>
+    <integer>10</integer>
+  </dict>
+
+  <key>StandardOutPath</key>
+  <string>/Users/jwlee/Projects/krx-stock/reports/daily_ops/launchd_stdout.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>/Users/jwlee/Projects/krx-stock/reports/daily_ops/launchd_stderr.log</string>
+</dict>
+</plist>

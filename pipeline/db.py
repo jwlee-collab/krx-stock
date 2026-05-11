@@ -70,6 +70,119 @@ def init_db(conn: sqlite3.Connection) -> None:
             FOREIGN KEY (symbol, date) REFERENCES daily_prices(symbol, date)
         );
 
+        CREATE TABLE IF NOT EXISTS intraday_prices (
+            symbol TEXT NOT NULL,
+            timeframe TEXT NOT NULL,
+            timestamp TEXT NOT NULL,
+            date TEXT,
+            time TEXT,
+            open REAL NOT NULL,
+            high REAL NOT NULL,
+            low REAL NOT NULL,
+            close REAL NOT NULL,
+            volume REAL NOT NULL,
+            amount REAL,
+            source TEXT NOT NULL DEFAULT 'UNKNOWN',
+            created_at TEXT,
+            PRIMARY KEY (symbol, timeframe, timestamp)
+        );
+
+        CREATE TABLE IF NOT EXISTS intraday_trade_strength (
+            symbol TEXT NOT NULL,
+            timestamp TEXT NOT NULL,
+            source TEXT NOT NULL,
+            data_type TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            buy_strength REAL,
+            sell_strength REAL,
+            strength_score REAL,
+            PRIMARY KEY (symbol, timestamp, source, data_type)
+        );
+
+        CREATE TABLE IF NOT EXISTS intraday_investor_flows (
+            symbol TEXT NOT NULL,
+            timestamp TEXT NOT NULL,
+            source TEXT NOT NULL,
+            data_type TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            foreign_net_buy_amount REAL,
+            institution_net_buy_amount REAL,
+            foreign_net_buy_change_pct REAL,
+            institution_net_buy_change_pct REAL,
+            PRIMARY KEY (symbol, timestamp, source, data_type)
+        );
+
+        CREATE TABLE IF NOT EXISTS intraday_program_flows (
+            symbol TEXT NOT NULL,
+            timestamp TEXT NOT NULL,
+            source TEXT NOT NULL,
+            data_type TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            program_net_buy_amount REAL,
+            program_net_buy_change_pct REAL,
+            PRIMARY KEY (symbol, timestamp, source, data_type)
+        );
+
+        CREATE TABLE IF NOT EXISTS intraday_market_context (
+            symbol TEXT NOT NULL,
+            timestamp TEXT NOT NULL,
+            source TEXT NOT NULL,
+            data_type TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            market TEXT,
+            sector TEXT,
+            market_proxy_symbol TEXT,
+            sector_proxy_symbol TEXT,
+            market_return REAL,
+            sector_return REAL,
+            context_score REAL,
+            PRIMARY KEY (symbol, timestamp, source, data_type)
+        );
+
+        CREATE TABLE IF NOT EXISTS day_trade_logs (
+            event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL,
+            strategy_id TEXT NOT NULL,
+            mode TEXT NOT NULL,
+            symbol TEXT,
+            event_type TEXT NOT NULL,
+            reason_codes_json TEXT NOT NULL,
+            raw_metrics_json TEXT NOT NULL,
+            message TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS day_paper_positions (
+            strategy_id TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            trade_date TEXT NOT NULL,
+            status TEXT NOT NULL,
+            qty REAL NOT NULL,
+            entry_price REAL NOT NULL,
+            stop_loss_price REAL NOT NULL,
+            take_profit_price REAL NOT NULL,
+            opened_at TEXT NOT NULL,
+            closed_at TEXT,
+            exit_price REAL,
+            exit_reason TEXT,
+            realized_pnl REAL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (strategy_id, symbol, trade_date)
+        );
+
+        CREATE TABLE IF NOT EXISTS day_paper_orders (
+            order_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL,
+            strategy_id TEXT NOT NULL,
+            mode TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            side TEXT NOT NULL,
+            qty REAL NOT NULL,
+            price REAL NOT NULL,
+            reason TEXT NOT NULL,
+            cost REAL NOT NULL DEFAULT 0.0,
+            raw_json TEXT NOT NULL DEFAULT '{}'
+        );
+
         CREATE TABLE IF NOT EXISTS backtest_runs (
             run_id TEXT PRIMARY KEY,
             created_at TEXT NOT NULL,
@@ -405,6 +518,15 @@ def init_db(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_features_date ON daily_features(date);
         CREATE INDEX IF NOT EXISTS idx_scores_date_rank ON daily_scores(date, rank);
         CREATE INDEX IF NOT EXISTS idx_daily_universe_date_rank ON daily_universe(date, universe_mode, universe_rank);
+        CREATE INDEX IF NOT EXISTS idx_intraday_symbol_timeframe_timestamp ON intraday_prices(symbol, timeframe, timestamp);
+        CREATE INDEX IF NOT EXISTS idx_intraday_prices_date_timeframe ON intraday_prices(date, timeframe, symbol);
+        CREATE INDEX IF NOT EXISTS idx_intraday_trade_strength_symbol_time ON intraday_trade_strength(symbol, timestamp);
+        CREATE INDEX IF NOT EXISTS idx_intraday_investor_flows_symbol_time ON intraday_investor_flows(symbol, timestamp);
+        CREATE INDEX IF NOT EXISTS idx_intraday_program_flows_symbol_time ON intraday_program_flows(symbol, timestamp);
+        CREATE INDEX IF NOT EXISTS idx_intraday_market_context_symbol_time ON intraday_market_context(symbol, timestamp);
+        CREATE INDEX IF NOT EXISTS idx_day_trade_logs_strategy_time ON day_trade_logs(strategy_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_day_paper_positions_strategy_status ON day_paper_positions(strategy_id, status, trade_date);
+        CREATE INDEX IF NOT EXISTS idx_day_paper_orders_strategy_time ON day_paper_orders(strategy_id, created_at);
         CREATE INDEX IF NOT EXISTS idx_backtest_risk_events_run_date ON backtest_risk_events(run_id, date);
         CREATE INDEX IF NOT EXISTS idx_backtest_holdings_run_date ON backtest_holdings(run_id, date);
         CREATE INDEX IF NOT EXISTS idx_robustness_results_batch_score ON robustness_experiment_results(batch_id, robustness_score DESC);
@@ -498,6 +620,10 @@ def init_db(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "backtest_results", "max_single_position_weight", "max_single_position_weight REAL NOT NULL DEFAULT 0.0")
     _ensure_column(conn, "backtest_risk_events", "stop_loss_cooldown_until", "stop_loss_cooldown_until TEXT")
     _ensure_column(conn, "paper_positions", "entry_date", "entry_date TEXT")
+    _ensure_column(conn, "intraday_prices", "date", "date TEXT")
+    _ensure_column(conn, "intraday_prices", "time", "time TEXT")
+    _ensure_column(conn, "intraday_prices", "source", "source TEXT NOT NULL DEFAULT 'UNKNOWN'")
+    _ensure_column(conn, "intraday_prices", "created_at", "created_at TEXT")
     _ensure_column(conn, "daily_features", "momentum_60d", "momentum_60d REAL")
     _ensure_column(conn, "daily_features", "sma_20_gap", "sma_20_gap REAL")
     _ensure_column(conn, "daily_features", "sma_60_gap", "sma_60_gap REAL")
