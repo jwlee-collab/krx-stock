@@ -385,6 +385,7 @@ class DayDailyOpsTests(unittest.TestCase):
                     "--max-symbols",
                     "1",
                     "--refresh-daily-after-replay",
+                    "--force-refresh",
                     "--dry-run",
                     "--output-dir",
                     str(tmp / "reports"),

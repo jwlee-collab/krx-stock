@@ -5,11 +5,14 @@ __pycache__/
 *.pyd
 *.db
 *.sqlite
+*.sqlite3
 .venv/
 /scripts/local/
 
 # Generated data
 /data/*.csv
+/data/*.json
+/data/backups/
 
 # Local generated reports
 /reports/

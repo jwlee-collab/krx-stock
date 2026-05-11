@@ -281,6 +281,7 @@ def main() -> None:
     parser.add_argument("--skip-intraday-collection", action="store_true")
     parser.add_argument("--skip-replay", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--force-refresh", action="store_true", help="Pass scoped intraday force-refresh through to daily KIS ops")
     parser.set_defaults(include_partial_sessions=False)
     parser.add_argument("--include-partial-sessions", dest="include_partial_sessions", action="store_true", help="Include partial sessions in rolling replay for debugging only")
     parser.add_argument("--exclude-partial-sessions", dest="include_partial_sessions", action="store_false", help="Exclude partial sessions from rolling replay (default)")
@@ -405,6 +406,8 @@ def main() -> None:
             daily_ops_args.append("--skip-replay")
         if args.allow_stale_score:
             daily_ops_args.append("--allow-stale-score")
+        if args.force_refresh:
+            daily_ops_args.append("--force-refresh")
         if args.dry_run:
             daily_ops_args.append("--dry-run")
         payload["operation_order"].append("intraday_replay_before_daily_refresh")
