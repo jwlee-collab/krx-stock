@@ -504,6 +504,93 @@ def run_backtest(
     portfolio_peak_equity = float(initial_equity)
     dd_cooldown_until_idx = -1
 
+    def _load_close_by_symbol(snapshot_date: str) -> dict[str, float]:
+        current_close_rows = conn.execute(
+            "SELECT symbol, close FROM daily_prices WHERE date=?",
+            (snapshot_date,),
+        ).fetchall()
+        return {r["symbol"]: float(r["close"]) for r in current_close_rows if r["close"] is not None}
+
+    def _refresh_position_prices(close_by_symbol: dict[str, float], new_entries: set[str]) -> None:
+        for sym in sorted(current_holdings):
+            px = close_by_symbol.get(sym)
+            if px is None:
+                continue
+            if sym in new_entries or sym not in entry_price_by_symbol:
+                entry_price_by_symbol[sym] = px
+                peak_price_by_symbol[sym] = px
+            else:
+                peak_price_by_symbol[sym] = max(peak_price_by_symbol.get(sym, px), px)
+
+    def _apply_risk_exits(snapshot_date: str, day_index: int, close_by_symbol: dict[str, float]) -> set[str]:
+        nonlocal position_stop_loss_count, trailing_stop_count
+
+        risk_exits: set[str] = set()
+        for sym in sorted(current_holdings):
+            px = close_by_symbol.get(sym)
+            if px is None:
+                continue
+            entry_px = entry_price_by_symbol.get(sym, px)
+            if enable_position_stop_loss and entry_px > 0:
+                ret = (px - entry_px) / entry_px
+                if ret <= -float(position_stop_loss_pct):
+                    risk_exits.add(sym)
+                    position_stop_loss_count += 1
+                    cooldown_until_idx = day_index + int(max(0, stop_loss_cooldown_days))
+                    stop_loss_cooldown_until_idx_by_symbol[sym] = cooldown_until_idx
+                    cooldown_until_date = (
+                        all_dates[cooldown_until_idx] if cooldown_until_idx < len(all_dates) else all_dates[-1]
+                    )
+                    risk_event_rows.append(
+                        (
+                            run_id,
+                            snapshot_date,
+                            sym,
+                            "position_stop_loss",
+                            px,
+                            entry_px,
+                            ret,
+                            "sell_position",
+                            created_at,
+                            cooldown_until_date,
+                        )
+                    )
+                    continue
+            if enable_trailing_stop:
+                peak_px = peak_price_by_symbol.get(sym, px)
+                if peak_px > 0:
+                    dd_from_peak = (px - peak_px) / peak_px
+                    if dd_from_peak <= -float(trailing_stop_pct):
+                        risk_exits.add(sym)
+                        trailing_stop_count += 1
+                        risk_event_rows.append(
+                            (
+                                run_id,
+                                snapshot_date,
+                                sym,
+                                "trailing_stop",
+                                px,
+                                peak_px,
+                                dd_from_peak,
+                                "sell_position",
+                                created_at,
+                                None,
+                            )
+                        )
+
+        if risk_exits:
+            for sym in risk_exits:
+                entry_index_by_symbol.pop(sym, None)
+                entry_price_by_symbol.pop(sym, None)
+                peak_price_by_symbol.pop(sym, None)
+                holding_weight_by_symbol.pop(sym, None)
+            current_holdings.difference_update(risk_exits)
+            if current_holdings and stop_loss_cash_mode == "rebalance_remaining":
+                equal_weight = 1.0 / float(len(current_holdings))
+                for sym in current_holdings:
+                    holding_weight_by_symbol[sym] = equal_weight
+        return risk_exits
+
     def _append_holdings_snapshot(snapshot_date: str) -> None:
         if not current_holdings:
             return
@@ -735,76 +822,9 @@ def run_backtest(
             for sym in current_holdings:
                 holding_weight_by_symbol[sym] = equal_weight
 
-        current_close_rows = conn.execute(
-            "SELECT symbol, close FROM daily_prices WHERE date=?",
-            (d0,),
-        ).fetchall()
-        close_by_symbol = {r["symbol"]: float(r["close"]) for r in current_close_rows if r["close"] is not None}
-
-        for sym in sorted(current_holdings):
-            px = close_by_symbol.get(sym)
-            if px is None:
-                continue
-            if sym in new_entries_for_day or sym not in entry_price_by_symbol:
-                entry_price_by_symbol[sym] = px
-                peak_price_by_symbol[sym] = px
-            else:
-                peak_price_by_symbol[sym] = max(peak_price_by_symbol.get(sym, px), px)
-
-        risk_exits: set[str] = set()
-        for sym in sorted(current_holdings):
-            px = close_by_symbol.get(sym)
-            if px is None:
-                continue
-            entry_px = entry_price_by_symbol.get(sym, px)
-            if enable_position_stop_loss and entry_px > 0:
-                ret = (px - entry_px) / entry_px
-                if ret <= -float(position_stop_loss_pct):
-                    risk_exits.add(sym)
-                    position_stop_loss_count += 1
-                    cooldown_until_idx = i + int(max(0, stop_loss_cooldown_days))
-                    stop_loss_cooldown_until_idx_by_symbol[sym] = cooldown_until_idx
-                    cooldown_until_date = (
-                        all_dates[cooldown_until_idx] if cooldown_until_idx < len(all_dates) else all_dates[-1]
-                    )
-                    risk_event_rows.append(
-                        (
-                            run_id,
-                            d0,
-                            sym,
-                            "position_stop_loss",
-                            px,
-                            entry_px,
-                            ret,
-                            "sell_position",
-                            created_at,
-                            cooldown_until_date,
-                        )
-                    )
-                    continue
-            if enable_trailing_stop:
-                peak_px = peak_price_by_symbol.get(sym, px)
-                if peak_px > 0:
-                    dd_from_peak = (px - peak_px) / peak_px
-                    if dd_from_peak <= -float(trailing_stop_pct):
-                        risk_exits.add(sym)
-                        trailing_stop_count += 1
-                        risk_event_rows.append(
-                            (run_id, d0, sym, "trailing_stop", px, peak_px, dd_from_peak, "sell_position", created_at, None)
-                        )
-
-        if risk_exits:
-            for sym in risk_exits:
-                entry_index_by_symbol.pop(sym, None)
-                entry_price_by_symbol.pop(sym, None)
-                peak_price_by_symbol.pop(sym, None)
-                holding_weight_by_symbol.pop(sym, None)
-            current_holdings -= risk_exits
-            if current_holdings and stop_loss_cash_mode == "rebalance_remaining":
-                equal_weight = 1.0 / float(len(current_holdings))
-                for sym in current_holdings:
-                    holding_weight_by_symbol[sym] = equal_weight
-            removed_by_risk_for_day = set(risk_exits)
+        close_by_symbol = _load_close_by_symbol(d0)
+        _refresh_position_prices(close_by_symbol, new_entries_for_day)
+        removed_by_risk_for_day = _apply_risk_exits(d0, i, close_by_symbol)
 
         total_weight = sum(holding_weight_by_symbol.get(sym, 0.0) for sym in current_holdings)
         max_single_weight = max((holding_weight_by_symbol.get(sym, 0.0) for sym in current_holdings), default=0.0)
@@ -865,6 +885,10 @@ def run_backtest(
             risk_cut_cash_days += 1
 
     if all_dates:
+        final_date = all_dates[-1]
+        final_close_by_symbol = _load_close_by_symbol(final_date)
+        _refresh_position_prices(final_close_by_symbol, set())
+        _apply_risk_exits(final_date, len(all_dates) - 1, final_close_by_symbol)
         _append_holdings_snapshot(all_dates[-1])
 
     conn.executemany(
