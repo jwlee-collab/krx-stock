@@ -103,6 +103,15 @@ def _extract_table_block(html: str, section: str) -> str:
     return html[start: next_h2 if next_h2 >= 0 else len(html)]
 
 
+def _extract_markdown_section(markdown: str, section: str) -> str:
+    lines = markdown.splitlines()
+    start_idx = next((i for i, line in enumerate(lines) if line.startswith("## ") and section in line), None)
+    if start_idx is None:
+        return ""
+    end_idx = next((i for i, line in enumerate(lines[start_idx + 1 :], start_idx + 1) if line.startswith("## ")), len(lines))
+    return "\n".join(lines[start_idx:end_idx])
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--db", default=DEFAULT_DB)
@@ -267,6 +276,13 @@ def main() -> int:
         _fail("신규 후보 표에 요약 컬럼이 있으면 안 됩니다", failures)
     if "제안비중" in new_block:
         _fail("신규 후보 표에 제안비중 컬럼이 있으면 안 됩니다", failures)
+    holdings_block = _extract_table_block(html_text, "현재 보유")
+    for removed_col in ["판단", "요약"]:
+        if removed_col in holdings_block:
+            _fail(f"현재 보유 표에 {removed_col} 컬럼이 있으면 안 됩니다", failures)
+    for required_col in ["보유일수(d)", "전일 손익", "현재 손익", "변화"]:
+        if required_col not in holdings_block:
+            _fail(f"현재 보유 표 필수 컬럼 누락: {required_col}", failures)
 
     # 12) Markdown 검증
     md_text = md_path.read_text(encoding="utf-8")
@@ -275,6 +291,13 @@ def main() -> int:
     for section in REQUIRED_SECTIONS:
         if section not in md_text:
             _fail(f"Markdown 필수 섹션 누락: {section}", failures)
+    md_holdings_block = _extract_markdown_section(md_text, "현재 보유 종목")
+    for removed_col in ["판단", "요약"]:
+        if removed_col in md_holdings_block:
+            _fail(f"Markdown 현재 보유 표에 {removed_col} 컬럼이 있으면 안 됩니다", failures)
+    for required_col in ["보유일수(d)", "전일 손익", "현재 손익", "변화"]:
+        if required_col not in md_holdings_block:
+            _fail(f"Markdown 현재 보유 표 필수 컬럼 누락: {required_col}", failures)
 
     if failures:
         for f in failures:
