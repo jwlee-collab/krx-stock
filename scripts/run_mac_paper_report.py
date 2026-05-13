@@ -50,9 +50,25 @@ def _trading_days_between(conn: sqlite3.Connection, start_date: str, end_date: s
 
 def _fmt_weight_pct(v: Any) -> str: return f"{float(v) * 100:.1f}%" if v is not None else "데이터 부족"
 def _fmt_signed_pct(v: Any) -> str: return f"{float(v) * 100:+.1f}%" if v is not None else "데이터 부족"
+def _fmt_signed_pct_2(v: Any) -> str: return f"{float(v) * 100:+.2f}%" if v is not None else "데이터 부족"
+def _fmt_signed_pp(v: Any) -> str: return f"{float(v) * 100:+.2f}%p" if v is not None else "-"
 def _fmt_score_100(v: Any) -> str: return f"{float(v) * 100:.1f}" if v is not None else "데이터 부족"
 def _fmt_rank(v: Any) -> str: return f"{int(v)}위" if v is not None else "데이터 부족"
 def _symbol_name(m: dict[str,str], s: str) -> str: return m.get(s) or f"{s} (종목명 미확인)"
+def _fmt_holding_days(v: int | None) -> str: return f"{v}d" if v is not None else "데이터 부족"
+def _md_table(headers: list[str], rows: list[list[str]]) -> list[str]:
+    def esc(v: str) -> str:
+        return str(v).replace("|", "\\|").replace("\n", "<br/>")
+
+    if not rows:
+        return ["- 없음"]
+    out = [
+        "| " + " | ".join(esc(h) for h in headers) + " |",
+        "| " + " | ".join("---" for _ in headers) + " |",
+    ]
+    out.extend("| " + " | ".join(esc(c) for c in row) + " |" for row in rows)
+    return out
+
 def _html_multiline_cell(text: str, col: str, table_kind: str) -> str:
     raw = text or ""
     if col == "과열도":
@@ -88,12 +104,13 @@ def _html_table(headers: list[str], rows: list[list[str]], table_kind: str = "ge
         display_rows = [[r[i] for i in keep_idx] for r in rows]
     class_map = {
         "종목": "col-symbol short center", "종목명": "col-symbol short center", "판단": "short center", "비중": "short center",
-        "보유일수": "short center", "손익": "short center", "최근순위": "short center", "전체순위": "short center", "현재순위": "short center",
-        "점수": "short center", "과열도": "col-overheat center", "요약": "center", "주의": "col-warn long left", "이유": "col-reason long left",
+        "보유일수": "short center", "보유일수(d)": "short center", "손익": "short center", "전일 손익": "short center", "현재 손익": "short center",
+        "변화": "short center", "최근순위": "short center", "전체순위": "short center", "현재순위": "short center", "rank": "short center",
+        "점수": "short center", "score": "short center", "과열도": "col-overheat center", "요약": "center", "주의": "col-warn long left", "이유": "col-reason long left",
         "정리일": "short center", "정리사유": "center", "참고": "long left",
     }
     width_map = {
-        "holdings": {"종목": "10%", "종목명": "10%", "판단": "5%", "비중": "5%", "보유일수": "6%", "손익": "5%", "최근순위": "5%", "점수": "5%", "과열도": "8%", "요약": "6%", "주의": "17%", "이유": "28%"},
+        "holdings": {"종목": "24%", "비중": "10%", "보유일수(d)": "11%", "전일 손익": "12%", "현재 손익": "12%", "변화": "10%", "rank": "9%", "score": "12%"},
         "candidates": {"종목": "11%", "종목명": "11%", "전체순위": "8%", "현재순위": "8%", "점수": "8%", "과열도": "13%", "주의": "22%", "이유": "30%"},
     }
     colgroup = ""
@@ -136,6 +153,13 @@ def main() -> int:
     cur={str(r['symbol']) for r in holdings}; actual_exposure=sum(float(r['weight'] or 0) for r in holdings); actual_cash=1.0-actual_exposure
     cands=conn.execute("SELECT ds.symbol, ds.rank, ds.score, du.universe_rank FROM daily_scores ds JOIN daily_universe du ON du.date=ds.date AND du.symbol=ds.symbol WHERE ds.date=? ORDER BY ds.rank, ds.symbol",(latest_signal_date,)).fetchall(); eligible=[r for r in cands if str(r['symbol']) not in cur]
     prev={str(r[0]) for r in conn.execute("SELECT symbol FROM backtest_holdings WHERE run_id=? AND date=?",(selected.run_id,prev_date)).fetchall()} if prev_date else set()
+    prev_unrealized_by_symbol = {
+        str(r["symbol"]): r["unrealized_return"]
+        for r in conn.execute(
+            "SELECT symbol, unrealized_return FROM backtest_holdings WHERE run_id=? AND date=?",
+            (selected.run_id, prev_date),
+        ).fetchall()
+    } if prev_date else {}
     sold=sorted(prev-cur); added=sorted(cur-prev); kept=sorted(cur&prev)
     fmap={str(r['symbol']):r for r in conn.execute("SELECT symbol, ret_1d, ret_5d, range_pct, volume_z20 FROM daily_features WHERE date=?",(latest_signal_date,)).fetchall()}
     has_new_candidates = len(eligible) > 0
@@ -173,16 +197,23 @@ def main() -> int:
         md.append("- 없음")
     holdings_rows=[]; md.append("\n## 6. 현재 보유 종목")
     for r in holdings:
-        s=str(r['symbol']); td=_trading_days_between(conn,str(r['entry_date']),latest_holdings_date) if r['entry_date'] else None; days=f"{td}거래일" if td is not None else "데이터 부족"; oh=_overheat(fmap.get(s))
-        warnings=[]
-        if r['unrealized_return'] is not None and float(r['unrealized_return'])<=-0.08: warnings.append("손절 기준(-10%) 근접 주의")
-        if r['unrealized_return'] is not None and float(r['unrealized_return'])>=0.20: warnings.append("수익 구간이나 고정 익절 기준은 없음")
-        if r['rank'] is not None and int(r['rank'])>selected.keep_rank_threshold: warnings.append("keep 기준 밖으로 순위 약화")
-        if oh!="낮음": warnings.append("단기 과열 신호 확인 필요")
-        warn=" / ".join(warnings) if warnings else "특이 경고 없음"
-        reason=f"최근순위 {_fmt_rank(r['rank'])}, keep 기준 {selected.keep_rank_threshold}위, 보유일수 {days}, 손익 {_fmt_signed_pct(r['unrealized_return'])}, 과열도 {oh}를 종합해 보유 유지 판단."
-        md.append(f"- {_symbol_name(names,s)} | 비중 {_fmt_weight_pct(r['weight'])} | 보유일수 {days} | 손익 {_fmt_signed_pct(r['unrealized_return'])} | 최근순위 {_fmt_rank(r['rank'])} | 점수 {_fmt_score_100(r['score'])} | 과열도 {oh} | 주의 {warn} | 이유 {reason}")
-        holdings_rows.append([_symbol_name(names,s),"유지",_fmt_weight_pct(r['weight']),days,_fmt_signed_pct(r['unrealized_return']),_fmt_rank(r['rank']),_fmt_score_100(r['score']),oh,"기존보유",warn,reason])
+        s=str(r['symbol'])
+        td=_trading_days_between(conn,str(r['entry_date']),latest_holdings_date) if r['entry_date'] else None
+        prev_unrealized = prev_unrealized_by_symbol.get(s)
+        prev_pnl = _fmt_signed_pct_2(prev_unrealized) if s in prev_unrealized_by_symbol else "신규"
+        current_pnl = _fmt_signed_pct_2(r['unrealized_return'])
+        change = _fmt_signed_pp(float(r['unrealized_return']) - float(prev_unrealized)) if r['unrealized_return'] is not None and prev_unrealized is not None else "-"
+        holdings_rows.append([
+            _symbol_name(names,s),
+            _fmt_weight_pct(r['weight']),
+            _fmt_holding_days(td),
+            prev_pnl,
+            current_pnl,
+            change,
+            _fmt_rank(r['rank']),
+            _fmt_score_100(r['score']),
+        ])
+    md.extend(_md_table(['종목','비중','보유일수(d)','전일 손익','현재 손익','변화','rank','score'], holdings_rows))
     md.append("\n## 7. 신규 매수 후보")
     cand_rows=[]
     for r in eligible[:10]:
@@ -240,7 +271,7 @@ body{{font-family:sans-serif;margin:24px}}
 <h2>정리/매도 내역</h2>{_html_table(['종목','정리일','정리사유','손익','참고'],sold_rows)}
 <div>참고: 체결가 기반 확정손익이 아닐 수 있습니다.</div>
 <h2>신규 편입 내역</h2>{_html_table(['종목','편입일','비중','손익','현재순위'],added_rows)}
-<h2>현재 보유</h2>{_html_table(['종목','판단','비중','보유일수','손익','최근순위','점수','과열도','요약','주의','이유'],holdings_rows,'holdings')}
+<h2>현재 보유</h2>{_html_table(['종목','비중','보유일수(d)','전일 손익','현재 손익','변화','rank','score'],holdings_rows,'holdings')}
 <h2>신규 후보</h2>{_html_table(['종목','제안비중','전체순위','점수','과열도','요약','주의','이유'],cand_rows,'candidates')}
 <h2>참고용 후보</h2>{_html_table(['종목','전체순위','점수','과열도','참고'],ref_rows)}
 <h2>운영 규칙</h2><ul><li>새로 편입한 종목은 기본적으로 10거래일 보유</li><li>손실이 약 -10% 수준에 도달하면 최소보유기간 전이라도 매도 대상 가능</li><li>현재 고정 익절 기준 없음</li><li>수익 중인 종목은 점수 순위가 유지되는 동안 계속 보유</li><li>trailing stop 또는 부분 익절은 현재 운영 전략에 적용하지 않음</li><li>실전 주문/자동매매가 아니라 paper trading/report 운영용</li></ul>
