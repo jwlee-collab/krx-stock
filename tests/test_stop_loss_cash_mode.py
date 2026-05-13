@@ -127,19 +127,20 @@ class StopLossRiskManagementTest(unittest.TestCase):
 
     def test_weekly_stop_loss_runs_on_latest_non_rebalance_day(self) -> None:
         dates = ["2026-05-04", "2026-05-11", "2026-05-12", "2026-05-13"]
-        symbols = ["006340", "000001", "000002"]
+        symbols = ["006340", "000001", "000002", "000003", "000004"]
         prices: dict[tuple[str, str], float] = {}
         ranks: dict[tuple[str, str], int] = {}
         for d in dates:
             prices[("006340", d)] = 17_350.0
-            prices[("000001", d)] = 100.0
-            prices[("000002", d)] = 100.0
-            ranks[("000001", d)] = 1
-            ranks[("000002", d)] = 2
+            for idx, sym in enumerate(["000001", "000002", "000003", "000004"], start=1):
+                prices[(sym, d)] = 100.0
+                ranks[(sym, d)] = idx
             ranks[("006340", d)] = 5
         ranks[("006340", "2026-05-04")] = 1
         ranks[("000001", "2026-05-04")] = 2
         ranks[("000002", "2026-05-04")] = 3
+        ranks[("000003", "2026-05-04")] = 4
+        ranks[("000004", "2026-05-04")] = 5
         prices[("006340", "2026-05-11")] = 17_000.0
         prices[("006340", "2026-05-12")] = 16_000.0
         prices[("006340", "2026-05-13")] = 14_630.0
@@ -147,7 +148,7 @@ class StopLossRiskManagementTest(unittest.TestCase):
 
         run_id = run_backtest(
             self.conn,
-            top_n=2,
+            top_n=5,
             rebalance_frequency="weekly",
             min_holding_days=10,
             keep_rank_threshold=9,
@@ -184,11 +185,31 @@ class StopLossRiskManagementTest(unittest.TestCase):
         ).fetchone()
         self.assertEqual(int(stopped_holding[0]), 0)
 
+        remaining_count = self.conn.execute(
+            "SELECT COUNT(1) FROM backtest_holdings WHERE run_id=? AND date='2026-05-13'",
+            (run_id,),
+        ).fetchone()
+        self.assertEqual(int(remaining_count[0]), 4)
+
         remaining_weight = self.conn.execute(
             "SELECT SUM(weight) FROM backtest_holdings WHERE run_id=? AND date='2026-05-13'",
             (run_id,),
         ).fetchone()
-        self.assertAlmostEqual(float(remaining_weight[0]), 0.5, places=6)
+        self.assertAlmostEqual(float(remaining_weight[0]), 0.8, places=6)
+
+        final_result = self.conn.execute(
+            """
+            SELECT position_count, exposure, cash_weight, max_single_position_weight
+            FROM backtest_results
+            WHERE run_id=? AND date='2026-05-13'
+            """,
+            (run_id,),
+        ).fetchone()
+        self.assertIsNotNone(final_result)
+        self.assertEqual(int(final_result["position_count"]), 4)
+        self.assertAlmostEqual(float(final_result["exposure"]), 0.8, places=6)
+        self.assertAlmostEqual(float(final_result["cash_weight"]), 0.2, places=6)
+        self.assertAlmostEqual(float(final_result["max_single_position_weight"]), 0.2, places=6)
 
     def test_rebalance_day_stop_loss_overrides_min_holding_and_keep_rank(self) -> None:
         dates = ["2026-05-04", "2026-05-11", "2026-05-12"]

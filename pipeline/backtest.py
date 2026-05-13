@@ -591,6 +591,12 @@ def run_backtest(
                     holding_weight_by_symbol[sym] = equal_weight
         return risk_exits
 
+    def _current_position_stats() -> tuple[int, float, float, float]:
+        total_weight = sum(holding_weight_by_symbol.get(sym, 0.0) for sym in current_holdings)
+        max_single_weight = max((holding_weight_by_symbol.get(sym, 0.0) for sym in current_holdings), default=0.0)
+        cash_weight = max(0.0, 1.0 - total_weight)
+        return len(current_holdings), total_weight, cash_weight, max_single_weight
+
     def _append_holdings_snapshot(snapshot_date: str) -> None:
         if not current_holdings:
             return
@@ -826,12 +832,9 @@ def run_backtest(
         _refresh_position_prices(close_by_symbol, new_entries_for_day)
         removed_by_risk_for_day = _apply_risk_exits(d0, i, close_by_symbol)
 
-        total_weight = sum(holding_weight_by_symbol.get(sym, 0.0) for sym in current_holdings)
-        max_single_weight = max((holding_weight_by_symbol.get(sym, 0.0) for sym in current_holdings), default=0.0)
-        cash_weight = max(0.0, 1.0 - total_weight)
+        pos_count, total_weight, cash_weight, max_single_weight = _current_position_stats()
         if not current_holdings:
             daily_ret = 0.0
-            pos_count = 0
         else:
             _append_holdings_snapshot(d0)
             weighted_ret = 0.0
@@ -889,6 +892,19 @@ def run_backtest(
         final_close_by_symbol = _load_close_by_symbol(final_date)
         _refresh_position_prices(final_close_by_symbol, set())
         _apply_risk_exits(final_date, len(all_dates) - 1, final_close_by_symbol)
+        if result_rows and result_rows[-1][1] == final_date:
+            pos_count, total_weight, cash_weight, max_single_weight = _current_position_stats()
+            last_run_id, last_date, last_equity, last_daily_ret, *_ = result_rows[-1]
+            result_rows[-1] = (
+                last_run_id,
+                last_date,
+                last_equity,
+                last_daily_ret,
+                pos_count,
+                total_weight,
+                cash_weight,
+                max_single_weight,
+            )
         _append_holdings_snapshot(all_dates[-1])
 
     conn.executemany(
