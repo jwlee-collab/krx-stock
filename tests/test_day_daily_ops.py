@@ -53,6 +53,21 @@ def _insert_daily_score(conn: sqlite3.Connection, symbol: str, score_date: str, 
     )
 
 
+def _write_dummy_kis_env(path: Path) -> None:
+    path.write_text(
+        "\n".join(
+            [
+                "KIS_ENV=real",
+                "KIS_BASE_URL=https://openapi.koreainvestment.com:9443",
+                "KIS_APP_KEY=dummy-app-key",
+                "KIS_APP_SECRET=dummy-app-secret",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
 def _prepare_full_session_db(db_path: Path) -> None:
     _bootstrap(db_path)
     conn = sqlite3.connect(db_path)
@@ -438,6 +453,160 @@ class DayDailyOpsTests(unittest.TestCase):
             self.assertEqual(proc.returncode, 1)
             payload = json.loads(proc.stdout)
             self.assertIn(payload["blocked_reason"], {"NO_PRIOR_SCORE_DATE", "SAME_DAY_SCORE_FORBIDDEN"})
+
+    def test_eod_ops_weekend_auto_trade_date_blocks_actual_collection(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            db_path = tmp / "market.sqlite"
+            env_path = tmp / ".env"
+            _write_dummy_kis_env(env_path)
+            _bootstrap(db_path)
+            conn = sqlite3.connect(db_path)
+            _insert_daily_score(conn, "005930", "2026-05-15")
+            conn.commit()
+            conn.close()
+            proc = _run(
+                [
+                    "scripts/run_kis_end_of_day_ops.py",
+                    "--db",
+                    str(db_path),
+                    "--auto-trade-date",
+                    "--today-override",
+                    "2026-05-16",
+                    "--market-symbol",
+                    "999999",
+                    "--top-n",
+                    "1",
+                    "--max-symbols",
+                    "1",
+                    "--env-file",
+                    str(env_path),
+                    "--output-dir",
+                    str(tmp / "reports"),
+                    "--data-output-dir",
+                    str(tmp / "data"),
+                ]
+            )
+            self.assertEqual(proc.returncode, 1)
+            payload = json.loads(proc.stdout)
+            self.assertEqual(payload["blocked_reason"], "WEEKEND_NON_TRADING_DAY")
+            self.assertTrue(payload["is_weekend"])
+            self.assertFalse(payload["is_likely_trading_day"])
+            self.assertIn("weekends", " ".join(payload["next_actions"]))
+
+    def test_eod_ops_weekend_dry_run_reports_stale_score_next_actions(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            db_path = tmp / "market.sqlite"
+            _bootstrap(db_path)
+            conn = sqlite3.connect(db_path)
+            _insert_daily_score(conn, "005930", "2026-05-11")
+            conn.commit()
+            conn.close()
+            proc = _run(
+                [
+                    "scripts/run_kis_end_of_day_ops.py",
+                    "--db",
+                    str(db_path),
+                    "--auto-trade-date",
+                    "--today-override",
+                    "2026-05-16",
+                    "--market-symbol",
+                    "999999",
+                    "--top-n",
+                    "1",
+                    "--max-symbols",
+                    "1",
+                    "--dry-run",
+                    "--max-score-staleness-days",
+                    "3",
+                    "--output-dir",
+                    str(tmp / "reports"),
+                    "--data-output-dir",
+                    str(tmp / "data"),
+                ]
+            )
+            self.assertEqual(proc.returncode, 1)
+            payload = json.loads(proc.stdout)
+            self.assertEqual(payload["blocked_reason"], "STALE_SCORE_DATE")
+            self.assertTrue(payload["is_weekend"])
+            self.assertEqual(payload["latest_score_date"], "2026-05-11")
+            self.assertEqual(payload["requested_trade_date"], "2026-05-16")
+            self.assertEqual(payload["score_staleness_days"], 5)
+            self.assertEqual(payload["max_score_staleness_days"], 3)
+            self.assertEqual(payload["freshness_blocked_reason"], "STALE_SCORE_DATE")
+            self.assertGreaterEqual(len(payload["recommended_next_actions"]), 3)
+            status = json.loads((tmp / "reports" / "day_eod_ops_status.json").read_text(encoding="utf-8"))
+            self.assertTrue(status["is_weekend"])
+            self.assertEqual(status["freshness_blocked_reason"], "STALE_SCORE_DATE")
+
+    def test_eod_ops_explicit_historical_trade_date_dry_run_avoids_weekend_auto_issue(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            db_path = tmp / "market.sqlite"
+            _bootstrap(db_path)
+            conn = sqlite3.connect(db_path)
+            _insert_daily_score(conn, "005930", "2026-05-08")
+            conn.commit()
+            conn.close()
+            proc = _run(
+                [
+                    "scripts/run_kis_end_of_day_ops.py",
+                    "--db",
+                    str(db_path),
+                    "--trade-date",
+                    "2026-05-11",
+                    "--market-symbol",
+                    "999999",
+                    "--top-n",
+                    "1",
+                    "--max-symbols",
+                    "1",
+                    "--dry-run",
+                    "--skip-daily-refresh",
+                    "--output-dir",
+                    str(tmp / "reports"),
+                    "--data-output-dir",
+                    str(tmp / "data"),
+                ]
+            )
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            payload = json.loads(proc.stdout)
+            self.assertFalse(payload["is_weekend"])
+            self.assertEqual(payload["auto_trade_date_source"], "EXPLICIT_TRADE_DATE")
+            self.assertEqual(payload["score_date_used_for_replay"], "2026-05-08")
+
+    def test_eod_ops_catch_up_daily_scores_dry_run_skips_intraday_collection(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            db_path = tmp / "market.sqlite"
+            _bootstrap(db_path)
+            proc = _run(
+                [
+                    "scripts/run_kis_end_of_day_ops.py",
+                    "--db",
+                    str(db_path),
+                    "--trade-date",
+                    "2026-05-16",
+                    "--refresh-daily-only",
+                    "--catch-up-daily-scores",
+                    "--daily-refresh-start-date",
+                    "2026-05-12",
+                    "--daily-refresh-end-date",
+                    "2026-05-16",
+                    "--dry-run",
+                    "--output-dir",
+                    str(tmp / "reports"),
+                    "--data-output-dir",
+                    str(tmp / "data"),
+                ]
+            )
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            payload = json.loads(proc.stdout)
+            self.assertEqual(payload["status"], "dry_run")
+            self.assertEqual(payload["intraday_ops"]["status"], "skipped")
+            self.assertEqual(payload["daily_refresh"]["status"], "dry_run")
+            self.assertEqual(payload["daily_refresh"]["plan"]["weekday_dates"], ["2026-05-12", "2026-05-13", "2026-05-14", "2026-05-15"])
 
     def test_score_ready_for_next_trade_date_after_generated_score(self) -> None:
         with tempfile.TemporaryDirectory() as td:

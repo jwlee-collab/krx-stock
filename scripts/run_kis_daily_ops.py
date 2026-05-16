@@ -59,8 +59,49 @@ def _append_paper_account_args(command: list[str], args: argparse.Namespace) -> 
             command.extend([option, str(value)])
 
 
-def _auto_trade_date() -> str:
+def _auto_trade_date(today_override: str | None = None) -> str:
+    if today_override:
+        return today_override
     return datetime.now(ZoneInfo("Asia/Seoul")).date().isoformat()
+
+
+def _is_weekend(trade_date: str) -> bool:
+    return datetime.fromisoformat(trade_date).date().weekday() >= 5
+
+
+def _trade_date_metadata(trade_date: str, *, auto_trade_date: bool) -> dict[str, Any]:
+    is_weekend = _is_weekend(trade_date)
+    return {
+        "requested_trade_date": trade_date,
+        "is_weekend": is_weekend,
+        "is_likely_trading_day": not is_weekend,
+        "auto_trade_date_source": "KST_TODAY" if auto_trade_date else "EXPLICIT_TRADE_DATE",
+    }
+
+
+def _latest_known_dates(conn, market_symbol: str) -> dict[str, Any]:
+    latest_score = conn.execute("SELECT MAX(date) AS d FROM daily_scores").fetchone()
+    latest_daily_price = conn.execute("SELECT MAX(date) AS d FROM daily_prices").fetchone()
+    latest_intraday = conn.execute("SELECT MAX(date) AS d FROM intraday_prices").fetchone()
+    latest_market_full = conn.execute(
+        """
+        SELECT date
+        FROM intraday_prices
+        WHERE symbol=? AND timeframe='5m'
+        GROUP BY date
+        HAVING COUNT(*) >= 70
+        ORDER BY date DESC
+        LIMIT 1
+        """,
+        (market_symbol,),
+    ).fetchone()
+    return {
+        "latest_score_date": latest_score["d"] if latest_score else None,
+        "latest_known_score_date": latest_score["d"] if latest_score else None,
+        "latest_known_daily_price_date": latest_daily_price["d"] if latest_daily_price else None,
+        "latest_known_intraday_date": latest_intraday["d"] if latest_intraday else None,
+        "latest_complete_replay_date": latest_market_full["date"] if latest_market_full else None,
+    }
 
 
 def _hhmm_to_minutes(value: str) -> int:
@@ -141,9 +182,16 @@ def _next_actions_for_blocked_reason(reason: str | None) -> list[str]:
         ]
     if reason == "STALE_SCORE_DATE":
         return [
-            "Fetch or load the latest daily_prices before the trade_date, e.g. scripts/fetch_public_daily_prices.py or an approved daily_prices CSV.",
-            "Regenerate daily_features and daily_scores through the SWING pipeline.",
-            "Re-run daily ops, or use --allow-stale-score only for explicit diagnostics.",
+            "Fetch or load the latest daily_prices before the trade_date.",
+            "Regenerate SWING daily_features and daily_scores.",
+            "Run the EOD ops after the next market close, or use --trade-date YYYY-MM-DD for historical validation.",
+            "Use --allow-stale-score only for explicit diagnostics; do not treat it as an operational validation.",
+        ]
+    if reason in {"NON_TRADING_DAY", "WEEKEND_NON_TRADING_DAY"}:
+        return [
+            "Do not run actual KIS intraday collection on weekends or holidays.",
+            "Run again after the next market close, or pass --trade-date YYYY-MM-DD for an explicit historical dry-run.",
+            "If score freshness is stale, refresh daily_prices and regenerate SWING daily_scores before the next trading-day run.",
         ]
     if reason == "EMPTY_CANDIDATES":
         return [
@@ -205,6 +253,15 @@ def _write_status_files(output_dir: Path, payload: dict[str, Any]) -> dict[str, 
         "last_run_at": payload.get("run_at"),
         "last_trade_date": payload.get("trade_date"),
         "trade_date": payload.get("trade_date"),
+        "requested_trade_date": payload.get("requested_trade_date"),
+        "is_weekend": payload.get("is_weekend"),
+        "is_likely_trading_day": payload.get("is_likely_trading_day"),
+        "auto_trade_date_source": payload.get("auto_trade_date_source"),
+        "latest_score_date": payload.get("latest_score_date"),
+        "latest_known_score_date": payload.get("latest_known_score_date"),
+        "latest_known_daily_price_date": payload.get("latest_known_daily_price_date"),
+        "latest_known_intraday_date": payload.get("latest_known_intraday_date"),
+        "latest_complete_replay_date": payload.get("latest_complete_replay_date"),
         "replay_trade_date": payload.get("trade_date"),
         "score_date_used": score_check.get("score_date"),
         "score_date_used_for_replay": score_check.get("score_date"),
@@ -221,6 +278,10 @@ def _write_status_files(output_dir: Path, payload: dict[str, Any]) -> dict[str, 
         "score_staleness_days_before_refresh": score_check.get("score_staleness_days"),
         "score_staleness_days_after_refresh": None,
         "daily_refresh_blocked_reason": None,
+        "freshness_blocked_reason": payload.get("freshness_blocked_reason"),
+        "recommended_next_actions": payload.get("recommended_next_actions", []),
+        "next_action_summary": "; ".join(payload.get("next_actions", []) or payload.get("recommended_next_actions", [])),
+        "stale_score_resolution_hint": "Refresh daily_prices and regenerate SWING daily_scores before the next trading-day run." if payload.get("freshness_blocked_reason") == "STALE_SCORE_DATE" else None,
         "collected_symbols": payload.get("collection", {}).get("collection_plan", {}).get("candidate_symbols", []),
         "market_symbol": payload.get("market_symbol"),
         "rows_inserted": payload.get("collection", {}).get("db_load", {}).get("inserted_or_updated_rows", 0),
@@ -244,6 +305,13 @@ def _write_status_files(output_dir: Path, payload: dict[str, Any]) -> dict[str, 
         f"# DAY Daily Ops Status ({status['last_trade_date']})",
         "",
         f"- last_run_at: {status['last_run_at']}",
+        f"- requested_trade_date: {status['requested_trade_date']}",
+        f"- is_weekend: {status['is_weekend']}",
+        f"- is_likely_trading_day: {status['is_likely_trading_day']}",
+        f"- auto_trade_date_source: {status['auto_trade_date_source']}",
+        f"- latest_known_score_date: {status['latest_known_score_date']}",
+        f"- latest_known_intraday_date: {status['latest_known_intraday_date']}",
+        f"- latest_complete_replay_date: {status['latest_complete_replay_date']}",
         f"- score_date_used: {status['score_date_used']}",
         f"- score_date_used_for_replay: {status['score_date_used_for_replay']}",
         f"- replay_trade_date: {status['replay_trade_date']}",
@@ -273,7 +341,11 @@ def _write_status_files(output_dir: Path, payload: dict[str, Any]) -> dict[str, 
         f"- next_required_complete_days_for_3day_smoke: {status['next_required_complete_days_for_3day_smoke']}",
         f"- next_required_complete_days_for_20day_analysis: {status['next_required_complete_days_for_20day_analysis']}",
         f"- blocked_reason: {status['blocked_reason']}",
+        f"- freshness_blocked_reason: {status['freshness_blocked_reason']}",
+        f"- next_action_summary: {status['next_action_summary']}",
+        f"- stale_score_resolution_hint: {status['stale_score_resolution_hint']}",
         f"- next_actions: {status['next_actions']}",
+        f"- recommended_next_actions: {status['recommended_next_actions']}",
         "",
         "This status file is operational metadata and is not a profitability claim.",
     ]
@@ -318,6 +390,7 @@ def main() -> None:
     parser.add_argument("--db", default="data/market_pipeline.db")
     parser.add_argument("--trade-date", default=None)
     parser.add_argument("--auto-trade-date", action="store_true")
+    parser.add_argument("--today-override", default=None, help=argparse.SUPPRESS)
     parser.add_argument("--market-symbol", default="069500")
     parser.add_argument("--top-n", type=int, default=20)
     parser.add_argument("--max-symbols", type=int, default=20)
@@ -350,7 +423,7 @@ def main() -> None:
     parser.add_argument("--allow-partial-session-collection", action="store_true")
     args = parser.parse_args()
 
-    trade_date = args.trade_date or (_auto_trade_date() if args.auto_trade_date else None)
+    trade_date = args.trade_date or (_auto_trade_date(args.today_override) if args.auto_trade_date else None)
     output_dir = Path(args.output_dir)
     data_output_dir = Path(args.data_output_dir)
     payload: dict[str, Any] = {
@@ -369,6 +442,8 @@ def main() -> None:
         "include_partial_sessions": bool(args.include_partial_sessions),
         "dry_run": bool(args.dry_run),
     }
+    if trade_date:
+        payload.update(_trade_date_metadata(trade_date, auto_trade_date=bool(args.auto_trade_date)))
     if not trade_date:
         payload.update({"status": "blocked", "blocked_reason": "TRADE_DATE_REQUIRED", "next_actions": ["Pass --trade-date YYYY-MM-DD or --auto-trade-date."]})
         output_paths = _write_status_files(output_dir, payload)
@@ -390,6 +465,7 @@ def main() -> None:
 
     conn = get_connection(db_path)
     init_db(conn)
+    payload.update(_latest_known_dates(conn, args.market_symbol))
     score_check = _score_date_check(
         conn,
         trade_date=trade_date,
@@ -400,13 +476,38 @@ def main() -> None:
     )
     conn.close()
     payload["score_date_check"] = score_check
-    if score_check["blocked_reasons"]:
-        blocked_reason = _primary_blocked_reason(score_check["blocked_reasons"])
-        payload.update({"status": "blocked", "blocked_reason": blocked_reason, "next_actions": _next_actions_for_blocked_reason(blocked_reason)})
+    payload["latest_score_date"] = payload.get("latest_score_date")
+    payload["score_staleness_days"] = score_check.get("score_staleness_days")
+    payload["freshness_blocked_reason"] = "STALE_SCORE_DATE" if score_check.get("stale_score_blocked") else None
+    payload["recommended_next_actions"] = _next_actions_for_blocked_reason("STALE_SCORE_DATE") if score_check.get("stale_score_blocked") else []
+    now_kst = datetime.now(ZoneInfo("Asia/Seoul"))
+    if not args.dry_run and _is_weekend(trade_date):
+        payload.update(
+            {
+                "status": "blocked",
+                "blocked_reason": "WEEKEND_NON_TRADING_DAY",
+                "next_actions": _next_actions_for_blocked_reason("WEEKEND_NON_TRADING_DAY"),
+                "recommended_next_actions": _next_actions_for_blocked_reason("WEEKEND_NON_TRADING_DAY"),
+                "current_kst": now_kst.isoformat(),
+            }
+        )
         output_paths = _write_status_files(output_dir, payload)
         _json_dump({**payload, "status_files": output_paths})
         raise SystemExit(1)
-    now_kst = datetime.now(ZoneInfo("Asia/Seoul"))
+    if score_check["blocked_reasons"]:
+        blocked_reason = _primary_blocked_reason(score_check["blocked_reasons"])
+        payload.update(
+            {
+                "status": "blocked",
+                "blocked_reason": blocked_reason,
+                "freshness_blocked_reason": "STALE_SCORE_DATE" if blocked_reason == "STALE_SCORE_DATE" else payload.get("freshness_blocked_reason"),
+                "recommended_next_actions": _next_actions_for_blocked_reason(blocked_reason),
+                "next_actions": _next_actions_for_blocked_reason(blocked_reason),
+            }
+        )
+        output_paths = _write_status_files(output_dir, payload)
+        _json_dump({**payload, "status_files": output_paths})
+        raise SystemExit(1)
     if (
         not args.dry_run
         and not args.allow_partial_session_collection

@@ -16,6 +16,7 @@ Safety rules:
 - The job should run after the close, e.g. after 15:45 KST. The template uses 16:10 KST.
 - End-of-day ops runs DAY replay first with `score_date < D`, then refreshes D daily prices/scores for D+1 readiness.
 - D post-close scores must never be used for D intraday replay.
+- Actual KIS intraday collection is blocked on weekends and likely non-trading days. Use `--dry-run` for weekend status checks or pass `--trade-date YYYY-MM-DD` for explicit historical dry-runs.
 
 Example manual run:
 
@@ -50,8 +51,27 @@ Interpretation:
 - 20 complete sessions is the first analysis candidate threshold.
 - 60 complete sessions is more meaningful for validation, still not LIVE approval.
 - If `STALE_SCORE_DATE` appears, update daily prices and regenerate SWING daily_scores before rerunning daily ops.
+- `STALE_SCORE_DATE` means the latest usable `daily_scores.date` is older than the configured freshness limit. Check `latest_score_date`, `requested_trade_date`, `score_staleness_days`, and `recommended_next_actions` in `day_eod_ops_status.md/json`.
 - If daily refresh fails, the next run may be blocked by `STALE_SCORE_DATE`; inspect `day_eod_ops_status.md`.
 - If partial sessions are excluded, check `reports/daily_ops/day_ops_status.md` for `excluded_partial_dates` and the next complete-day counts.
+
+Daily score catch-up dry-run:
+
+```bash
+/Users/jwlee/Projects/krx-stock/.venv/bin/python \
+  /Users/jwlee/Projects/krx-stock/scripts/run_kis_end_of_day_ops.py \
+  --db /Users/jwlee/Projects/krx-stock/data/market_pipeline.db \
+  --trade-date 2026-05-16 \
+  --refresh-daily-only \
+  --catch-up-daily-scores \
+  --daily-refresh-start-date 2026-05-12 \
+  --daily-refresh-end-date 2026-05-16 \
+  --daily-prices-output /Users/jwlee/Projects/krx-stock/data/public_daily_prices_eod.csv \
+  --universe-csv /Users/jwlee/Projects/krx-stock/data/krx_source_universe_500.csv \
+  --dry-run
+```
+
+This skips KIS intraday collection and DAY replay. It only plans the public/no-secret daily price refresh and SWING score catch-up dates.
 
 launchd setup:
 

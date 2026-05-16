@@ -54,8 +54,60 @@ def _append_paper_account_args(command: list[str], args: argparse.Namespace) -> 
             command.extend([option, str(value)])
 
 
-def _auto_trade_date() -> str:
+def _auto_trade_date(today_override: str | None = None) -> str:
+    if today_override:
+        return today_override
     return datetime.now(ZoneInfo("Asia/Seoul")).date().isoformat()
+
+
+def _is_weekend(trade_date: str) -> bool:
+    return date.fromisoformat(trade_date).weekday() >= 5
+
+
+def _weekday_dates(start_date: str, end_date: str) -> list[str]:
+    cur = date.fromisoformat(start_date)
+    end = date.fromisoformat(end_date)
+    days: list[str] = []
+    while cur <= end:
+        if cur.weekday() < 5:
+            days.append(cur.isoformat())
+        cur += timedelta(days=1)
+    return days
+
+
+def _trade_date_metadata(trade_date: str, *, auto_trade_date: bool) -> dict[str, Any]:
+    is_weekend = _is_weekend(trade_date)
+    return {
+        "requested_trade_date": trade_date,
+        "is_weekend": is_weekend,
+        "is_likely_trading_day": not is_weekend,
+        "auto_trade_date_source": "KST_TODAY" if auto_trade_date else "EXPLICIT_TRADE_DATE",
+    }
+
+
+def _latest_known_dates(conn, market_symbol: str) -> dict[str, Any]:
+    latest_score = conn.execute("SELECT MAX(date) AS d FROM daily_scores").fetchone()
+    latest_daily_price = conn.execute("SELECT MAX(date) AS d FROM daily_prices").fetchone()
+    latest_intraday = conn.execute("SELECT MAX(date) AS d FROM intraday_prices").fetchone()
+    latest_market_full = conn.execute(
+        """
+        SELECT date
+        FROM intraday_prices
+        WHERE symbol=? AND timeframe='5m'
+        GROUP BY date
+        HAVING COUNT(*) >= 70
+        ORDER BY date DESC
+        LIMIT 1
+        """,
+        (market_symbol,),
+    ).fetchone()
+    return {
+        "latest_score_date": latest_score["d"] if latest_score else None,
+        "latest_known_score_date": latest_score["d"] if latest_score else None,
+        "latest_known_daily_price_date": latest_daily_price["d"] if latest_daily_price else None,
+        "latest_known_intraday_date": latest_intraday["d"] if latest_intraday else None,
+        "latest_complete_replay_date": latest_market_full["date"] if latest_market_full else None,
+    }
 
 
 def _next_weekday(value: str) -> str:
@@ -126,6 +178,30 @@ def _next_actions_for_daily_refresh(reason: str | None) -> list[str]:
     return []
 
 
+def _next_actions_for_blocked_reason(reason: str | None) -> list[str]:
+    if reason == "STALE_SCORE_DATE":
+        return [
+            "Fetch or load the latest daily_prices before the requested trade_date.",
+            "Regenerate SWING daily_features and daily_scores.",
+            "Run scripts/run_kis_end_of_day_ops.py again after the next market close.",
+            "For historical validation, pass --trade-date YYYY-MM-DD explicitly.",
+        ]
+    if reason in {"NON_TRADING_DAY", "WEEKEND_NON_TRADING_DAY"}:
+        return [
+            "Do not run actual KIS intraday collection on weekends or holidays.",
+            "Run again after the next market close.",
+            "Use --dry-run for weekend status checks or --trade-date YYYY-MM-DD for explicit historical dry-runs.",
+        ]
+    if reason == "NO_PRIOR_SCORE_DATE":
+        return [
+            "Load or generate daily_scores for a date before the replay trade_date.",
+            "Do not use same-day post-close scores for intraday replay.",
+        ]
+    if reason == "SAME_DAY_SCORE_FORBIDDEN":
+        return ["Regenerate or load a prior daily_scores date; same-day post-close scores are forbidden for replay."]
+    return _next_actions_for_daily_refresh(reason)
+
+
 def _write_status_files(output_dir: Path, payload: dict[str, Any]) -> dict[str, str]:
     output_dir.mkdir(parents=True, exist_ok=True)
     json_path = output_dir / "day_eod_ops_status.json"
@@ -136,6 +212,13 @@ def _write_status_files(output_dir: Path, payload: dict[str, Any]) -> dict[str, 
         "",
         f"- status: {payload.get('status')}",
         f"- blocked_reason: {payload.get('blocked_reason')}",
+        f"- requested_trade_date: {payload.get('requested_trade_date')}",
+        f"- is_weekend: {payload.get('is_weekend')}",
+        f"- is_likely_trading_day: {payload.get('is_likely_trading_day')}",
+        f"- auto_trade_date_source: {payload.get('auto_trade_date_source')}",
+        f"- latest_known_score_date: {payload.get('latest_known_score_date')}",
+        f"- latest_known_intraday_date: {payload.get('latest_known_intraday_date')}",
+        f"- latest_complete_replay_date: {payload.get('latest_complete_replay_date')}",
         f"- replay_trade_date: {payload.get('replay_trade_date')}",
         f"- score_date_used_for_replay: {payload.get('score_date_used_for_replay')}",
         f"- replay_uses_same_day_score: {payload.get('replay_uses_same_day_score')}",
@@ -148,10 +231,18 @@ def _write_status_files(output_dir: Path, payload: dict[str, Any]) -> dict[str, 
         f"- score_staleness_days_before_refresh: {payload.get('score_staleness_days_before_refresh')}",
         f"- score_staleness_days_after_refresh: {payload.get('score_staleness_days_after_refresh')}",
         f"- daily_refresh_blocked_reason: {payload.get('daily_refresh_blocked_reason')}",
+        f"- latest_score_date: {payload.get('latest_score_date')}",
+        f"- requested_trade_date: {payload.get('requested_trade_date')}",
+        f"- score_staleness_days: {payload.get('score_staleness_days')}",
+        f"- max_score_staleness_days: {payload.get('max_score_staleness_days')}",
+        f"- freshness_blocked_reason: {payload.get('freshness_blocked_reason')}",
+        f"- next_action_summary: {payload.get('next_action_summary')}",
+        f"- stale_score_resolution_hint: {payload.get('stale_score_resolution_hint')}",
         f"- complete_replayable_days: {payload.get('rolling_summary', {}).get('complete_replayable_days', [])}",
         f"- partial_replayable_days: {payload.get('rolling_summary', {}).get('partial_replayable_days', [])}",
         f"- excluded_partial_dates: {payload.get('rolling_summary', {}).get('excluded_partial_dates', [])}",
         f"- next_actions: {payload.get('next_actions', [])}",
+        f"- recommended_next_actions: {payload.get('recommended_next_actions', [])}",
         "",
         "D replay uses only score_date < D. Any score generated for D is for the next trade date only.",
         "This status file is operational metadata and is not a profitability claim.",
@@ -275,11 +366,73 @@ def _daily_refresh(
     }
 
 
+def _daily_refresh_catchup(
+    *,
+    db_path: Path,
+    start_date: str,
+    end_date: str,
+    daily_prices_output: str,
+    universe_csv: str,
+    market_symbol: str,
+    top_n: int,
+    sleep_seconds: float,
+    daily_max_symbols: int,
+    dry_run: bool,
+) -> dict[str, Any]:
+    dates = _weekday_dates(start_date, end_date)
+    plan = {
+        "start_date": start_date,
+        "end_date": end_date,
+        "weekday_dates": dates,
+        "intraday_collection": "skipped",
+        "replay": "skipped",
+    }
+    if dry_run:
+        return {
+            "status": "dry_run",
+            "daily_refresh_ran_after_replay": False,
+            "catch_up_daily_scores": True,
+            "plan": plan,
+        }
+    results: list[dict[str, Any]] = []
+    for refresh_date in dates:
+        result = _daily_refresh(
+            db_path=db_path,
+            trade_date=refresh_date,
+            next_trade_date=_next_weekday(refresh_date),
+            daily_prices_output=daily_prices_output,
+            universe_csv=universe_csv,
+            market_symbol=market_symbol,
+            top_n=top_n,
+            sleep_seconds=sleep_seconds,
+            daily_max_symbols=daily_max_symbols,
+            dry_run=False,
+        )
+        result["refresh_date"] = refresh_date
+        results.append(result)
+        if result.get("status") == "blocked":
+            return {
+                "status": "blocked",
+                "daily_refresh_blocked_reason": result.get("daily_refresh_blocked_reason"),
+                "catch_up_daily_scores": True,
+                "plan": plan,
+                "results": results,
+            }
+    return {
+        "status": "ok",
+        "daily_refresh_ran_after_replay": False,
+        "catch_up_daily_scores": True,
+        "plan": plan,
+        "results": results,
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run quote-only KIS end-of-day DAY ops and next-day SWING score refresh")
     parser.add_argument("--db", default="data/market_pipeline.db")
     parser.add_argument("--trade-date", default=None)
     parser.add_argument("--auto-trade-date", action="store_true")
+    parser.add_argument("--today-override", default=None, help=argparse.SUPPRESS)
     parser.add_argument("--market-symbol", default="069500")
     parser.add_argument("--top-n", type=int, default=20)
     parser.add_argument("--max-symbols", type=int, default=20)
@@ -298,6 +451,10 @@ def main() -> None:
     parser.add_argument("--daily-prices-output", default="data/public_daily_prices_eod.csv")
     parser.add_argument("--universe-csv", default="data/krx_source_universe_500.csv")
     parser.add_argument("--refresh-daily-after-replay", action="store_true")
+    parser.add_argument("--refresh-daily-only", action="store_true", help="Run daily price/score refresh without intraday collection or replay")
+    parser.add_argument("--catch-up-daily-scores", action="store_true", help="Plan or run daily score catch-up over a date range without intraday replay")
+    parser.add_argument("--daily-refresh-start-date", default=None)
+    parser.add_argument("--daily-refresh-end-date", default=None)
     parser.add_argument("--skip-daily-refresh", action="store_true")
     parser.add_argument("--skip-intraday-collection", action="store_true")
     parser.add_argument("--skip-replay", action="store_true")
@@ -314,7 +471,7 @@ def main() -> None:
     parser.add_argument("--allow-stale-score", action="store_true")
     args = parser.parse_args()
 
-    trade_date = args.trade_date or (_auto_trade_date() if args.auto_trade_date else None)
+    trade_date = args.trade_date or args.daily_refresh_end_date or (_auto_trade_date(args.today_override) if args.auto_trade_date else None)
     output_dir = Path(args.output_dir)
     db_path = Path(args.db)
     payload: dict[str, Any] = {
@@ -328,12 +485,17 @@ def main() -> None:
         "max_symbols": args.max_symbols,
         "zero_volume_bar_policy": args.zero_volume_bar_policy,
         "compare_zero_volume_policies": bool(args.compare_zero_volume_policies),
-        "daily_refresh_enabled": bool(args.refresh_daily_after_replay and not args.skip_daily_refresh),
+        "daily_refresh_enabled": bool((args.refresh_daily_after_replay or args.refresh_daily_only or args.catch_up_daily_scores) and not args.skip_daily_refresh),
         "include_partial_sessions": bool(args.include_partial_sessions),
         "daily_refresh_ran_after_replay": False,
         "dry_run": bool(args.dry_run),
+        "refresh_daily_only": bool(args.refresh_daily_only),
+        "catch_up_daily_scores": bool(args.catch_up_daily_scores),
         "operation_order": [],
+        "max_score_staleness_days": args.max_score_staleness_days,
     }
+    if trade_date:
+        payload.update(_trade_date_metadata(trade_date, auto_trade_date=bool(args.auto_trade_date)))
     if not trade_date:
         payload.update({"status": "blocked", "blocked_reason": "TRADE_DATE_REQUIRED", "next_actions": ["Pass --trade-date YYYY-MM-DD or --auto-trade-date."]})
         payload["status_files"] = _write_status_files(output_dir, payload)
@@ -354,6 +516,7 @@ def main() -> None:
 
     conn = get_connection(db_path)
     init_db(conn)
+    payload.update(_latest_known_dates(conn, args.market_symbol))
     before = _score_selection(conn, trade_date, args.market_symbol, args.top_n)
     conn.close()
     payload.update(
@@ -361,21 +524,100 @@ def main() -> None:
             "score_date_used_for_replay": before.get("score_date_used_for_replay"),
             "replay_uses_same_day_score": bool(before.get("same_day_score_used")),
             "score_staleness_days_before_refresh": before.get("score_staleness_days"),
+            "score_staleness_days": before.get("score_staleness_days"),
+            "latest_score_date": payload.get("latest_score_date"),
+            "freshness_blocked_reason": "STALE_SCORE_DATE"
+            if before.get("score_staleness_days") is not None and int(before.get("score_staleness_days") or 0) > args.max_score_staleness_days
+            else None,
             "score_date_check_before_refresh": before,
+            "recommended_next_actions": _next_actions_for_blocked_reason("STALE_SCORE_DATE")
+            if before.get("score_staleness_days") is not None and int(before.get("score_staleness_days") or 0) > args.max_score_staleness_days
+            else [],
         }
     )
+    if (args.refresh_daily_only or args.catch_up_daily_scores) and not args.skip_daily_refresh:
+        start_date = args.daily_refresh_start_date or trade_date
+        end_date = args.daily_refresh_end_date or trade_date
+        payload["operation_order"].append("daily_refresh_only_no_intraday_replay")
+        refresh_result = _daily_refresh_catchup(
+            db_path=db_path,
+            start_date=start_date,
+            end_date=end_date,
+            daily_prices_output=args.daily_prices_output,
+            universe_csv=args.universe_csv,
+            market_symbol=args.market_symbol,
+            top_n=args.top_n,
+            sleep_seconds=args.sleep_seconds,
+            daily_max_symbols=int(args.daily_max_symbols or max(args.top_n, args.max_symbols)),
+            dry_run=bool(args.dry_run),
+        )
+        payload["daily_refresh"] = refresh_result
+        payload["daily_refresh_ran_after_replay"] = False
+        payload["daily_refresh_blocked_reason"] = refresh_result.get("daily_refresh_blocked_reason")
+        payload["intraday_ops"] = {"status": "skipped", "reason": "REFRESH_DAILY_ONLY"}
+        payload["rolling_summary"] = {
+            "complete_replayable_days": [],
+            "partial_replayable_days": [],
+            "excluded_partial_dates": [],
+            "blocked_windows": [],
+        }
+        if refresh_result.get("status") == "blocked":
+            payload.update(
+                {
+                    "status": "blocked",
+                    "blocked_reason": refresh_result.get("daily_refresh_blocked_reason") or "DAILY_REFRESH_FAILED",
+                    "next_actions": _next_actions_for_daily_refresh(refresh_result.get("daily_refresh_blocked_reason")),
+                }
+            )
+        else:
+            payload["status"] = refresh_result.get("status", "ok")
+            payload["next_actions"] = [
+                "Daily refresh catch-up plan completed without intraday collection.",
+                "Run normal EOD ops after the next market close when score_date < trade_date is ready.",
+            ]
+        payload["next_action_summary"] = "; ".join(payload.get("next_actions", []))
+        payload["status_files"] = _write_status_files(output_dir, payload)
+        _json_dump(payload)
+        if payload["status"] == "blocked":
+            raise SystemExit(1)
+        return
     if before.get("same_day_score_used"):
-        payload.update({"status": "blocked", "blocked_reason": "SAME_DAY_SCORE_FORBIDDEN", "next_actions": ["Regenerate or load a prior daily_scores date; do not use same-day post-close scores for replay."]})
+        payload.update({"status": "blocked", "blocked_reason": "SAME_DAY_SCORE_FORBIDDEN", "next_actions": _next_actions_for_blocked_reason("SAME_DAY_SCORE_FORBIDDEN")})
         payload["status_files"] = _write_status_files(output_dir, payload)
         _json_dump(payload)
         raise SystemExit(1)
     if not before.get("score_date"):
-        payload.update({"status": "blocked", "blocked_reason": "NO_PRIOR_SCORE_DATE", "next_actions": ["Load or generate daily_scores for a date before the replay trade_date."]})
+        payload.update({"status": "blocked", "blocked_reason": "NO_PRIOR_SCORE_DATE", "next_actions": _next_actions_for_blocked_reason("NO_PRIOR_SCORE_DATE")})
+        payload["status_files"] = _write_status_files(output_dir, payload)
+        _json_dump(payload)
+        raise SystemExit(1)
+    now_kst = datetime.now(ZoneInfo("Asia/Seoul"))
+    if not args.dry_run and not args.skip_intraday_collection and _is_weekend(trade_date):
+        payload.update(
+            {
+                "status": "blocked",
+                "blocked_reason": "WEEKEND_NON_TRADING_DAY",
+                "next_actions": _next_actions_for_blocked_reason("WEEKEND_NON_TRADING_DAY"),
+                "recommended_next_actions": _next_actions_for_blocked_reason("WEEKEND_NON_TRADING_DAY"),
+                "current_kst": now_kst.isoformat(),
+            }
+        )
+        payload["next_action_summary"] = "; ".join(payload["next_actions"])
         payload["status_files"] = _write_status_files(output_dir, payload)
         _json_dump(payload)
         raise SystemExit(1)
     if int(before.get("score_staleness_days") or 0) > args.max_score_staleness_days and not args.allow_stale_score:
-        payload.update({"status": "blocked", "blocked_reason": "STALE_SCORE_DATE", "next_actions": ["Run end-of-day daily refresh after replay, or refresh daily_prices/daily_scores before the next session."]})
+        payload.update(
+            {
+                "status": "blocked",
+                "blocked_reason": "STALE_SCORE_DATE",
+                "freshness_blocked_reason": "STALE_SCORE_DATE",
+                "recommended_next_actions": _next_actions_for_blocked_reason("STALE_SCORE_DATE"),
+                "next_actions": _next_actions_for_blocked_reason("STALE_SCORE_DATE"),
+                "next_action_summary": "; ".join(_next_actions_for_blocked_reason("STALE_SCORE_DATE")),
+                "stale_score_resolution_hint": "Refresh daily_prices and regenerate SWING daily_scores before the next trading-day run.",
+            }
+        )
         payload["status_files"] = _write_status_files(output_dir, payload)
         _json_dump(payload)
         raise SystemExit(1)
@@ -486,7 +728,13 @@ def main() -> None:
     payload["score_ready_for_next_trade_date"] = refresh_result.get("score_ready_for_next_trade_date")
     payload["score_staleness_days_after_refresh"] = 1 if refresh_result.get("score_ready_for_next_trade_date") else None
     if payload.get("blocked_reason") and "next_actions" not in payload:
-        payload["next_actions"] = _next_actions_for_daily_refresh(payload.get("blocked_reason"))
+        payload["next_actions"] = _next_actions_for_blocked_reason(payload.get("blocked_reason"))
+    if "recommended_next_actions" not in payload:
+        payload["recommended_next_actions"] = payload.get("next_actions", [])
+    if "next_action_summary" not in payload:
+        payload["next_action_summary"] = "; ".join(payload.get("next_actions", []))
+    if "stale_score_resolution_hint" not in payload and payload.get("freshness_blocked_reason") == "STALE_SCORE_DATE":
+        payload["stale_score_resolution_hint"] = "Refresh daily_prices and regenerate SWING daily_scores before the next trading-day run."
     payload["status_files"] = _write_status_files(output_dir, payload)
     _json_dump(payload)
     if payload["status"] == "blocked":

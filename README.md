@@ -402,6 +402,8 @@ python3 scripts/run_kis_daily_ops.py \
 - 수집 CSV, DB, reports, token cache는 commit하지 않습니다.
 - 주문/계좌/잔고/체결 API는 사용하지 않습니다.
 - 현재 trade_date 수집은 기본적으로 장마감 이후에만 실행합니다. `run_kis_daily_ops.py`는 KST 기준 `--earliest-run-time` 이전의 current-day non-dry-run 수집을 `BEFORE_POST_CLOSE_COLLECTION_WINDOW`로 차단합니다.
+- 주말/휴장일에는 actual KIS intraday collection을 실행하지 않습니다. `--auto-trade-date`가 토요일/일요일을 가리키면 dry-run 상태 점검은 가능하지만, non-dry-run 수집은 `WEEKEND_NON_TRADING_DAY`로 fail-closed 됩니다.
+- 주말에 상태만 확인하려면 `--dry-run`을 사용하고, 과거 검증 목적이면 `--trade-date YYYY-MM-DD`로 명시 날짜를 지정합니다.
 
 daily_scores 최신성 차단 시 다음 순서로 갱신합니다.
 
@@ -484,6 +486,25 @@ EOD 순서:
 10. `generated_daily_score_date=D`, `score_ready_for_next_trade_date=True` 확인
 
 refresh가 실패하면 status에 `DAILY_PRICE_FETCH_FAILED`, `DAILY_PRICE_FOR_TRADE_DATE_MISSING`, `DAILY_SCORES_GENERATION_FAILED`, `NEXT_DAY_SCORE_DATE_NOT_GENERATED` 같은 blocked reason이 기록됩니다. 이런 경우 다음 거래일 daily ops는 `STALE_SCORE_DATE`로 막힐 수 있으므로, 최신 daily_prices를 수집하거나 승인된 CSV를 적재한 뒤 SWING scoring을 다시 생성하세요.
+
+`STALE_SCORE_DATE`는 replay에 사용할 수 있는 최신 `daily_scores.date`가 requested `trade_date`보다 너무 오래됐다는 뜻입니다. 상태 파일에는 `latest_score_date`, `requested_trade_date`, `score_staleness_days`, `max_score_staleness_days`, `freshness_blocked_reason`, `recommended_next_actions`가 함께 기록됩니다. 해결 순서는 최신 daily_prices 수집, SWING daily_features/daily_scores 재생성, 다음 거래일 장마감 후 EOD run 재실행입니다.
+
+주말이나 데이터 누락 상태에서 daily score 갱신 계획만 확인하려면 intraday collection 없이 catch-up dry-run을 사용할 수 있습니다.
+
+```bash
+python3 scripts/run_kis_end_of_day_ops.py \
+  --db data/market_pipeline.db \
+  --trade-date 2026-05-16 \
+  --refresh-daily-only \
+  --catch-up-daily-scores \
+  --daily-refresh-start-date 2026-05-12 \
+  --daily-refresh-end-date 2026-05-16 \
+  --daily-prices-output data/public_daily_prices_eod.csv \
+  --universe-csv data/krx_source_universe_500.csv \
+  --dry-run
+```
+
+이 모드는 KIS intraday 수집과 DAY replay를 건너뛰고, public/no-secret daily price refresh와 SWING scoring 대상 날짜만 계획합니다. 실제 DB 변경이나 public fetch는 명시적으로 dry-run을 제거한 경우에만 수행합니다.
 
 EOD 상태 파일:
 
