@@ -85,7 +85,7 @@ if [ -z "${CHAT_ID:-}" ]; then
   exit 3
 fi
 
-curl -sS -X POST "https://api.telegram.org/bot${TOKEN}/sendMessage" \
+curl -sS --fail-with-body -X POST "https://api.telegram.org/bot${TOKEN}/sendMessage" \
   --data-urlencode "chat_id=${CHAT_ID}" \
   --data-urlencode "text@${OUT}" \
   --data-urlencode "disable_web_page_preview=true" >/dev/null

@@ -61,24 +61,60 @@ latest_pipeline_log() {
   ls -t "$HOME/krx-stock-persist/logs"/mac_market_db_update_*.log 2>/dev/null | head -1 || true
 }
 
+is_baseline_pipeline_stage() {
+  case "$1" in
+    baseline_old_daily_ops|update_mac_market_db|mac_market_db_update)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
 detect_failure_reason() {
   local stage="$1"
   local exit_code="$2"
   local log_path
   log_path="$(latest_pipeline_log)"
 
-  if [ -n "$log_path" ] && grep -Eiq "get_market_ohlcv_by_ticker|pykrx|KeyError|None of .*시가|None of .*고가|None of .*저가|None of .*종가" "$log_path"; then
-    echo "pykrx provider failure; fallback available but not applied to production DB"
-    return 0
-  fi
-
-  if [ -n "$log_path" ] && grep -Eiq "timed out|TimeoutExpired|pipeline timeout" "$log_path"; then
-    echo "pipeline timeout; fallback available but not applied to production DB"
-    return 0
-  fi
-
   if [ "$stage" = "stale_success_check" ]; then
     echo "stale DB/report detected before success Telegram; calendar validation uncertain"
+    return 0
+  fi
+
+  if [ "$stage" = "half_shadow_addendum" ]; then
+    echo "half-shadow addendum failed with exit_code=$exit_code"
+    return 0
+  fi
+
+  if [ "$stage" = "integrated_summary" ]; then
+    echo "integrated summary generation failed with exit_code=$exit_code"
+    return 0
+  fi
+
+  if [ "$stage" = "telegram_summary" ]; then
+    echo "Telegram summary send failed with exit_code=$exit_code"
+    return 0
+  fi
+
+  if [ "$stage" = "html_report_send" ]; then
+    echo "HTML report send failed with exit_code=$exit_code"
+    return 0
+  fi
+
+  if is_baseline_pipeline_stage "$stage"; then
+    if [ -n "$log_path" ] && grep -Eiq "get_market_ohlcv_by_ticker|pykrx|KeyError|None of .*시가|None of .*고가|None of .*저가|None of .*종가" "$log_path"; then
+      echo "pykrx provider failure; fallback available but not applied to production DB"
+      return 0
+    fi
+
+    if [ -n "$log_path" ] && grep -Eiq "timed out|TimeoutExpired|pipeline timeout" "$log_path"; then
+      echo "pipeline timeout; fallback available but not applied to production DB"
+      return 0
+    fi
+
+    echo "baseline pipeline failed with exit_code=$exit_code"
     return 0
   fi
 
