@@ -126,3 +126,42 @@ echo "7) Send integrated KRX daily summary to Telegram"
 echo "------------------------------------------------------------"
 set_stage "telegram_summary"
 bash "$HOME/Projects/krx-stock/scripts/local/send_krx_daily_telegram_summary.sh"
+
+echo ""
+echo "------------------------------------------------------------"
+echo "8) Build candidate shadow report-only daily summary"
+echo "------------------------------------------------------------"
+set_stage "candidate_shadow_report_only"
+EXP82_MONITOR="$HOME/Projects/krx-stock/scripts/research/run_exp82_candidate_shadow_monitor.py"
+EXP83_SUMMARY="$HOME/Projects/krx-stock/scripts/research/build_exp83_candidate_shadow_daily_summary.py"
+if [ -f "$EXP82_MONITOR" ]; then
+  if ! "$PYTHON_BIN" "$EXP82_MONITOR" \
+    --db "$HOME/krx-stock-persist/data/kospi_495_rolling_3y.db" \
+    --reports-dir "$HOME/krx-stock-persist/reports/paper_trading" \
+    --ops-ledger "$HOME/krx-stock-persist/reports/paper_trading/krx_daily_ops_ledger.csv" \
+    --exp81-latest "$HOME/krx-stock-persist/reports/research/exp81/exp81_candidate_shadow_latest.csv" \
+    --exp81-metadata "$HOME/krx-stock-persist/reports/research/exp81/exp81_metadata_latest.json" \
+    --exp80a-forward "$HOME/krx-stock-persist/reports/research/exp80a_pool100/exp80a_candidate_forward_outcomes_20260605_015825.csv" \
+    --exp80a-snapshot "$HOME/krx-stock-persist/reports/research/exp80a_pool100/exp80a_candidate_snapshot_20260605_015825.csv" \
+    --exp80d-entry-paths "$HOME/krx-stock-persist/reports/research/exp80d/exp80d_candidate_entry_paths_20260605_124812.csv" \
+    --exp80d-rule-summary "$HOME/krx-stock-persist/reports/research/exp80d/exp80d_rule_timing_summary_20260605_124812.csv" \
+    --out-dir "$HOME/krx-stock-persist/reports/research/exp82" \
+    --append-ledger; then
+    echo "WARN: Exp82 candidate shadow monitor failed; continuing daily ops success flow"
+  fi
+else
+  echo "WARN: Exp82 candidate shadow monitor not found; skipping Exp82 refresh"
+fi
+if ! "$PYTHON_BIN" "$EXP83_SUMMARY" \
+  --exp82-latest "$HOME/krx-stock-persist/reports/research/exp82/exp82_shadow_label_latest.csv" \
+  --exp82-performance "$HOME/krx-stock-persist/reports/research/exp82/exp82_label_performance_summary_latest.csv" \
+  --exp82-metadata "$HOME/krx-stock-persist/reports/research/exp82/exp82_metadata_latest.json" \
+  --paper-reports-dir "$HOME/krx-stock-persist/reports/paper_trading" \
+  --ops-ledger "$HOME/krx-stock-persist/reports/paper_trading/krx_daily_ops_ledger.csv" \
+  --out-dir "$HOME/krx-stock-persist/reports/research/exp83" \
+  --hermes-dir "$HOME/.hermes/krx"; then
+  echo "WARN: Exp83 candidate shadow daily summary failed; continuing daily ops success flow"
+fi
+if [ -f "$HOME/.hermes/krx/latest_candidate_shadow_summary.md" ]; then
+  ls -lh "$HOME/.hermes/krx/latest_candidate_shadow_summary.md"
+fi
