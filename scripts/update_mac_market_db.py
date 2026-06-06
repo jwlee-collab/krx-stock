@@ -5,9 +5,11 @@ import argparse
 import sqlite3
 import subprocess
 import sys
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
+
+PIPELINE_TIMEOUT_SECONDS = 3600
 
 BASELINE_ARGS = [
     "--source", "krx",
@@ -51,6 +53,55 @@ def parse_args() -> argparse.Namespace:
 def fail(message: str) -> None:
     print(f"FAIL: {message}", file=sys.stderr)
     raise SystemExit(1)
+
+
+def read_log_tail(log_path: Path, max_chars: int = 20000) -> str:
+    if not log_path.exists():
+        return ""
+    try:
+        text = log_path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return ""
+    return text[-max_chars:]
+
+
+def classify_pipeline_failure(log_path: Path, *, timed_out: bool = False) -> str:
+    tail = read_log_tail(log_path).lower()
+    pykrx_markers = [
+        "pykrx",
+        "get_market_ohlcv_by_ticker",
+        "none of [index(['시가'",
+        "none of [index(['고가'",
+        "none of [index(['저가'",
+        "none of [index(['종가'",
+        "keyerror",
+    ]
+    if any(marker in tail for marker in pykrx_markers):
+        return "pykrx/provider failure"
+    if timed_out:
+        return "pipeline timeout"
+    if "timeoutexpired" in tail or "timed out" in tail:
+        return "pipeline timeout"
+    return "pipeline failure"
+
+
+def fail_pipeline(reason: str, log_path: Path, **fields: object) -> None:
+    parts = [
+        "stage=baseline_old pipeline",
+        f"reason={reason}",
+        f"log={log_path}",
+        "production_fallback_applied=false",
+        "fallback_available_but_not_applied_to_production_db=true",
+    ]
+    parts.extend(f"{key}={value}" for key, value in fields.items())
+    fail("; ".join(parts))
+
+
+def is_weekday(value: str) -> bool:
+    try:
+        return date.fromisoformat(value).weekday() < 5
+    except ValueError:
+        return True
 
 
 def ensure_exists(path: Path, description: str) -> None:
@@ -174,13 +225,25 @@ def main() -> None:
     print(f"[precheck] latest_results_date={precheck_results_date}")
     print(f"[precheck] latest_holdings_date={precheck_holdings_date}")
 
-    is_noop_ready = (
+    # A DB is internally consistent when latest_signal/results/holdings dates match.
+    # But for scheduled daily ops, that is not enough: if --end-date is newer than
+    # the DB latest date, we must still run the pipeline.
+    target_end_date = args.end_date
+
+    is_internally_consistent = (
         before_signal is not None
         and precheck_run_id is not None
         and precheck_results_date == before_signal
         and precheck_holdings_date == before_signal
         and precheck_results_date == precheck_holdings_date
     )
+
+    is_fresh_enough_for_requested_end = (
+        target_end_date is None
+        or (before_signal is not None and before_signal >= target_end_date)
+    )
+
+    is_noop_ready = is_internally_consistent and is_fresh_enough_for_requested_end
 
     if is_noop_ready and not args.force:
         print("PASS: Mac market DB update completed. Database was already up to date.")
@@ -205,10 +268,28 @@ def main() -> None:
     print(f"[cmd] {' '.join(cmd)}")
 
     if not args.dry_run:
-        with log_path.open("w", encoding="utf-8") as lf:
-            proc = subprocess.run(cmd, stdout=lf, stderr=subprocess.STDOUT, text=True)
+        try:
+            with log_path.open("w", encoding="utf-8") as lf:
+                proc = subprocess.run(
+                    cmd,
+                    stdout=lf,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    timeout=PIPELINE_TIMEOUT_SECONDS,
+                )
+        except subprocess.TimeoutExpired:
+            fail_pipeline(
+                classify_pipeline_failure(log_path, timed_out=True),
+                log_path,
+                timeout_seconds=PIPELINE_TIMEOUT_SECONDS,
+            )
+
         if proc.returncode != 0:
-            fail(f"baseline_old pipeline run failed (see log: {log_path})")
+            fail_pipeline(
+                classify_pipeline_failure(log_path),
+                log_path,
+                returncode=proc.returncode,
+            )
 
     with connect_db(db_path) as conn:
         print_stats(conn, "after")
@@ -254,9 +335,16 @@ def main() -> None:
             )
 
         if args.end_date and after_signal < args.end_date:
+            if is_weekday(args.end_date):
+                fail(
+                    "stage=baseline_old freshness_check; reason=stale latest_signal_date; "
+                    f"target_date={args.end_date}; latest_signal_date={after_signal}; "
+                    "calendar_validation=weekday_only_uncertain; success_report_allowed=false"
+                )
             print(
                 "WARN: latest_signal_date is older than requested end-date "
-                f"(end-date={args.end_date}, latest_signal_date={after_signal})"
+                f"(end-date={args.end_date}, latest_signal_date={after_signal}); "
+                "calendar_validation=weekday_only_uncertain"
             )
 
     if before_signal and after_signal == before_signal:

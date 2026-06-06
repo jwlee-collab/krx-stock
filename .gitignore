@@ -4,6 +4,10 @@ __pycache__/
 *.pyd
 *.db
 *.sqlite
+/scripts/local/*
+!/scripts/local/run_krx_daily_with_half_shadow.sh
+!/scripts/local/run_krx_daily_with_half_shadow_scheduled.sh
+!/scripts/local/send_krx_daily_failure_telegram.sh
 
 # Generated data
 /data/*.csv
