@@ -8,6 +8,7 @@ __pycache__/
 !/scripts/local/run_krx_daily_with_half_shadow.sh
 !/scripts/local/run_krx_daily_with_half_shadow_scheduled.sh
 !/scripts/local/send_krx_daily_failure_telegram.sh
+!/scripts/local/send_krx_candidate_shadow_telegram_summary.sh
 
 # Generated data
 /data/*.csv
