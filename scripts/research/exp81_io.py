@@ -140,6 +140,10 @@ def table_names(conn: sqlite3.Connection) -> set[str]:
     return {stringify(row[0]) for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
 
 
+def columns(conn: sqlite3.Connection, table: str) -> list[str]:
+    return [stringify(row[1]) for row in conn.execute(f'PRAGMA table_info("{table}")')]
+
+
 def current_holdings(conn: sqlite3.Connection, as_of_date: str, run_id: str) -> set[str]:
     if not run_id or "backtest_holdings" not in table_names(conn):
         return set()
